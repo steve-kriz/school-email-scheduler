@@ -1,9 +1,10 @@
 ---
 id: TASK-001
 title: Terraform scaffold and repo structure mirroring ohq-chatbot2
-status: todo
+status: in-progress
 created: 2026-08-17T11:00:00Z
-updated: 2026-08-17T11:00:00Z
+updated: 2026-08-17T23:31:15Z
+agent: build-001
 ---
 
 ## Description
