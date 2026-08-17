@@ -1,0 +1,6 @@
+.claude-logs/
+node_modules/
+.terraform/
+*.tfstate*
+packages/*.zip
+.env
