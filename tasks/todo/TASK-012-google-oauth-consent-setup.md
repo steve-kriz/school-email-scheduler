@@ -1,9 +1,10 @@
 ---
 id: TASK-012
 title: Google OAuth client setup runbook and restricted-scope verification path
-status: todo
+status: in-progress
 created: 2026-08-18T09:00:00Z
-updated: 2026-08-18T09:00:00Z
+updated: 2026-08-17T23:50:32Z
+agent: build-012
 ---
 
 ## Description
