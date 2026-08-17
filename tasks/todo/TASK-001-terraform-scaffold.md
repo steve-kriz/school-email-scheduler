@@ -1,10 +1,10 @@
 ---
 id: TASK-001
 title: Terraform scaffold and repo structure mirroring ohq-chatbot2
-status: testing
+status: done
 created: 2026-08-17T11:00:00Z
-updated: 2026-08-17T23:38:17Z
-activities: [{"activity":"code","model":"claude-opus-5","startedAt":"2026-08-17T23:31:15Z","finishedAt":"2026-08-17T23:36:32Z","tokens":45157}]
+updated: 2026-08-17T23:50:16Z
+activities: [{"activity":"code","model":"claude-opus-5","startedAt":"2026-08-17T23:31:15Z","finishedAt":"2026-08-17T23:36:32Z","tokens":45157},{"activity":"test","model":"claude-haiku-4-5","startedAt":"2026-08-17T23:38:20Z","finishedAt":"2026-08-17T23:44:29Z","tokens":48018,"result":"pass","tests":77},{"activity":"review","model":"claude-opus-4-8","startedAt":"2026-08-17T23:45:55Z","finishedAt":"2026-08-17T23:48:15Z","tokens":52051,"verdict":"accept","followUps":["TASK-014","TASK-015"]}]
 ---
 
 ## Description
