@@ -1,10 +1,11 @@
 ---
 id: TASK-025
 title: Handler deps seam is reachable in production — make the test-only injection structural
-status: todo
+status: in-progress
 created: 2026-08-18T02:10:00Z
-updated: 2026-08-18T02:10:00Z
+updated: 2026-08-18T03:25:29Z
 review-of: TASK-004
+agent: build-025
 ---
 
 ## Description

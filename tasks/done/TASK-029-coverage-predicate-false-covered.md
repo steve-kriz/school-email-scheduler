@@ -1,11 +1,11 @@
 ---
 id: TASK-029
 title: Coverage predicate can report a directory as covered when it will not run
-status: pr-review
+status: done
 created: 2026-08-18T02:22:00Z
-updated: 2026-08-18T03:16:01Z
+updated: 2026-08-18T03:23:50Z
 review-of: TASK-023
-activities: [{"activity":"code","model":"claude-opus-5","tokens":77775,"note":"lexer segment model; disclosed a survived non-semantic mutation unprompted"},{"activity":"test","model":"claude-haiku-4-5","tokens":69136,"note":"101 tests. Orchestrator swept all 11 allowlist entries (2-6 fail each) and 10 lexer edge cases: all fail closed"}]
+activities: [{"activity":"review","model":"claude-opus-4-8","tokens":54105,"note":"no critical/high fail-open. Found unlisted path-valued flags after first positional report covered -> TASK-033 medium; unpinned lexer branches + dead value -> TASK-034. All reproduced by orchestrator"}]
 ---
 
 ## Description

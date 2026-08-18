@@ -1,11 +1,11 @@
 ---
 id: TASK-006
 title: Gmail message fetching with token refresh and incremental scanning
-status: testing
+status: done
 created: 2026-08-17T11:00:00Z
-updated: 2026-08-18T03:08:30Z
+updated: 2026-08-18T03:33:12Z
 depends-on: TASK-005
-activities: [{"activity":"code","model":"claude-opus-5","note":"google-token.mjs + gmail.mjs; 17/17 ACs verified by execution by orchestrator incl. base64url, attachment skip, head truncation, 403-no-retry, 429x4, deterministic backoff. 5 judgement calls documented in the summary"}]
+activities: [{"activity":"code","model":"claude-opus-5","tokens":88199,"note":"google-token.mjs + gmail.mjs; 17/17 ACs verified by execution"},{"activity":"test","model":"claude-haiku-4-5","tokens":219729,"note":"2 attempts; 112 tests"},{"activity":"review","model":"claude-opus-4-8","tokens":75765,"note":"ruled all 5 judgement calls acceptable incl. the UTC after: window (AU is always ahead of UTC so the window widens, never narrows). Log hygiene clean. Found the watermark unpinned + a truncation data-loss trap -> TASK-035; retry edges -> TASK-036. Both reproduced by orchestrator"}]
 ---
 
 ## Description

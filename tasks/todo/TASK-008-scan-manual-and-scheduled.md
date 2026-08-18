@@ -83,7 +83,37 @@ build). Add an `isScheduledScanEvent(event)` predicate, as the chatbot does with
   `SCAN_SCHEDULE_GROUP` (`default`), `SCAN_SCHEDULER_ROLE_ARN`,
   `CALENDAR_FUNCTION_ARN` (from the `locals` value, not the resource attribute).
 
+## Watermark precondition (from the TASK-006 review — read before building)
+Gmail's `users.messages.list` returns **newest-first**, and `listMessageIds`
+caps at `maxMessages` by keeping the ids it has already collected — so a capped
+scan retains the **newest** matches and drops the **oldest**. Meanwhile
+`fetchCandidateMessages` returns `newestReceivedAt` as the maximum across what it
+actually fetched.
+
+**Therefore: when a scan returns `truncated: true`, you must NOT advance the
+watermark to `newestReceivedAt`.** Doing so sets the next scan's `after:` date
+past every older match that fell beyond the cap, and those messages are never
+retrieved again — silent, permanent loss of the user's calendar emails, with a
+successful scan and no error to indicate it happened.
+
+This triggers on the **first** scan of any busy mailbox: the initial window is 90
+days and the cap is 200 messages.
+
+Handle it one of two ways, and state which you chose:
+- advance the watermark only to the **oldest** fetched message on a truncated
+  scan, so the next scan re-covers the gap; or
+- keep re-running the fetch until it returns `truncated: false`, then advance.
+
+TASK-035 owns hardening the `fetchCandidateMessages` docblock and pinning
+`newestReceivedAt`/`truncated` with tests. This ticket owns honouring the
+invariant.
+
 ## Acceptance Criteria
+- [ ] A scan that returns `truncated: true` does NOT advance the watermark to
+      `newestReceivedAt`; the chosen strategy is stated in a comment and proven by
+      a test.
+- [ ] A test asserts that after a truncated scan, the next scan's `after:` date
+      still covers the oldest message the truncated scan dropped.
 - [ ] `runScan` returns `not_configured` without calling Gmail when
       `searchDomains` is unset.
 - [ ] `since` is `lastScanAt` minus a 2-day overlap; a first-ever scan uses the
