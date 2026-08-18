@@ -32,6 +32,15 @@ import {
   serializeSessionCookie,
 } from "./backend/session.mjs";
 import { connectionUserId, getConnection, putConnection, toPublicJson } from "./backend/connections.mjs";
+import {
+  loadSettings,
+  parseJsonBody,
+  requireValidSettings,
+  saveSettings,
+  SETTINGS_PATH,
+  SettingsValidationError,
+  toSettingsJson,
+} from "./backend/settings.mjs";
 
 // ESM has no __dirname/__filename. Derive them from import.meta.url, exactly as
 // the chatbot Lambda does, so frontend assets can be read relative to the
@@ -202,7 +211,7 @@ function buildResponse(statusCode, body, contentType = "application/json", optio
 
   const multiValueHeaders = {
     "Content-Type": [contentType],
-    "Access-Control-Allow-Methods": ["GET, POST, DELETE, OPTIONS"],
+    "Access-Control-Allow-Methods": ["GET, POST, PUT, DELETE, OPTIONS"],
     "Access-Control-Allow-Headers": ["Content-Type, Authorization, X-Requested-With"],
     "Access-Control-Max-Age": ["86400"],
     "Cache-Control": ["no-cache"],
@@ -653,6 +662,211 @@ export async function routeAuthRequest(path, method, event, options = {}) {
   return null;
 }
 
+// --- Connection settings routes ---
+// What the user asked us to watch for: a school display name and the sender
+// domains that count as school mail. Validation and storage live in
+// backend/settings.mjs; this file only maps them onto HTTP.
+
+/**
+ * Resolve the caller's session, or the response that should be sent instead.
+ *
+ * Captures the ordering `handleAuthMe` established, because the order is a
+ * decision and not an accident:
+ *  1. No cookie at all -> 401. This is the ordinary "not signed in" case and must
+ *     not read as a server error, whatever the configuration is.
+ *  2. No SESSION_SECRET -> 500. A server that cannot verify a signature cannot
+ *     honestly say "not signed in"; the log names the variable, never a value.
+ *  3. Invalid/expired cookie -> 401.
+ *
+ * Authentication is resolved BEFORE any payload is parsed or validated, so an
+ * unauthenticated caller cannot use the settings endpoint as an oracle: every
+ * request without a session gets the same 401 and learns nothing about which
+ * fields exist, what they are called, or which of its values would be rejected.
+ *
+ * @param {object} event
+ * @param {{ env?: Record<string, string|undefined>, nowSeconds?: number }} [options]
+ * @returns {{ ok: true, claims: object } | { ok: false, statusCode: number, payload: object }}
+ */
+function resolveSession(event, { env = process.env, nowSeconds = Math.floor(Date.now() / 1000) } = {}) {
+  const token = getCookie(event, SESSION_COOKIE_NAME);
+  if (!token) {
+    return { ok: false, statusCode: 401, payload: { error: "Not signed in" } };
+  }
+
+  const sessionSecret = (env.SESSION_SECRET || "").trim();
+  if (!sessionSecret) {
+    logBasic("[Calendar] Session check failed - unset environment variables: SESSION_SECRET");
+    return { ok: false, statusCode: 500, payload: { error: "Sessions are not configured" } };
+  }
+
+  try {
+    // SessionError.reason is one of missing/malformed/signature/expired - never
+    // the cookie itself.
+    return { ok: true, claims: requireSession(event, { secret: sessionSecret, nowSeconds }) };
+  } catch (err) {
+    logBasic("[Calendar] Session rejected:", err?.reason || "invalid");
+    return { ok: false, statusCode: 401, payload: { error: "Not signed in" } };
+  }
+}
+
+/**
+ * GET /calendar/api/settings - the signed-in user's saved settings.
+ *
+ * Body is the `toSettingsJson` projection, which is built on `toPublicJson`: an
+ * allow-list, so `refreshTokenEnc` and every other unpublished attribute is
+ * absent by construction rather than by remembering to delete it.
+ *
+ * A read failure is a 500, NOT a 200 full of nulls. This is deliberately
+ * different from `/calendar/api/auth/me`, which reports an unknown connection
+ * state and keeps going: there, the useful answer (who is signed in) survives the
+ * failed read. Here the entire answer came from that read, and an empty form
+ * looks exactly like "you have never configured this" - so the user would retype
+ * their settings and a save would then overwrite good data.
+ *
+ * @param {object} event
+ * @param {object} [options]
+ * @param {string|null} [options.origin]
+ * @param {string[]} [options.allowlist]
+ * @param {Record<string, string|undefined>} [options.env]
+ * @param {number} [options.nowSeconds]
+ * @param {typeof getConnection} [options.getConnection] Injectable storage read.
+ * @returns {Promise<object>} ALB response.
+ */
+export async function handleGetSettings(event, options = {}) {
+  const {
+    origin = null,
+    allowlist,
+    env = process.env,
+    nowSeconds = Math.floor(Date.now() / 1000),
+    getConnection: loadConnection,
+  } = options;
+
+  const session = resolveSession(event, { env, nowSeconds });
+  if (!session.ok) {
+    return jsonResponse(session.statusCode, session.payload, { origin, allowlist });
+  }
+
+  let connection;
+  try {
+    connection = await loadSettings(session.claims.sub, { getConnection: loadConnection, env });
+  } catch (err) {
+    logBasic("[Calendar] Could not read connection settings:", {
+      errorName: err?.name || "Error",
+      errorMessage: err?.message || "unknown error",
+    });
+    return jsonResponse(500, { error: "Could not read your settings" }, { origin, allowlist });
+  }
+
+  // The session's email is the fallback for a user who has signed in but has no
+  // settings row yet, so the page can greet them by account before first save.
+  return jsonResponse(200, toSettingsJson(connection, { email: session.claims.email }), { origin, allowlist });
+}
+
+/**
+ * PUT /calendar/api/settings - save the school name and search domains.
+ *
+ * Order of checks, and why:
+ *  1. Session (401/500). See `resolveSession`: validation feedback is only ever
+ *     given to a caller who is already signed in.
+ *  2. Body parse and validation (400). Every rule is enforced here regardless of
+ *     what the frontend checked, and the response names the offending `field` so
+ *     the form can point at it.
+ *  3. The write, then the projection of what was stored.
+ *
+ * Schedule fields are accepted but optional; a key the caller omitted is left
+ * alone rather than reset (TASK-008 owns the schedule itself).
+ *
+ * @param {object} event
+ * @param {object} [options]
+ * @param {string|null} [options.origin]
+ * @param {string[]} [options.allowlist]
+ * @param {Record<string, string|undefined>} [options.env]
+ * @param {number} [options.nowSeconds]
+ * @param {typeof saveSettings} [options.saveSettings] Injectable persistence.
+ * @param {Function} [options.updateConnection] Injectable connections-layer patch.
+ * @param {Function} [options.updateItem] Injectable DynamoDB UpdateItem.
+ * @returns {Promise<object>} ALB response.
+ */
+export async function handlePutSettings(event, options = {}) {
+  const {
+    origin = null,
+    allowlist,
+    env = process.env,
+    nowSeconds = Math.floor(Date.now() / 1000),
+    saveSettings: persistSettings = saveSettings,
+    updateConnection,
+    updateItem,
+  } = options;
+
+  const session = resolveSession(event, { env, nowSeconds });
+  if (!session.ok) {
+    return jsonResponse(session.statusCode, session.payload, { origin, allowlist });
+  }
+
+  let settings;
+  try {
+    settings = requireValidSettings(parseJsonBody(event));
+  } catch (err) {
+    // Only a validation failure is a 400. Anything else here is a bug in this
+    // service, not bad input, and must not be reported as the user's fault.
+    // `name` is checked alongside `instanceof` so the branch still holds if a
+    // test has loaded settings.mjs as a second module instance.
+    if (err instanceof SettingsValidationError || err?.name === "SettingsValidationError") {
+      // The message is client-safe by construction (see settings.mjs) and any
+      // echoed value is length-capped there.
+      logBasic("[Calendar] Settings rejected:", { field: err.field ?? "body" });
+      return jsonResponse(400, { error: err.message, field: err.field ?? null }, { origin, allowlist });
+    }
+    logBasic("[Calendar] Settings validation failed unexpectedly:", {
+      errorName: err?.name || "Error",
+      errorMessage: err?.message || "unknown error",
+    });
+    return jsonResponse(500, { error: "Could not save your settings" }, { origin, allowlist });
+  }
+
+  let updated;
+  try {
+    updated = await persistSettings(session.claims.sub, settings, { updateConnection, updateItem, env });
+  } catch (err) {
+    // Never log the settings themselves: schoolName is personal data.
+    logBasic("[Calendar] Could not save connection settings:", {
+      errorName: err?.name || "Error",
+      errorMessage: err?.message || "unknown error",
+    });
+    return jsonResponse(500, { error: "Could not save your settings" }, { origin, allowlist });
+  }
+
+  logBasic("[Calendar] Connection settings saved", { domainCount: settings.searchDomains.length });
+
+  // The just-validated values are the fallback, so the response echoes what was
+  // stored even when the update returned no attributes. `lookupFailed` is set in
+  // that same case: the write succeeded, but the row's connection state was not
+  // read back, and reporting a confident "not connected" would invite the user to
+  // re-authorise a grant they already hold.
+  return jsonResponse(
+    200,
+    toSettingsJson(updated, { email: session.claims.email, ...settings }, { lookupFailed: updated === null }),
+    { origin, allowlist }
+  );
+}
+
+/**
+ * Dispatch the settings routes. Returns null when the request is not one of them,
+ * so the handler can carry on to the frontend/404 paths.
+ *
+ * @param {string} path
+ * @param {string} method
+ * @param {object} event
+ * @param {object} [options] Passed straight through to the route handlers.
+ * @returns {Promise<object|null>}
+ */
+export async function routeSettingsRequest(path, method, event, options = {}) {
+  if (path !== SETTINGS_PATH) return null;
+  if (method === "GET") return handleGetSettings(event, options);
+  if (method === "PUT") return handlePutSettings(event, options);
+  return null;
+}
+
 /**
  * Lambda handler for the school calendar app, invoked by the shared web-app ALB
  * on the /calendar* path prefix.
@@ -707,6 +921,13 @@ export async function handler(event, context = undefined, deps = {}) {
     return authResponse;
   }
 
+  // School name and search domains. Authenticated: every response is either the
+  // signed-in user's own settings or a 401.
+  const settingsResponse = await routeSettingsRequest(path, method, event, { origin, ...deps });
+  if (settingsResponse) {
+    return settingsResponse;
+  }
+
   // 404 for everything else — later tickets add the real routes.
   return jsonResponse(404, { error: "Not found", path }, { origin });
 }
@@ -726,4 +947,5 @@ export {
   AUTH_CALLBACK_PATH,
   AUTH_LOGOUT_PATH,
   AUTH_ME_PATH,
+  SETTINGS_PATH,
 };

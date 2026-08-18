@@ -36,9 +36,45 @@ export const SECRET_ATTRIBUTES = ["refreshTokenEnc"];
 
 /**
  * Attributes `toPublicJson` is allowed to emit, mapped from the stored row.
- * Extended by later tickets as the UI needs more (schedule, search domains).
+ * Extended by later tickets as the UI needs more.
+ *
+ * Deliberately still absent: `lastHistoryId` (a Gmail internal watermark the UI
+ * has no use for), `lastScanError` (raw error text, until a ticket decides how it
+ * is presented), `refreshTokenKeyId`, `userId`, `createdAt`, `updatedAt`. Adding
+ * an attribute here exposes it on EVERY route that projects a connection, so the
+ * list grows one deliberate entry at a time.
  */
-export const PUBLIC_ATTRIBUTES = ["email", "schoolName"];
+export const PUBLIC_ATTRIBUTES = [
+  "email",
+  "schoolName",
+  // TASK-005 settings: what the user asked us to watch for.
+  "searchDomains",
+  // Schedule preferences (written by TASK-005's settings route and TASK-008).
+  "scheduleEnabled",
+  "scheduleFrequency",
+  "scheduleHour",
+  "timezone",
+  // Scan watermark the settings page reports back to the user.
+  "lastScanAt",
+  "lastScanStatus",
+];
+
+/**
+ * Sentinel patch value meaning "delete this attribute" rather than "set it".
+ *
+ * DynamoDB rejects an EMPTY string set: `searchDomains: new Set([])` fails the
+ * write with a ValidationException rather than storing "no domains". The only way
+ * to express "this user now has no domains" is to REMOVE the attribute, so a
+ * patch value of `REMOVE_ATTRIBUTE` compiles to a `REMOVE` clause in
+ * `ddbUpdateItem` instead of a `SET`. Do not "simplify" this back into writing
+ * `[]` or `new Set()`.
+ *
+ * A Symbol cannot appear in a JSON request body, so no client can smuggle a
+ * removal through a route that forwards a parsed payload as a patch.
+ * `Symbol.for` (rather than a bare `Symbol`) keeps the sentinel comparable across
+ * module instances, which matters when a test loads this module twice.
+ */
+export const REMOVE_ATTRIBUTE = Symbol.for("calendar.connections.REMOVE_ATTRIBUTE");
 
 /**
  * Whether the caller could determine the connection state at all.
@@ -134,12 +170,64 @@ export async function ddbPutItem({ tableName, item }) {
 }
 
 /**
- * Real DynamoDB UpdateItem for a flat SET patch. Default `updateItem`
- * dependency.
+ * Compile a flat patch into UpdateItem parameters.
+ *
+ * Pure, and exported, so the expression building is testable with the AWS SDK
+ * absent - which is the whole point of the lazy imports below it.
  *
  * Attribute names go through `#n0`-style placeholders because several column
  * names in this schema (`timezone`, `status`-like fields added later) are
  * DynamoDB reserved words that cannot appear bare in an UpdateExpression.
+ *
+ * Any patch entry whose value is `REMOVE_ATTRIBUTE` compiles to a `REMOVE`
+ * clause instead of a `SET`, which is the only way to clear a string set (see the
+ * sentinel's docblock: an empty SS is a write error, not an empty set).
+ * `ExpressionAttributeValues` is omitted entirely when every entry is a removal,
+ * because DynamoDB rejects an empty value map as well - so a removal-only patch
+ * built with an empty map would fail for a second, unrelated reason.
+ *
+ * @param {{ tableName: string, key: object, updates: Record<string, unknown> }} args
+ * @returns {object} UpdateCommand input.
+ */
+export function buildUpdateParams({ tableName, key, updates }) {
+  const names = {};
+  const values = {};
+  const sets = [];
+  const removes = [];
+  let i = 0;
+  for (const [attribute, value] of Object.entries(updates || {})) {
+    const nameKey = `#n${i}`;
+    names[nameKey] = attribute;
+    if (value === REMOVE_ATTRIBUTE) {
+      removes.push(nameKey);
+    } else {
+      const valueKey = `:v${i}`;
+      values[valueKey] = value;
+      sets.push(`${nameKey} = ${valueKey}`);
+    }
+    i += 1;
+  }
+
+  const clauses = [];
+  if (sets.length > 0) clauses.push(`SET ${sets.join(", ")}`);
+  if (removes.length > 0) clauses.push(`REMOVE ${removes.join(", ")}`);
+  // An UpdateItem with no clauses is a syntax error at DynamoDB; fail here, where
+  // the message can say what was actually wrong.
+  if (clauses.length === 0) throw new Error("buildUpdateParams: updates is empty");
+
+  const params = {
+    TableName: tableName,
+    Key: key,
+    UpdateExpression: clauses.join(" "),
+    ExpressionAttributeNames: names,
+    ReturnValues: "ALL_NEW",
+  };
+  if (sets.length > 0) params.ExpressionAttributeValues = values;
+  return params;
+}
+
+/**
+ * Real DynamoDB UpdateItem for a flat patch. Default `updateItem` dependency.
  *
  * @param {{ tableName: string, key: object, updates: Record<string, unknown> }} args
  * @returns {Promise<object|null>} The updated attributes.
@@ -147,30 +235,7 @@ export async function ddbPutItem({ tableName, item }) {
 export async function ddbUpdateItem({ tableName, key, updates }) {
   const { UpdateCommand } = await import("@aws-sdk/lib-dynamodb");
   const client = await getDocumentClient();
-
-  const names = {};
-  const values = {};
-  const sets = [];
-  let i = 0;
-  for (const [attribute, value] of Object.entries(updates)) {
-    const nameKey = `#n${i}`;
-    const valueKey = `:v${i}`;
-    names[nameKey] = attribute;
-    values[valueKey] = value;
-    sets.push(`${nameKey} = ${valueKey}`);
-    i += 1;
-  }
-
-  const result = await client.send(
-    new UpdateCommand({
-      TableName: tableName,
-      Key: key,
-      UpdateExpression: `SET ${sets.join(", ")}`,
-      ExpressionAttributeNames: names,
-      ExpressionAttributeValues: values,
-      ReturnValues: "ALL_NEW",
-    })
-  );
+  const result = await client.send(new UpdateCommand(buildUpdateParams({ tableName, key, updates })));
   return result?.Attributes || null;
 }
 
@@ -190,6 +255,29 @@ export function stripSecrets(item) {
   }
   safe.hasRefreshToken = hasRefreshToken;
   return safe;
+}
+
+/**
+ * Make one stored attribute value safe to put in a JSON response body.
+ *
+ * A DynamoDB string set arrives as a JS `Set` from the document client, or as
+ * `{ SS: [...] }` from the low-level client. `JSON.stringify(new Set(["a"]))` is
+ * `"{}"`, so without this a set-valued attribute such as `searchDomains` would
+ * silently serialise to an empty object - a response that looks structurally
+ * fine and has lost the data. Sets are unordered in DynamoDB, so the array is
+ * sorted: responses then have a stable shape that a UI diff or an assertion can
+ * rely on, instead of one that changes with storage order.
+ *
+ * @param {unknown} value
+ * @returns {unknown}
+ */
+function jsonSafeValue(value) {
+  if (value instanceof Set) return [...value].map(String).sort();
+  if (Array.isArray(value)) return value;
+  if (value && typeof value === "object" && Array.isArray(value.SS)) {
+    return [...value.SS].map(String).sort();
+  }
+  return value;
 }
 
 /**
@@ -213,14 +301,16 @@ export function stripSecrets(item) {
  * @param {object} [options]
  * @param {boolean} [options.lookupFailed] True when the read threw, i.e. the
  *   connection state could not be determined.
- * @returns {{ email: string|null, schoolName: string|null, connected: boolean, connectionStatus: string }}
+ * @returns {Record<string, unknown> & { connected: boolean, connectionStatus: string }}
+ *   One key per PUBLIC_ATTRIBUTES entry (null when unset), plus the two derived
+ *   connection fields.
  */
 export function toPublicJson(connection, fallback = {}, { lookupFailed = false } = {}) {
   const source = connection && typeof connection === "object" ? connection : {};
   const out = {};
   for (const attribute of PUBLIC_ATTRIBUTES) {
     const value = source[attribute] !== undefined ? source[attribute] : fallback[attribute];
-    out[attribute] = value === undefined || value === null || value === "" ? null : value;
+    out[attribute] = value === undefined || value === null || value === "" ? null : jsonSafeValue(value);
   }
 
   const known = lookupFailed !== true;
@@ -361,6 +451,10 @@ export async function putConnection(
  * Token attributes are rejected: the plaintext must never be written, and the
  * ciphertext is `putConnection`'s job (it also records the matching key ARN, and
  * writing one without the other is how a row becomes undecryptable).
+ *
+ * A patch value of `REMOVE_ATTRIBUTE` deletes that attribute instead of setting
+ * it - the only way to clear a string set, because DynamoDB will not store an
+ * empty one. The sentinel is passed straight through to `updateItem`.
  *
  * @param {string} userId
  * @param {Record<string, unknown>} patch
