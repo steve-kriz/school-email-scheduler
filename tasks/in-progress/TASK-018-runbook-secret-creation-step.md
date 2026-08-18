@@ -1,11 +1,11 @@
 ---
 id: TASK-018
 title: Runbook wrongly claims Terraform creates the app-config secret
-status: testing
+status: pr-review
 created: 2026-08-18T00:12:00Z
-updated: 2026-08-18T01:14:58Z
+updated: 2026-08-18T01:24:46Z
 review-of: TASK-012
-activities: [{"activity":"code","model":"claude-opus-5","startedAt":"2026-08-18T00:59:30Z","finishedAt":"2026-08-18T01:11:15Z","tokens":99122,"note":"ownership investigated across 3 repos; guard mutation-verified 10/10"}]
+activities: [{"activity":"code","model":"claude-opus-5","tokens":99122},{"activity":"test","model":"claude-haiku-4-5","startedAt":"2026-08-18T01:16:00Z","finishedAt":"2026-08-18T01:20:20Z","tokens":71416,"result":"pass","tests":402,"note":"blind spot 1 closed, mutation-verified"}]
 ---
 
 ## Description
