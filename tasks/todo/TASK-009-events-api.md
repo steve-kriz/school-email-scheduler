@@ -62,7 +62,33 @@ Response shape per event: `eventId`, `title`, `description`, `startsAt`,
 provenance, but never `sourceMessageId` — it is a Gmail handle with no purpose
 in the browser.
 
+## Re-scan precondition (from the TASK-007 build — read before building)
+TASK-007 persists events with `BatchWriteItem` and a content-derived `eventId`
+(`sha256(sourceMessageId|title|startsAt)`). That makes a re-scan idempotent by
+design — the same email yields the same key — but it also means **a re-scan
+rewrites the item wholesale**, resetting `status` to `pending` and re-adding
+`attentionKey`. An event the user has already acknowledged therefore pops back
+into the attention list on the next scheduled scan.
+
+`BatchWriteItem` cannot carry a condition expression, so this is inherent to the
+write strategy rather than an oversight — the TASK-007 author left it in place
+with a WARNING docblock rather than papering over it, because the fix belongs to
+whichever ticket owns acknowledge. That is this one.
+
+Resolve it one of two ways, and state which you chose:
+- read existing `status` values before writing and preserve an acknowledged
+  state (costs a read per event, and races with a concurrent scan); or
+- record the acknowledgement somewhere a re-scan does not overwrite — a separate
+  attribute the write does not touch, or a separate item keyed by `eventId`.
+
+Whichever you pick, prove it with a test that acknowledges an event, re-runs the
+store path for the same source email, and asserts the event is **still**
+acknowledged and **absent** from the attention list.
+
 ## Acceptance Criteria
+- [ ] Acknowledging an event survives a re-scan of the same source email: the
+      event stays acknowledged and does not reappear in the attention list.
+- [ ] A test drives acknowledge -> re-store -> query and asserts both.
 - [ ] `GET /calendar/api/events` queries `StartsAtIndex` with the session
       `userId` as the hash key and a `BETWEEN` on `startsAt`.
 - [ ] No route in this ticket issues a DynamoDB `Scan`.

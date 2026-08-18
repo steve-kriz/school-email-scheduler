@@ -108,7 +108,34 @@ TASK-035 owns hardening the `fetchCandidateMessages` docblock and pinning
 `newestReceivedAt`/`truncated` with tests. This ticket owns honouring the
 invariant.
 
+## Throughput constraint (from the TASK-007 build — read before building)
+The calendar Lambda is currently **60s timeout at 512MB**
+(`terraform/lambda_calendar.tf`). TASK-007 makes **one Anthropic Opus call per
+email**, sequentially. A scan can fetch up to `DEFAULT_MAX_MESSAGES` = 200
+messages (TASK-006), and a single Opus extraction is on the order of seconds — so
+a full scan cannot finish inside 60 seconds. It will time out mid-scan, having
+written some events and advanced nothing, and the failure surfaces as a Lambda
+timeout rather than anything actionable.
+
+Pick an approach and state it explicitly:
+- raise the timeout (up to the 15-minute Lambda maximum) and cap messages per
+  invocation so the worst case still fits, with margin;
+- batch across invocations, carrying a cursor so each run does a bounded slice;
+- or process asynchronously (queue per message), which is the most robust and the
+  largest change.
+
+Whichever you choose, the scan must degrade **loudly and resumably**: a run that
+stops early must record how far it got so the next run continues, and must not
+advance the watermark past unprocessed mail (see the watermark precondition
+above). Also note extraction cost scales with messages scanned, so an unbounded
+per-invocation cap is a cost risk as well as a timeout risk.
+
 ## Acceptance Criteria
+- [ ] The scan cannot exceed the Lambda timeout for a worst-case message count;
+      the chosen strategy (raised timeout / batching / async) is stated in a
+      comment and proven by a test with a stubbed clock.
+- [ ] A run that stops early records its progress so the next run resumes, and
+      does not advance the watermark past unprocessed mail.
 - [ ] A scan that returns `truncated: true` does NOT advance the watermark to
       `newestReceivedAt`; the chosen strategy is stated in a comment and proven by
       a test.

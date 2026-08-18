@@ -1,11 +1,11 @@
 ---
 id: TASK-032
 title: The public-mail blocklist misses ten consumer hosts, including the Australian ones
-status: in-progress
+status: testing
 created: 2026-08-18T03:00:00Z
-updated: 2026-08-18T03:25:30Z
+updated: 2026-08-18T03:39:24Z
 review-of: TASK-005
-agent: build-032
+activities: [{"activity":"code","model":"claude-opus-5","note":"6->38 hosts + 20-brand check + registrableName; 58/58 entries swept and pinned; orchestrator spot-checked 7 on the live tree, counts match"}]
 ---
 
 ## Description

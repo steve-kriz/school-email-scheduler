@@ -1,11 +1,11 @@
 ---
 id: TASK-025
 title: Handler deps seam is reachable in production — make the test-only injection structural
-status: in-progress
+status: testing
 created: 2026-08-18T02:10:00Z
-updated: 2026-08-18T03:25:29Z
+updated: 2026-08-18T03:39:24Z
 review-of: TASK-004
-agent: build-025
+activities: [{"activity":"code","model":"claude-opus-5","note":"asRouteDeps plain-object gate; 9/9 verified by orchestrator; 4 mutations red; tests include controls proving non-vacuity"}]
 ---
 
 ## Description
