@@ -20,10 +20,28 @@ const fileCache = new Map();
 // Parsed from ALLOWED_ORIGINS env var (comma-separated domain list). Each entry
 // is a domain suffix match, e.g. "officehq.com.au" matches
 // "https://my.officehq.com.au". Empty = open mode (echo "*").
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
-  .split(",")
-  .map((o) => o.trim())
-  .filter(Boolean);
+/**
+ * Parse a raw comma-separated ALLOWED_ORIGINS string into a normalised list.
+ *
+ * Entries are lower-cased because `isOriginAllowed` compares them against
+ * `new URL(origin).hostname`, which the URL spec always normalises to
+ * lowercase — an entry of "OfficeHQ.com.au" could otherwise never match
+ * anything. The chatbot Lambda lower-cases its entries the same way.
+ *
+ * Exported so tests can exercise several allowlist configurations without
+ * mutating module-scope state (ALLOWED_ORIGINS is read once at import time).
+ *
+ * @param {string|undefined|null} raw
+ * @returns {string[]}
+ */
+function parseAllowedOrigins(raw) {
+  return (raw || "")
+    .split(",")
+    .map((o) => o.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+const ALLOWED_ORIGINS = parseAllowedOrigins(process.env.ALLOWED_ORIGINS);
 
 const LOG_LEVEL = process.env.CALENDAR_LOG_LEVEL || "basic";
 
@@ -37,16 +55,24 @@ function logBasic(...args) {
 
 /**
  * Is this origin covered by the allowlist (exact host or domain suffix)?
+ *
+ * The suffix match requires a dot boundary: an entry of "officehq.com.au"
+ * matches "officehq.com.au" and "sub.officehq.com.au" but NOT the lookalike
+ * "evil-officehq.com.au" (a bare `host.endsWith(allowed)` would accept it) and
+ * not "officehq.com.au.attacker.com" (which the suffix test rules out).
+ *
+ * @param {string|null|undefined} origin  full origin, e.g. "https://x.example.com"
+ * @param {string[]} [allowlist]          defaults to the module-scope allowlist
  */
-function isOriginAllowed(origin) {
+function isOriginAllowed(origin, allowlist = ALLOWED_ORIGINS) {
   if (!origin) return false;
   let host;
   try {
-    host = new URL(origin).hostname;
+    host = new URL(origin).hostname.toLowerCase();
   } catch {
     return false;
   }
-  return ALLOWED_ORIGINS.some(
+  return allowlist.some(
     (allowed) => host === allowed || host.endsWith(`.${allowed}`)
   );
 }
@@ -56,10 +82,13 @@ function isOriginAllowed(origin) {
  * - allowlist empty (open mode) -> "*"
  * - origin in allowlist         -> echo it back
  * - otherwise                   -> null (no CORS header, browser blocks it)
+ *
+ * @param {string|null|undefined} origin
+ * @param {string[]} [allowlist]  defaults to the module-scope allowlist
  */
-function getCorsOrigin(origin) {
-  if (ALLOWED_ORIGINS.length === 0) return "*";
-  if (origin && isOriginAllowed(origin)) return origin;
+function getCorsOrigin(origin, allowlist = ALLOWED_ORIGINS) {
+  if (allowlist.length === 0) return "*";
+  if (origin && isOriginAllowed(origin, allowlist)) return origin;
   return null;
 }
 
@@ -95,6 +124,8 @@ const STATUS_TEXT = {
   500: "Internal Server Error",
 };
 
+const CREDENTIALS_HEADER = "access-control-allow-credentials";
+
 /**
  * Build an ALB-compatible response (multi-value headers format).
  *
@@ -103,15 +134,23 @@ const STATUS_TEXT = {
  * That is what lets later tickets emit several Set-Cookie headers from one
  * response - a single-value `headers` map cannot.
  *
+ * Security invariant: `Access-Control-Allow-Credentials` is never emitted while
+ * the resolved origin is the wildcard "*". With ALLOWED_ORIGINS unset the gate
+ * is in open mode, and pairing credentials with "*" would turn per-user
+ * calendar data into a cross-origin read. This is enforced here rather than
+ * left to convention, so a later route that adds the header (session cookies,
+ * authenticated APIs) is stripped instead of shipping the combination. Set
+ * ALLOWED_ORIGINS to an explicit list to use credentialed CORS.
+ *
  * @param {number} statusCode
  * @param {string} body           already-serialised body
  * @param {string} [contentType]
- * @param {{origin?: string|null, headers?: Record<string, string[]>}} [options]
+ * @param {{origin?: string|null, headers?: Record<string, string[]>, allowlist?: string[]}} [options]
  */
 function buildResponse(statusCode, body, contentType = "application/json", options = {}) {
-  const { origin = null, headers = {} } = options;
+  const { origin = null, headers = {}, allowlist = ALLOWED_ORIGINS } = options;
 
-  const corsOrigin = getCorsOrigin(origin);
+  const corsOrigin = getCorsOrigin(origin, allowlist);
 
   const multiValueHeaders = {
     "Content-Type": [contentType],
@@ -126,6 +165,22 @@ function buildResponse(statusCode, body, contentType = "application/json", optio
   if (corsOrigin) {
     multiValueHeaders["Access-Control-Allow-Origin"] = [corsOrigin];
     multiValueHeaders["Vary"] = ["Origin"];
+  }
+
+  // Hard invariant: credentials are never exposed to a wildcard origin. Header
+  // names are compared case-insensitively because HTTP header names are.
+  if (corsOrigin === "*") {
+    for (const name of Object.keys(multiValueHeaders)) {
+      if (name.toLowerCase() === CREDENTIALS_HEADER) {
+        delete multiValueHeaders[name];
+        // Name only - never the value, which may be a credential elsewhere.
+        logBasic(
+          "[Calendar] Dropped",
+          name,
+          "- credentials cannot be paired with a wildcard CORS origin; set ALLOWED_ORIGINS"
+        );
+      }
+    }
   }
 
   return {
@@ -184,4 +239,13 @@ export async function handler(event) {
 }
 
 // Exported for unit tests and for the route modules added by later tickets.
-export { buildResponse, jsonResponse, getCorsOrigin, isOriginAllowed, fileCache, ASSET_DIR };
+export {
+  buildResponse,
+  jsonResponse,
+  getCorsOrigin,
+  isOriginAllowed,
+  parseAllowedOrigins,
+  ALLOWED_ORIGINS,
+  fileCache,
+  ASSET_DIR,
+};
