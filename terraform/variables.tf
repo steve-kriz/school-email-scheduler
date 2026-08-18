@@ -108,6 +108,51 @@ variable "alb_name" {
 }
 
 
+variable "manage_lambda_log_groups" {
+  description = <<-EOT
+    Whether Terraform manages the Lambda CloudWatch log groups.
+
+    The log group is normally auto-created by the Lambda runtime the first time
+    the function writes a log event, so Terraform does not need to own it. For
+    NEW environments the Lambda has never run, so the group does not exist yet
+    and the CloudWatch metric filters in alerting.tf fail with
+    ResourceNotFoundException - set this to true so the group is created first.
+
+    For existing environments whose group is already present (auto-created,
+    unmanaged), leave this false to avoid a ResourceAlreadyExistsException - or
+    `terraform import` the group and then flip it.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "calendar_log_level" {
+  description = "Calendar Lambda log verbosity: none (errors only), basic (request/summary lines) or verbose (per-email extraction detail - contains personal data, do not leave on in prod)"
+  type        = string
+  default     = "basic"
+
+  validation {
+    condition     = contains(["none", "basic", "verbose"], var.calendar_log_level)
+    error_message = "calendar_log_level must be one of: none, basic, verbose."
+  }
+}
+
+variable "anthropic_model" {
+  description = <<-EOT
+    Anthropic model id used to extract calendar events from school emails.
+
+    Default is claude-opus-5 (the current Opus, 1M context, $5/$25 per MTok).
+    claude-sonnet-5 is the cheaper option ($3/$15 per MTok) and gives near-Opus
+    quality on this class of structured-extraction task, so it is a reasonable
+    swap for cost-sensitive environments.
+
+    This is a PLAIN model id with NO DATE SUFFIX - do not append something like
+    -20250514; dated aliases are not valid here and will fail at call time.
+  EOT
+  type        = string
+  default     = "claude-opus-5"
+}
+
 variable "tags" {
   description = "A map of tags to assign to the resource."
   type        = map(string)
