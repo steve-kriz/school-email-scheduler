@@ -1,10 +1,11 @@
 ---
 id: TASK-004
 title: Google OAuth sign-in, session cookie, and encrypted refresh-token storage
-status: todo
+status: in-progress
 created: 2026-08-17T11:00:00Z
-updated: 2026-08-17T11:00:00Z
+updated: 2026-08-18T01:17:11Z
 depends-on: TASK-003
+agent: build-004
 ---
 
 ## Description

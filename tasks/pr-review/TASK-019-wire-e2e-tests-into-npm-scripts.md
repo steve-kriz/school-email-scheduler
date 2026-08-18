@@ -1,11 +1,11 @@
 ---
 id: TASK-019
 title: Wire the node:test e2e suite into the npm scripts so CI actually runs it
-status: pr-review
+status: done
 created: 2026-08-18T00:12:00Z
-updated: 2026-08-18T01:11:44Z
+updated: 2026-08-18T01:23:25Z
 review-of: TASK-012
-activities: [{"activity":"code","model":"claude-opus-5","tokens":24445},{"activity":"test","model":"claude-haiku-4-5","tokens":153235,"result":"pass","tests":355},{"activity":"review","model":"claude-opus-4-8","tokens":28133,"verdict":"reject-and-rework","attempt":1},{"activity":"test","model":"claude-haiku-4-5","tokens":215849,"result":"pass","tests":386},{"activity":"review","model":"claude-opus-4-8","startedAt":"2026-08-18T00:59:35Z","finishedAt":"2026-08-18T01:03:19Z","tokens":24451,"verdict":"reject-and-rework","attempt":2,"reason":"self-referential test:e2e spawn; severity downgraded critical->medium after orchestrator executed it (exits 0 in 8.7s, no recursion)"}]
+activities: [{"activity":"code","model":"claude-opus-5","tokens":24445},{"activity":"test","model":"claude-haiku-4-5","tokens":153235,"result":"pass"},{"activity":"review","model":"claude-opus-4-8","tokens":28133,"verdict":"reject-and-rework","attempt":1},{"activity":"test","model":"claude-haiku-4-5","tokens":215849,"result":"pass"},{"activity":"review","model":"claude-opus-4-8","tokens":24451,"verdict":"reject-and-rework","attempt":2,"note":"critical downgraded to medium after execution"},{"activity":"test","model":"claude-haiku-4-5","tokens":121483,"result":"pass"},{"activity":"review","model":"claude-opus-4-8","startedAt":"2026-08-18T01:16:00Z","finishedAt":"2026-08-18T01:19:19Z","tokens":32516,"verdict":"accept","followUps":["TASK-023"]}]
 ---
 
 ## Description

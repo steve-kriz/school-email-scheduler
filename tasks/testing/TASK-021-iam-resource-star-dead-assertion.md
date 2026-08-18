@@ -1,11 +1,11 @@
 ---
 id: TASK-021
 title: The IAM least-privilege test computes a result and never asserts on it
-status: testing
+status: pr-review
 created: 2026-08-18T00:30:00Z
-updated: 2026-08-18T00:58:13Z
+updated: 2026-08-18T01:17:11Z
 review-of: TASK-003
-activities: [{"activity":"code","model":"claude-opus-5","startedAt":"2026-08-18T00:47:00Z","finishedAt":"2026-08-18T00:53:05Z","tokens":56348,"note":"also fixed 2 further false-passing assertions"}]
+activities: [{"activity":"code","model":"claude-opus-5","tokens":56348},{"activity":"test","model":"claude-haiku-4-5","tokens":60817,"result":"pass"},{"activity":"test","model":"claude-haiku-4-5","startedAt":"2026-08-18T01:11:50Z","finishedAt":"2026-08-18T01:14:42Z","tokens":79775,"result":"pass","tests":401,"note":"rework: Sid-first assertion verified by execution"}]
 ---
 
 ## Description
