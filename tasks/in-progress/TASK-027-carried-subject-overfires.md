@@ -1,11 +1,11 @@
 ---
 id: TASK-027
 title: Runbook guard over-fires — the carried-subject path never checks the carried verb's object
-status: in-progress
+status: testing
 created: 2026-08-18T02:15:00Z
-updated: 2026-08-18T02:26:01Z
+updated: 2026-08-18T02:35:29Z
 review-of: TASK-024
-agent: build-027
+activities: [{"activity":"code","model":"claude-opus-5","note":"deviated from ticket instruction with cause: literal after-only rule breaks 3 TASK-024 true positives whose object is "the value". Implemented intent via SECRET_ANAPHOR + priorClause as antecedent gate. 11-case corpus verified by orchestrator. Found 2 of 23 CREATE_VERB branches unpinned (makes?, sets? up) - pre-existing; orchestrator 21-word sweep had missed them"}]
 ---
 
 ## Description

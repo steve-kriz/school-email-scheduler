@@ -1,11 +1,11 @@
 ---
 id: TASK-005
 title: Connection settings API for school name and search domains
-status: in-progress
+status: testing
 created: 2026-08-17T11:00:00Z
-updated: 2026-08-18T02:26:01Z
+updated: 2026-08-18T02:39:11Z
 depends-on: TASK-004
-agent: build-005
+activities: [{"activity":"code","model":"claude-opus-5","tokens":102248,"note":"settings.mjs ~470 lines + routes; scope extended into connections.mjs with cause (REMOVE clause + Set->JSON coercion); 22/22 ACs verified by execution by orchestrator; found and fixed missing PUT in Access-Control-Allow-Methods"}]
 ---
 
 ## Description

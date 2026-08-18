@@ -1,11 +1,11 @@
 ---
 id: TASK-014
 title: name_prefix test must evaluate the Terraform local, not re-implement it
-status: in-progress
+status: pr-review
 created: 2026-08-18T00:00:00Z
-updated: 2026-08-18T02:26:02Z
+updated: 2026-08-18T02:40:13Z
 review-of: TASK-001
-agent: build-014
+activities: [{"activity":"code","model":"claude-opus-5","tokens":55743,"note":"terraform console evaluation in temp workspace; reorder -> dev-au-receptionhq"},{"activity":"test","model":"claude-haiku-4-5","tokens":45044,"note":"83 tests 0 fail 0 skipped. Orchestrator re-verified by mutation: reorder reddens unit layer (1 fail) AND e2e (2 fail); variables.tf hash identical after restore; 0 temp dirs leaked after a failing run"}]
 ---
 
 ## Description
