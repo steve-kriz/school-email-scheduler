@@ -13,22 +13,39 @@ const TERRAFORM_DIR = path.join(PROJECT_ROOT, 'terraform');
 const TERRAFORM_CONFIG_DIR = path.join(TERRAFORM_DIR, 'config');
 const RUNBOOK_PATH = path.join(DOCS_DIR, 'google-oauth-setup.md');
 
-/** Runbook prose with fenced code blocks removed, so example commands and
- *  pasted AWS error text are never mistaken for a claim the runbook makes. */
-function runbookProse() {
-  return fs
-    .readFileSync(RUNBOOK_PATH, 'utf-8')
-    .replace(/```[\s\S]*?```/g, ' ');
+// Every guard below takes the document text as an argument and has a thin
+// disk-reading wrapper for the assertions about the real runbook. That split
+// exists so the mutation fixtures in this file (a doc copy carrying a
+// deliberately false claim) run entirely in memory: nothing here ever writes to
+// docs/google-oauth-setup.md.
+
+/** The real runbook, read from disk. Only the wrappers below call this. */
+function runbookText() {
+  return fs.readFileSync(RUNBOOK_PATH, 'utf-8');
+}
+
+/** Prose with fenced code blocks removed, so example commands and pasted AWS
+ *  error text are never mistaken for a claim the document makes. */
+function proseOf(documentText) {
+  return documentText.replace(/```[\s\S]*?```/g, ' ');
 }
 
 /** Prose split into rough sentences, newlines collapsed so a claim wrapped
  *  across lines is still examined as one sentence. */
-function runbookSentences() {
-  return runbookProse()
+function sentencesOf(documentText) {
+  return proseOf(documentText)
     .replace(/\s+/g, ' ')
     .split(/(?<=[.!?])\s+/)
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+function runbookProse() {
+  return proseOf(runbookText());
+}
+
+function runbookSentences() {
+  return sentencesOf(runbookText());
 }
 
 // --- Semantic guard: "Terraform creates the secret" must never come back ------
@@ -42,9 +59,25 @@ const SUBJECT_WINDOW = 45;
 const OBJECT_WINDOW = 70;
 const NEGATION_BEFORE_VERB = /\b(not|never|no|nor|neither|without|n't|rather than|instead of)\b(\s+\S+){0,3}\s*$/i;
 
-/** Sentences in the runbook that claim Terraform creates the secret. */
-function terraformCreatesSecretClaims() {
-  const prose = runbookProse().replace(/\s+/g, ' ');
+// A claim can also be split over a clause boundary, with the Terraform subject
+// in one clause and the create verb in the next: "Terraform handles this
+// secret. It provisions the value for you." Ordinary editing splits sentences
+// all the time, so the subject (and its object) are carried forward across one
+// boundary — but only when the verb's own clause is nothing but a
+// back-referring pronoun and its auxiliary, which is what makes the pronoun the
+// verb's subject. "...and that project's own docs create its secrets" does not
+// match, so prose that discusses another stack creating a secret one clause
+// after a Terraform mention is still not a claim about Terraform.
+const BACK_REFERRING_SUBJECT =
+  /^[\s—-]*(it|this|that|they|these|those)\s+(?:also\s+|then\s+|now\s+|only\s+|already\s+|still\s+)?(?:(?:will|shall|can|could|does|do|did|has|have|had|is|are|was|were|would|must|may|might)\s+(?:not\s+)?)?$/i;
+// "It provisions nothing" / "It creates no secret" are denials, not claims.
+// Only consulted on the carried path, where the object comes from the previous
+// clause and so cannot itself carry the negation.
+const NEGATED_OBJECT = /^\s*(nothing|none|no|neither|nor)\b/i;
+
+/** Clauses in the given document that claim Terraform creates the secret. */
+function terraformCreatesSecretClaimsIn(documentText) {
+  const prose = proseOf(documentText).replace(/\s+/g, ' ');
   const claims = [];
 
   for (const match of prose.matchAll(CREATE_VERB)) {
@@ -58,22 +91,64 @@ function terraformCreatesSecretClaims() {
     const before = prose.slice(Math.max(0, start - 160), start).split(/[.;:!?]/).pop();
     const after = prose.slice(end, end + 160).split(/[.;:!?]/)[0];
 
+    // The clause immediately before this one, for the pronoun-carrying case.
+    const priorClauses = prose.slice(0, start).split(/[.;:!?]/);
+    priorClauses.pop(); // the verb's own clause
+    const priorClause = priorClauses.pop() ?? '';
+
+    const carriesTerraformSubject =
+      BACK_REFERRING_SUBJECT.test(before) && /\bterraform\b/i.test(priorClause);
+    if (carriesTerraformSubject && NEGATED_OBJECT.test(after)) continue;
+
     const governedByTerraform =
       /\bterraform\b/i.test(before.slice(-SUBJECT_WINDOW)) ||
-      /\bby\b[^,]{0,25}\bterraform\b/i.test(after.slice(0, SUBJECT_WINDOW));
+      /\bby\b[^,]{0,25}\bterraform\b/i.test(after.slice(0, SUBJECT_WINDOW)) ||
+      carriesTerraformSubject;
     if (!governedByTerraform) continue;
 
     const secretIsTheObject =
       /\bsecrets?\b/i.test(after.slice(0, OBJECT_WINDOW)) ||
-      /\bsecrets?\b/i.test(before.slice(-OBJECT_WINDOW));
+      /\bsecrets?\b/i.test(before.slice(-OBJECT_WINDOW)) ||
+      (carriesTerraformSubject && /\bsecrets?\b/i.test(priorClause));
     if (!secretIsTheObject) continue;
 
     if (NEGATION_BEFORE_VERB.test(before)) continue;
 
-    claims.push(`${before}[${match[0]}]${after}`.trim());
+    const context = carriesTerraformSubject ? `${priorClause}.${before}` : before;
+    claims.push(`${context}[${match[0]}]${after}`.trim());
   }
 
   return claims;
+}
+
+/** Clauses in the real runbook that claim Terraform creates the secret. */
+function terraformCreatesSecretClaims() {
+  return terraformCreatesSecretClaimsIn(runbookText());
+}
+
+// --- Semantic guard: the runbook must name what does create the secret -------
+// A bare substring match on stack names is not enough: the runbook names
+// `tf-cloudinfra`, `ohq-chatbot2` and `tf-basestack` precisely to record that
+// they do *not* create the secret, so prose asserting the opposite of ownership
+// would satisfy a substring guard. An owner mention only counts when the
+// sentence naming it also asserts ownership and carries no negation.
+const OWNER_NAME = /\b(tf-basestack|basestack|tf-cloudinfra|operator[-\s]owned|out of band|manual prerequisite)\b/i;
+const OWNERSHIP_ASSERTION = /\b(creates?|created|provisions?|provisioned|establishes?|established|owns?|owned|manages?|managed|prerequisite|responsible\s+for|by\s+hand|manually)\b/i;
+const SENTENCE_NEGATION = /\b(not|never|no|none|nor|neither|cannot|n't|without|unable|ruled?\s+out)\b/i;
+
+/** Whether the document walks the operator through creating the secret. */
+function documentsCreateStepIn(documentText) {
+  return /aws\s+secretsmanager\s+create-secret/.test(documentText);
+}
+
+/** Sentences that name a secret owner *and* affirm that it owns the secret. */
+function affirmativeOwnerStatementsIn(documentText) {
+  return sentencesOf(documentText).filter(
+    (sentence) =>
+      OWNER_NAME.test(sentence) &&
+      OWNERSHIP_ASSERTION.test(sentence) &&
+      !SENTENCE_NEGATION.test(sentence)
+  );
 }
 
 function escapeRegex(literal) {
@@ -516,31 +591,103 @@ describe('Google OAuth Configuration Preflight E2E Tests', () => {
         );
       });
 
-      it('Then it catches false claims using ownership verbs (manages, owns, establishes)', () => {
-        // This test validates that the verb list includes ownership-claim words,
-        // not just creation words. A false claim like "Terraform manages the secret"
-        // should be caught just as "Terraform creates the secret" is.
-        const prose = runbookProse().replace(/\s+/g, ' ');
-        // Note: do not use 'g' flag with test() - it has stateful lastIndex behavior
-        const OWNERSHIP_VERBS = /\b(manage|manages|managed|managing|own|owns|owned|owning|establish|establishes|established|establishing)\b/i;
+      // Each phrasing is appended to an in-memory copy of the real runbook and
+      // fed through the real terraformCreatesSecretClaimsIn(), so the verb
+      // coverage is pinned against the real CREATE_VERB regex rather than a
+      // local copy of it: trimming `manage`, `own` or `establish` out of
+      // CREATE_VERB turns these assertions red. The reported clause is matched
+      // on the exact verb, so dropping one tense of one verb is caught too.
+      const OWNERSHIP_CLAIM_FIXTURES = [
+        { tense: 'active', verb: 'manages', sentence: 'Terraform manages the secret for you.' },
+        { tense: 'passive', verb: 'managed', sentence: 'The secret is managed by Terraform.' },
+        { tense: 'future', verb: 'manage', sentence: 'Terraform will manage the secret from here on.' },
+        { tense: 'active', verb: 'owns', sentence: 'Terraform owns the secret for this stack.' },
+        { tense: 'passive', verb: 'owned', sentence: 'The secret is owned by Terraform.' },
+        { tense: 'future', verb: 'own', sentence: 'Terraform will own the secret from here on.' },
+        { tense: 'active', verb: 'establishes', sentence: 'Terraform establishes the secret for this stack.' },
+        { tense: 'passive', verb: 'established', sentence: 'The secret is established by Terraform.' },
+        { tense: 'future', verb: 'establish', sentence: 'Terraform will establish the secret from here on.' },
+        { tense: 'active', verb: 'creates', sentence: 'Terraform creates the secret for this stack.' },
+        { tense: 'passive', verb: 'provisioned', sentence: 'The secret is provisioned by Terraform.' },
+        { tense: 'future', verb: 'provision', sentence: 'Terraform will provision the secret from here on.' }
+      ];
 
-        // Verify the verb list includes these patterns
-        const exampleClaims = [
-          'Terraform manages the secret',
-          'Terraform owns the secret',
-          'Terraform establishes the secret',
+      OWNERSHIP_CLAIM_FIXTURES.forEach((fixture) => {
+        it(`Then the real guard reports the ${fixture.tense} claim "${fixture.sentence}"`, () => {
+          const baseline = runbookText();
+          assert.deepEqual(
+            terraformCreatesSecretClaimsIn(baseline),
+            [],
+            'Baseline runbook must be claim-free for this mutation to mean anything'
+          );
+
+          const mutated = `${baseline}\n\n${fixture.sentence}\n`;
+          const claims = terraformCreatesSecretClaimsIn(mutated);
+
+          assert.ok(
+            claims.length > 0,
+            `The guard missed "${fixture.sentence}". "${fixture.verb}" must stay in ` +
+              'CREATE_VERB, or an ownership claim can return to the runbook unflagged.'
+          );
+          assert.ok(
+            claims.some((clause) => clause.includes(`[${fixture.verb}]`)),
+            `The guard reported ${JSON.stringify(claims)} but not on the verb ` +
+              `"${fixture.verb}" itself, so that verb is not actually covered`
+          );
+        });
+      });
+
+      // The bypass this closes: the Terraform subject in one clause and the
+      // create verb in the next, tied together only by a pronoun.
+      const SENTENCE_SPLIT_CLAIM_FIXTURES = [
+        'Terraform handles this secret. It provisions the value for you.',
+        'Terraform is the home of this secret. It creates the secret on the first apply.',
+        'Terraform handles this secret; it also provisions the value for you.',
+        'Terraform is where this secret lives. That establishes the value for you.'
+      ];
+
+      SENTENCE_SPLIT_CLAIM_FIXTURES.forEach((fixtureSentences) => {
+        it(`Then the guard follows the pronoun across the split in "${fixtureSentences}"`, () => {
+          const mutated = `${runbookText()}\n\n${fixtureSentences}\n`;
+          const claims = terraformCreatesSecretClaimsIn(mutated);
+
+          assert.ok(
+            claims.length > 0,
+            `The guard missed "${fixtureSentences}". A false claim whose Terraform ` +
+              'subject and create verb sit in separate clauses must still be reported.'
+          );
+        });
+      });
+
+      // Documented boundary. The carry is deliberately limited to one clause and
+      // to a clause whose entire text before the verb is a back-referring
+      // pronoun plus auxiliary. Two shapes therefore remain open, and were left
+      // open because closing them cannot be done without false positives on the
+      // runbook's own legitimate prose about other stacks:
+      //   1. A non-pronoun back-reference: "Terraform handles this secret. The
+      //      stack provisions the value for you." Nothing marks "The stack" as
+      //      referring back to Terraform, and the runbook talks about several
+      //      stacks that legitimately do create their own secrets.
+      //   2. A carry over more than one clause: "Terraform handles this secret.
+      //      The region matters here. It provisions the value for you."
+      // The always-on positive assertion below is the only backstop for those.
+      it('Then legitimate read-only prose split across clauses is not reported', () => {
+        const NON_CLAIM_FIXTURES = [
+          'Terraform reads the secret. It provisions nothing.',
+          'Terraform reads the secret. It creates no secret of its own.',
+          'Terraform reads the secret. It never creates the secret.',
+          'Terraform reads the secret. It does not create the secret.',
+          "The tf-basestack repo does not create it. It reads the secret, and that repo's own docs create the secret by hand."
         ];
 
-        for (const example of exampleClaims) {
-          assert.ok(
-            OWNERSHIP_VERBS.test(example),
-            `Verb pattern should match "${example}"`
+        for (const fixtureSentences of NON_CLAIM_FIXTURES) {
+          const mutated = `${runbookText()}\n\n${fixtureSentences}\n`;
+          assert.deepEqual(
+            terraformCreatesSecretClaimsIn(mutated),
+            [],
+            `The guard false-positived on legitimate prose: "${fixtureSentences}"`
           );
         }
-
-        // Verify the actual runbook does NOT contain false ownership claims
-        const claims = terraformCreatesSecretClaims();
-        assert.deepEqual(claims, [], 'Runbook should not contain false ownership claims');
       });
 
       it('Then it states positively that Terraform only reads the secret', () => {
@@ -561,14 +708,71 @@ describe('Google OAuth Configuration Preflight E2E Tests', () => {
 
     describe('Scenario: It names what actually creates the secret', () => {
       it('Then it documents a create-secret step or names the owning stack', () => {
-        const content = fs.readFileSync(RUNBOOK_PATH, 'utf-8');
-        const documentsCreateStep = /aws\s+secretsmanager\s+create-secret/.test(content);
-        const namesOwner = /\b(tf-basestack|basestack|tf-cloudinfra|operator-owned|out of band|manual prerequisite)\b/i
-          .test(content);
+        const content = runbookText();
+        const documentsCreateStep = documentsCreateStepIn(content);
+        const ownerStatements = affirmativeOwnerStatementsIn(content);
 
         assert.ok(
-          documentsCreateStep || namesOwner,
-          'Runbook must either document a create-secret step or name what owns the secret'
+          documentsCreateStep || ownerStatements.length > 0,
+          'Runbook must either document a create-secret step or affirmatively name ' +
+            'what owns the secret. Naming a stack only to say it does not create ' +
+            'the secret does not count.'
+        );
+      });
+
+      it('Then its ownership prose names an owner affirmatively, not only non-owners', () => {
+        const ownerStatements = affirmativeOwnerStatementsIn(runbookText());
+
+        assert.ok(
+          ownerStatements.length > 0,
+          'Runbook names stacks (tf-cloudinfra, tf-basestack) only to record that ' +
+            'they do not create the secret, and no sentence affirmatively states ' +
+            'what does. An operator hitting ResourceNotFoundException has nowhere ' +
+            'to go from here.'
+        );
+      });
+
+      it('Then prose naming a stack only as a non-owner does not satisfy the guard', () => {
+        const negativeOnly = [
+          '## Who creates the secret',
+          '',
+          '- This repository does not create it.',
+          '- The shared `tf-cloudinfra` stack does not create them either.',
+          '- `tf-basestack` was not inspectable from here, so it cannot be ruled out.'
+        ].join('\n');
+
+        assert.ok(
+          OWNER_NAME.test(negativeOnly),
+          'Fixture must name a stack, so the guard can only fail on the negation'
+        );
+        assert.deepEqual(
+          affirmativeOwnerStatementsIn(negativeOnly),
+          [],
+          'A stack named only as a non-owner must not count as naming the owner'
+        );
+      });
+
+      it('Then deleting the create-secret step while naming no owner fails the guard', () => {
+        const rewritten = [
+          '# Google OAuth Client Setup Runbook',
+          '',
+          'Terraform only reads the secret; it does not create it.',
+          'The shared `tf-cloudinfra` stack does not create it either.',
+          '',
+          '```bash',
+          'aws secretsmanager put-secret-value --secret-id "dev-au/app-config/x"',
+          '```'
+        ].join('\n');
+
+        const guardPasses =
+          documentsCreateStepIn(rewritten) ||
+          affirmativeOwnerStatementsIn(rewritten).length > 0;
+
+        assert.equal(
+          guardPasses,
+          false,
+          'A rewrite that drops the create-secret step and names no owner must ' +
+            'fail this guard, not ship green'
         );
       });
 

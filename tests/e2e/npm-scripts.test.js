@@ -4,6 +4,10 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  isDirectoryCovered,
+  scopeScriptToSingleFile
+} from '../helpers/script-coverage.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -12,6 +16,11 @@ const PACKAGE_JSON_PATH = path.join(PROJECT_ROOT, 'package.json');
 
 // Extensions that node --test recognizes
 const TEST_EXTENSIONS = ['.test.js', '.test.mjs', '.test.cjs'];
+
+// Dependency-free target for proving the real test:e2e command exits 0.
+// It imports only node builtins and spawns nothing (no terraform, no npm), so a
+// failure there can only mean the npm script itself is broken.
+const SPAWN_TARGET = 'tests/helpers/exit-zero-fixture.mjs';
 
 /**
  * Spawns a command (non-test) and returns the result
@@ -31,66 +40,9 @@ function runCommand(cwd, command, args = []) {
   };
 }
 
-/**
- * Checks if a directory is covered by a test script.
- * A directory is covered if:
- * 1. The script explicitly names it (tests/<dir>), OR
- * 2. The script names a genuine parent path (tests/ or tests or tests/* wildcard)
- *
- * This predicate rejects the escape hatch that `|| testScript.includes('tests/')` would provide,
- * because that would match even when the directory is not truly covered
- * (e.g., "tests/unit" contains the substring "tests/" but does not cover "tests/e2e").
- *
- * Hardened against false positives:
- * - Case 1: Match must end at a path boundary (end of string, whitespace, or /)
- *   (prevents "tests/e2e-legacy" matching when looking for "e2e")
- * - Case 2: Token must be a genuine path argument (must not be preceded by =, or be a flag value)
- *   (prevents "--test-name-pattern tests" making every directory covered)
- */
-function isDirectoryCovered(testScript, dirName) {
-  // Case 1: The specific directory is explicitly mentioned, at a path boundary
-  // Match "tests/<dir>" only if it's followed by end-of-string, whitespace, or /
-  const exactPattern = new RegExp(`tests/${dirName}(?:\\s|/|$)`);
-  if (exactPattern.test(testScript)) {
-    return true;
-  }
-
-  // Case 2: A parent path is present as a standalone token
-  // Split by whitespace to get individual arguments/tokens
-  const tokens = testScript.split(/\s+/);
-  for (let i = 0; i < tokens.length; i++) {
-    const token = tokens[i];
-
-    // Exact parent directory token (covers all subdirs recursively)
-    // Prefer `tests/` with slash to avoid false matches with flag values like `--test-name-pattern tests`
-    if (token === 'tests/') {
-      return true;
-    }
-
-    // Bare `tests` is only valid as a path if it's NOT preceded by a flag argument
-    // (flags that take values should have = or be in positions where we can detect them)
-    if (token === 'tests') {
-      if (i === 0) {
-        // First token, definitely a path (though unusual)
-        return true;
-      }
-      const prevToken = tokens[i - 1];
-      // If previous token doesn't look like it takes an argument (doesn't start with -),
-      // then this could be a path
-      if (!prevToken.startsWith('-')) {
-        return true;
-      }
-      // Otherwise, skip it (likely a flag value)
-    }
-
-    // Parent with wildcard (e.g., tests/* or tests/**)
-    if (token.startsWith('tests/') && token.includes('*')) {
-      return true;
-    }
-  }
-
-  return false;
-}
+// isDirectoryCovered lives in tests/helpers/script-coverage.mjs so the unit layer
+// (tests/unit/npm-scripts-config.test.js) asserts against the same predicate
+// rather than a second, weaker copy of the rule.
 
 /**
  * Recursively checks if a directory contains test files
@@ -200,6 +152,37 @@ describe('Feature: The test suite that CI runs includes the e2e scenarios', () =
       console.log('Coverage predicate hardening validated: rejects substring and flag-value false positives');
     });
 
+    it('When the predicate sees legitimate whole-tree forms, Then it accepts them', () => {
+      // `--test` is a boolean flag, so the token after it is a genuine path argument.
+      // These three forms are all exactly equivalent to `node --test tests/unit tests/e2e`
+      // and must not be reported as leaving a directory uncovered.
+      for (const dir of ['unit', 'e2e', 'integration']) {
+        assert.ok(isDirectoryCovered('node --test tests', dir),
+          `"node --test tests" should cover tests/${dir} (bare parent path after a boolean flag)`);
+        assert.ok(isDirectoryCovered('node --test ./tests/', dir),
+          `"node --test ./tests/" should cover tests/${dir} (leading ./ and trailing / are noise)`);
+      }
+
+      assert.ok(isDirectoryCovered('node --test "tests/e2e"', 'e2e'),
+        'A quoted path argument should cover tests/e2e');
+      assert.ok(!isDirectoryCovered('node --test "tests/e2e"', 'unit'),
+        'A quoted tests/e2e should not cover tests/unit');
+
+      // Multiple explicit directories still resolve independently
+      assert.ok(isDirectoryCovered('node --test tests/unit tests/e2e', 'e2e'),
+        'Explicit tests/e2e alongside tests/unit should be covered');
+
+      // Boolean flags that are NOT on the value-taking allowlist do not swallow paths
+      assert.ok(isDirectoryCovered('node --test --experimental-test-coverage tests', 'e2e'),
+        'A boolean coverage flag should not consume the following path');
+
+      // A value-taking flag in =value form does not consume the next token either
+      assert.ok(isDirectoryCovered('node --test --test-reporter=spec tests', 'e2e'),
+        '--flag=value form should not consume the following path');
+
+      console.log('Coverage predicate accepts equivalent whole-tree script forms');
+    });
+
     it('And all tests/ subdirectories containing test files are covered by the test script', () => {
       // Discover which subdirectories of tests/ contain test files (any extension)
       const testsDir = path.join(PROJECT_ROOT, 'tests');
@@ -293,12 +276,30 @@ describe('Feature: The test suite that CI runs includes the e2e scenarios', () =
         `test:e2e script should not invoke bddgen. Got: "${testEeScript}"`);
     });
 
-    it('And when the test:e2e script is executed against a specific e2e file, Then it exits successfully', () => {
-      // Note: spawning the full `npm run test:e2e` from within this file would be self-referential,
-      // since test:e2e is `node --test tests/e2e` and this file lives in tests/e2e.
-      // Instead, we verify that node --test works on a specific e2e file that does not itself spawn tests.
-      const result = runCommand(PROJECT_ROOT, 'node', ['--test', 'tests/e2e/terraform-scaffold.test.js']);
-      assert.equal(result.code, 0, `node --test on e2e file should exit 0, got ${result.code}`);
+    it('And when the test:e2e script is executed against a single file, Then it exits successfully', () => {
+      // Spawning `npm run test:e2e` verbatim would be self-referential: test:e2e is
+      // `node --test tests/e2e` and this file lives in tests/e2e. So we read the real
+      // script from package.json and run *that* command — executable and flags intact —
+      // with its directory arguments replaced by one file, so directory discovery never
+      // runs and this file cannot re-enter itself.
+      const pkgJson = JSON.parse(fs.readFileSync(PACKAGE_JSON_PATH, 'utf-8'));
+      const testE2eScript = pkgJson.scripts['test:e2e'];
+      assert.ok(testE2eScript, 'test:e2e script should exist');
+
+      // The target imports only node builtins, so a non-zero exit means the script's
+      // plumbing is broken — not that terraform is missing or that source code changed.
+      assert.ok(fs.existsSync(path.join(PROJECT_ROOT, SPAWN_TARGET)),
+        `Spawn target "${SPAWN_TARGET}" should exist`);
+
+      const scopedCommand = scopeScriptToSingleFile(testE2eScript, SPAWN_TARGET);
+      assert.ok(!scopedCommand.includes('tests/e2e'),
+        `Scoped command must not target the tests/e2e directory. Got: "${scopedCommand}"`);
+
+      const result = runCommand(PROJECT_ROOT, scopedCommand);
+      assert.equal(result.code, 0,
+        `Scoped test:e2e command should exit 0, got ${result.code}. ` +
+        `Script: "${testE2eScript}". Ran: "${scopedCommand}". ` +
+        `Output: ${result.stdout}${result.stderr}`);
     });
   });
 

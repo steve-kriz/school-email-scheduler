@@ -1,10 +1,11 @@
 ---
 id: TASK-024
 title: Runbook guard gaps — unpinned verb list, owner guard matches non-owners, sentence-split bypass
-status: todo
+status: in-progress
 created: 2026-08-18T01:30:00Z
-updated: 2026-08-18T01:30:00Z
+updated: 2026-08-18T01:33:30Z
 review-of: TASK-018
+agent: build-024
 ---
 
 ## Description

@@ -3,6 +3,7 @@ import * as assert from 'node:assert';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { extractPathArguments, isDirectoryCovered } from '../helpers/script-coverage.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -26,11 +27,32 @@ describe('Unit Tests: NPM Scripts Configuration for TASK-019', () => {
         assert.ok(packageJson.scripts.test, 'test script should exist');
 
         const testScript = packageJson.scripts.test;
-        // Semantic check: must mention both directories (equivalent forms are acceptable,
-        // e.g., "node --test tests/" would also be correct and should not fail this assertion)
-        assert.ok(testScript.includes('tests/unit') && testScript.includes('tests/e2e') ||
-                  testScript.includes('tests/'),
-          `test script should cover both tests/unit and tests/e2e. Got: "${testScript}"`);
+        // Semantic check via the shared predicate: equivalent forms are acceptable
+        // (e.g., "node --test tests" or "node --test tests/") but a script that silently
+        // drops a directory must fail. The previous form,
+        //   (includes('tests/unit') && includes('tests/e2e')) || includes('tests/')
+        // could not fail: `&&` binds tighter than `||`, so "node --test tests/unit"
+        // satisfied the trailing includes('tests/') branch with e2e dropped.
+        assert.ok(isDirectoryCovered(testScript, 'unit'),
+          `test script should cover tests/unit. Got: "${testScript}"`);
+        assert.ok(isDirectoryCovered(testScript, 'e2e'),
+          `test script should cover tests/e2e. Got: "${testScript}"`);
+      });
+
+      it('And the coverage assertion fails for a script that drops tests/e2e', () => {
+        // Synthetic proof that the guard above can actually fail on the exact
+        // regression it exists to prevent.
+        const droppedE2e = 'node --test tests/unit';
+        assert.ok(isDirectoryCovered(droppedE2e, 'unit'),
+          'Synthetic script should still cover tests/unit');
+        assert.ok(!isDirectoryCovered(droppedE2e, 'e2e'),
+          `"${droppedE2e}" must NOT be treated as covering tests/e2e`);
+
+        // And that equivalent whole-tree forms are still accepted
+        for (const equivalent of ['node --test tests', 'node --test ./tests/', 'node --test "tests"']) {
+          assert.ok(isDirectoryCovered(equivalent, 'unit') && isDirectoryCovered(equivalent, 'e2e'),
+            `"${equivalent}" should cover both directories`);
+        }
       });
 
       it('And the script should run with node --test', () => {
@@ -252,9 +274,14 @@ describe('Unit Tests: NPM Scripts Configuration for TASK-019', () => {
       for (const scriptName of testScripts) {
         if (packageJson.scripts[scriptName]) {
           const script = packageJson.scripts[scriptName];
-          // Should reference tests/ relative to where npm runs (project root)
-          assert.ok(script.includes('tests/'),
-            `Script "${scriptName}" should reference tests/ directory. Got: "${script}"`);
+          // Should target a path under tests/, relative to where npm runs (project root).
+          // Checked on the parsed positional arguments so equivalent spellings
+          // ("tests", "./tests/", quoted paths) are accepted and flag values are not
+          // mistaken for paths.
+          const targetsTestTree = extractPathArguments(script)
+            .some(arg => arg === 'tests' || arg.startsWith('tests/'));
+          assert.ok(targetsTestTree,
+            `Script "${scriptName}" should target a path under tests/. Got: "${script}"`);
         }
       }
     });
