@@ -633,4 +633,72 @@ describe('Feature: The test suite that CI runs includes the e2e scenarios', () =
       console.log('Re-entrance guard confirmed: scoping prevents directory discovery');
     });
   });
+
+  describe('Scenario: A broken setup-file script is caught by the predicate', () => {
+    it('When the test script is set to a form that drops tests/e2e, Then at least one guard assertion fails', () => {
+      // TASK-029 AC 8: Setting the test script to
+      // 'node --import tests/e2e/globalSetup.mjs --test tests/unit'
+      // must cause the coverage assertions to fail, proving the predicate would catch
+      // this dangerous regression (where a setup file silently drops a test directory).
+      const brokenScript = 'node --import tests/e2e/globalSetup.mjs --test tests/unit';
+      const unitDir = 'unit';
+      const e2eDir = 'e2e';
+
+      // The predicate must detect that this script only runs unit, not e2e
+      assert.ok(isDirectoryCovered(brokenScript, unitDir),
+        'Broken script does run tests/unit');
+      assert.ok(!isDirectoryCovered(brokenScript, e2eDir),
+        'Broken script with --import setup file must NOT report tests/e2e as covered');
+
+      // This is the core guard: the real test script MUST cover both.
+      // If we were to apply the broken script to package.json, the assertion
+      // "test script must cover tests/e2e" would fail.
+      const pkgJson = JSON.parse(fs.readFileSync(PACKAGE_JSON_PATH, 'utf-8'));
+      const realScript = pkgJson.scripts.test;
+
+      // Prove the guard would catch the mutation by showing it fails for the broken form
+      let guardWouldCatch = false;
+      try {
+        assert.ok(isDirectoryCovered(realScript, 'e2e'),
+          `test script must cover tests/e2e`);
+        // If we get here, the real script is fine. Now check that it WOULD fail
+        // if we substituted the broken one.
+        assert.ok(isDirectoryCovered(brokenScript, 'e2e'),
+          `This line should fail for the broken script`);
+      } catch (error) {
+        // An earlier assertion passed. This one DOES NOT, because the broken
+        // script does not cover e2e. That proves the guard is working.
+        guardWouldCatch = true;
+      }
+
+      // If we're testing with the real script, the guard passed (good).
+      // The second assertion (for the broken script) would fail (good).
+      // So we verify the second assertion fails by doing it separately:
+      let brokenScriptDetected = false;
+      try {
+        assert.ok(isDirectoryCovered(brokenScript, 'e2e'));
+        // If we get here, the broken script was NOT caught (bad)
+      } catch (error) {
+        brokenScriptDetected = true;
+      }
+
+      assert.ok(brokenScriptDetected,
+        'The assertion for the broken script MUST fail, proving the guard would catch the mutation');
+
+      console.log('Mutation guard confirmed: broken setup-file script caught (AC 8)');
+    });
+
+    it('And the real test script successfully covers both directories', () => {
+      const pkgJson = JSON.parse(fs.readFileSync(PACKAGE_JSON_PATH, 'utf-8'));
+      const testScript = pkgJson.scripts.test;
+
+      // The real script MUST pass both assertions
+      assert.ok(isDirectoryCovered(testScript, 'unit'),
+        'Real test script must cover tests/unit');
+      assert.ok(isDirectoryCovered(testScript, 'e2e'),
+        'Real test script must cover tests/e2e (would fail if script was broken)');
+
+      console.log('Real script verification: covers both unit and e2e (AC 8 control)');
+    });
+  });
 });

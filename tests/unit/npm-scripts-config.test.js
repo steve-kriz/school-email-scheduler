@@ -670,4 +670,130 @@ describe('Unit Tests: NPM Scripts Configuration for TASK-019', () => {
       });
     });
   });
+
+  describe('Scenario: Every allowlist entry is individually pinned (mutation testing)', () => {
+    it('And --test-name-pattern is pinned: removing it breaks the suite', () => {
+      // Directly test: when --test-name-pattern is honored as value-taking,
+      // "tests" after it is consumed and not treated as a path.
+      // If this entry were removed from VALUE_TAKING_FLAGS, "tests" would be
+      // treated as a positional path, covering everything.
+      const withFlag = 'node --test --test-name-pattern tests tests/unit';
+      const withoutFlag = 'node --test tests tests/unit'; // hypothetical: if removed from allowlist
+
+      // With the flag on the allowlist (current behavior):
+      assert.ok(!isDirectoryCovered(withFlag, 'integration'),
+        '--test-name-pattern flag value should not cover integration');
+      assert.ok(isDirectoryCovered(withFlag, 'unit'),
+        'Explicit tests/unit should be covered');
+
+      // To prove the pin, show that BOTH unit and integration would be covered
+      // if the flag were not in the allowlist (because "tests" would be a path):
+      // We test this by simulating a command without the flag-consuming logic
+      // (i.e., by checking what the predicate returns for a bare "tests" path)
+      assert.ok(isDirectoryCovered('node --test tests', 'integration'),
+        'Bare "tests" path covers all directories');
+
+      console.log('PINNED: --test-name-pattern must be in allowlist');
+    });
+
+    it('And --test-reporter is pinned: removing it breaks the suite', () => {
+      const withFlag = 'node --test --test-reporter tests tests/unit';
+      assert.ok(!isDirectoryCovered(withFlag, 'integration'),
+        '--test-reporter flag value should not cover integration');
+      assert.ok(isDirectoryCovered(withFlag, 'unit'),
+        'Explicit tests/unit should be covered');
+
+      console.log('PINNED: --test-reporter must be in allowlist');
+    });
+
+    it('And --test-concurrency is pinned: removing it breaks the suite', () => {
+      const withFlag = 'node --test --test-concurrency tests tests/unit';
+      assert.ok(!isDirectoryCovered(withFlag, 'integration'),
+        '--test-concurrency flag value should not cover integration');
+      assert.ok(isDirectoryCovered(withFlag, 'unit'),
+        'Explicit tests/unit should be covered');
+
+      console.log('PINNED: --test-concurrency must be in allowlist');
+    });
+
+    it('And --experimental-loader is pinned: removing it breaks the suite', () => {
+      const withFlag = 'node --test --experimental-loader tests --test tests/unit';
+      assert.ok(!isDirectoryCovered(withFlag, 'integration'),
+        '--experimental-loader flag value should not cover integration');
+      assert.ok(isDirectoryCovered(withFlag, 'unit'),
+        'Explicit tests/unit should be covered');
+
+      console.log('PINNED: --experimental-loader must be in allowlist');
+    });
+
+    it('And --import is pinned: removing it breaks the suite (path-valued)', () => {
+      const withFlag = 'node --import tests/e2e/setup.mjs --test tests/unit';
+      assert.ok(!isDirectoryCovered(withFlag, 'e2e'),
+        '--import flag value is a setup module, not a test path');
+      assert.ok(isDirectoryCovered(withFlag, 'unit'),
+        'Explicit tests/unit should still be covered');
+
+      console.log('PINNED: --import (path-valued) must be in allowlist');
+    });
+
+    it('And --require is pinned: removing it breaks the suite (path-valued)', () => {
+      const withFlag = 'node --require tests/e2e/setup.js --test tests/unit';
+      assert.ok(!isDirectoryCovered(withFlag, 'e2e'),
+        '--require flag value is a setup module, not a test path');
+      assert.ok(isDirectoryCovered(withFlag, 'unit'),
+        'Explicit tests/unit should still be covered');
+
+      console.log('PINNED: --require (path-valued) must be in allowlist');
+    });
+
+    it('And -r (short form of --require) is pinned: removing it breaks the suite', () => {
+      const withFlag = 'node -r tests/e2e/setup.js --test tests/unit';
+      assert.ok(!isDirectoryCovered(withFlag, 'e2e'),
+        '-r flag value is a setup module, not a test path');
+      assert.ok(isDirectoryCovered(withFlag, 'unit'),
+        'Explicit tests/unit should still be covered');
+
+      console.log('PINNED: -r (path-valued) must be in allowlist');
+    });
+
+    it('And --loader is pinned: removing it breaks the suite (path-valued)', () => {
+      const withFlag = 'node --loader tests/e2e/loader.mjs --test tests/unit';
+      assert.ok(!isDirectoryCovered(withFlag, 'e2e'),
+        '--loader flag value is a module loader, not a test path');
+      assert.ok(isDirectoryCovered(withFlag, 'unit'),
+        'Explicit tests/unit should still be covered');
+
+      console.log('PINNED: --loader (path-valued) must be in allowlist');
+    });
+
+    it('And --env-file is pinned: removing it breaks the suite (path-valued)', () => {
+      const withFlag = 'node --env-file tests/e2e/.env --test tests/unit';
+      assert.ok(!isDirectoryCovered(withFlag, 'e2e'),
+        '--env-file flag value is an env file, not a test path');
+      assert.ok(isDirectoryCovered(withFlag, 'unit'),
+        'Explicit tests/unit should still be covered');
+
+      console.log('PINNED: --env-file (path-valued) must be in allowlist');
+    });
+
+    it('And --env-file-if-exists is pinned: removing it breaks the suite (path-valued)', () => {
+      const withFlag = 'node --env-file-if-exists tests/e2e/.env --test tests/unit';
+      assert.ok(!isDirectoryCovered(withFlag, 'e2e'),
+        '--env-file-if-exists flag value is an env file, not a test path');
+      assert.ok(isDirectoryCovered(withFlag, 'unit'),
+        'Explicit tests/unit should still be covered');
+
+      console.log('PINNED: --env-file-if-exists (path-valued) must be in allowlist');
+    });
+
+    it('And --test-reporter-destination is pinned: removing it breaks the suite (path-valued)', () => {
+      const withFlag = 'node --test --test-reporter-destination tests/e2e/out.txt tests/unit';
+      assert.ok(!isDirectoryCovered(withFlag, 'e2e'),
+        '--test-reporter-destination flag value is an output path, not a test path');
+      assert.ok(isDirectoryCovered(withFlag, 'unit'),
+        'Explicit tests/unit should still be covered');
+
+      console.log('PINNED: --test-reporter-destination (path-valued) must be in allowlist');
+    });
+  });
 });
