@@ -1,11 +1,11 @@
 ---
 id: TASK-004
 title: Google OAuth sign-in, session cookie, and encrypted refresh-token storage
-status: in-progress
+status: failed-testing
 created: 2026-08-17T11:00:00Z
-updated: 2026-08-18T01:17:11Z
+updated: 2026-08-18T01:52:51Z
 depends-on: TASK-003
-agent: build-004
+activities: [{"activity":"code","model":"claude-opus-5","note":"worktree 021a249 merged; 16/17 security checks verified by execution"},{"activity":"test","model":"claude-haiku-4-5","tokens":90645,"note":"attempt 1/3: 167 tests green but mutation testing found the plaintext-canary test tautological (mock performs the invariant) and timingSafeEqual unasserted; returned"}]
 ---
 
 ## Description

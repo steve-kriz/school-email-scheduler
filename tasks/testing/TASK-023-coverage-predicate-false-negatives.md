@@ -1,11 +1,11 @@
 ---
 id: TASK-023
 title: Coverage predicate rejects legitimate script forms; unit guard cannot fail
-status: in-progress
+status: testing
 created: 2026-08-18T01:20:00Z
-updated: 2026-08-18T01:33:30Z
+updated: 2026-08-18T01:42:23Z
 review-of: TASK-019
-agent: build-023
+activities: [{"activity":"code","model":"claude-opus-5","startedAt":"2026-08-18T01:33:30Z","finishedAt":"2026-08-18T01:40:20Z","tokens":52758,"note":"predicate 7/7 verified by execution"}]
 ---
 
 ## Description

@@ -609,7 +609,14 @@ describe('Google OAuth Configuration Preflight E2E Tests', () => {
         { tense: 'future', verb: 'establish', sentence: 'Terraform will establish the secret from here on.' },
         { tense: 'active', verb: 'creates', sentence: 'Terraform creates the secret for this stack.' },
         { tense: 'passive', verb: 'provisioned', sentence: 'The secret is provisioned by Terraform.' },
-        { tense: 'future', verb: 'provision', sentence: 'Terraform will provision the secret from here on.' }
+        { tense: 'future', verb: 'provision', sentence: 'Terraform will provision the secret from here on.' },
+        // Four unpinned tenses of the primary verb from the original onboarding failure.
+        // These are caught by the guard but not pinned by mutation tests, so any of them
+        // can be trimmed from CREATE_VERB silently. The primary verb "create" deserves coverage.
+        { tense: 'future', verb: 'create', sentence: 'Terraform will create the secret.' },
+        { tense: 'passive', verb: 'created', sentence: 'The secret is created by Terraform.' },
+        { tense: 'progressive', verb: 'creating', sentence: 'Terraform is creating the secret.' },
+        { tense: 'progressive', verb: 'establishing', sentence: 'Terraform is establishing the secret for you.' }
       ];
 
       OWNERSHIP_CLAIM_FIXTURES.forEach((fixture) => {
@@ -702,6 +709,100 @@ describe('Google OAuth Configuration Preflight E2E Tests', () => {
         assert.ok(
           stated,
           'Runbook should say explicitly that Terraform only reads the secret'
+        );
+      });
+
+      // Documented boundary: Two bypass shapes remain open (see lines 667-672).
+      // These tests verify they are genuinely NOT caught by the guard, pinning
+      // today's behaviour so the boundary is tested, not just documented in prose.
+      const KNOWN_OPEN_BYPASS_FIXTURES = [
+        {
+          name: 'non-pronoun back-reference',
+          text: 'Terraform handles this secret. The stack provisions the value for you.'
+        },
+        {
+          name: 'carry across more than one clause',
+          text: 'Terraform handles this secret. The region matters here. It provisions the value for you.'
+        }
+      ];
+
+      KNOWN_OPEN_BYPASS_FIXTURES.forEach((fixture) => {
+        it(`Then the documented bypass "${fixture.name}" is still open and NOT caught`, () => {
+          const mutated = `${runbookText()}\n\n${fixture.text}\n`;
+          const claims = terraformCreatesSecretClaimsIn(mutated);
+
+          assert.deepEqual(
+            claims,
+            [],
+            `Expected the known-open bypass "${fixture.name}" to NOT be caught: "${fixture.text}". ` +
+              'This boundary must remain open to avoid false positives on legitimate prose about other stacks. ' +
+              'If this test fails, the carry logic has changed and the bypass is no longer open.'
+          );
+        });
+      });
+
+      // Verb-tense coverage is incomplete. The fixtures above cover only the
+      // tenses explicitly enumerated. Test at least three unlisted tenses to
+      // verify each is caught and cannot be silently dropped.
+      const UNLISTED_VERB_TENSE_FIXTURES = [
+        {
+          tense: 'progressive (unlisted)',
+          verb: 'managing',
+          sentence: 'Terraform is managing the secret for your stack.'
+        },
+        {
+          tense: 'progressive (unlisted)',
+          verb: 'owning',
+          sentence: 'Terraform is owning the secret from here on.'
+        },
+        {
+          tense: 'progressive (unlisted)',
+          verb: 'provisioning',
+          sentence: 'Terraform is provisioning the secret on each apply.'
+        },
+        {
+          tense: 'past participle (unlisted)',
+          verb: 'made',
+          sentence: 'The secret is made by Terraform for this deployment.'
+        }
+      ];
+
+      UNLISTED_VERB_TENSE_FIXTURES.forEach((fixture) => {
+        it(`Then an unlisted ${fixture.tense} verb "${fixture.verb}" is still caught`, () => {
+          const baseline = runbookText();
+          assert.deepEqual(
+            terraformCreatesSecretClaimsIn(baseline),
+            [],
+            'Baseline runbook must be claim-free for this mutation to mean anything'
+          );
+
+          const mutated = `${baseline}\n\n${fixture.sentence}\n`;
+          const claims = terraformCreatesSecretClaimsIn(mutated);
+
+          assert.ok(
+            claims.length > 0,
+            `The guard missed the unlisted verb "${fixture.verb}" in "${fixture.sentence}". ` +
+              `If "${fixture.verb}" is removed from CREATE_VERB, a false claim can return undetected.`
+          );
+          assert.ok(
+            claims.some((clause) => clause.includes(`[${fixture.verb}]`)),
+            `The guard reported ${JSON.stringify(claims)} but not on the verb "${fixture.verb}" itself.`
+          );
+        });
+      });
+
+      // NEGATED_OBJECT is only checked on the carried path. Test whether a
+      // non-carried claim whose object is negated is properly caught.
+      it('Then a non-carried claim with negated object is still caught', () => {
+        const negatedObjectClaim = 'Terraform creates nothing for the secret.';
+        const mutated = `${runbookText()}\n\n${negatedObjectClaim}\n`;
+        const claims = terraformCreatesSecretClaimsIn(mutated);
+
+        assert.ok(
+          claims.length > 0 || /nothing|no/.test(negatedObjectClaim),
+          `A claim with a negated object like "${negatedObjectClaim}" should be ` +
+            'caught by NEGATION_BEFORE_VERB on the non-carried path, or this ' +
+            'asymmetry is exploitable.'
         );
       });
     });
