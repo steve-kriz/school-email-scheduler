@@ -114,6 +114,35 @@ Note for sequencing: TASK-016 also edited these two test files, and TASK-014 and
 TASK-015 edit the scaffold test pair for the same class of reason. None of these
 tickets may be built concurrently with each other.
 
+**Folded in from the TASK-014 review — terraform binary resolution is split and
+its fallback is silent (both low).** `tests/e2e/terraform-scaffold.test.js` now
+resolves the binary two different ways in one file. The new `terraform console`
+code uses `TERRAFORM_BIN = resolveTerraformBin()` (lines 21-37, used at 76 and
+97), which prefers the absolute `C:/External/Terraform/terraform(.exe)` and only
+falls back to `PATH`. The pre-existing `terraform validate` test invokes a bare
+`terraform` from `PATH` (line ~155). Verified: `TERRAFORM_BIN` appears only at
+lines 21, 23, 76 and 97, so the validate test does not use it.
+
+Two consequences. On a host where terraform exists only at the absolute path and
+is not on `PATH`, the validate test fails with `ENOENT` while the new console
+tests pass — a split failure that looks like a terraform problem but is purely a
+`PATH` artifact. And if `PATH` holds a *different* terraform version from the
+absolute install, the two halves of the same file validate and evaluate against
+different versions, which is the kind of skew that produces an unreproducible
+failure.
+
+Separately, when neither absolute candidate exists `resolveTerraformBin()`
+returns the bare string `'terraform'` with no version check and no warning, so a
+wrong or older terraform on `PATH` is used without notice and a broken canonical
+install is masked rather than surfaced. That weakens the very guarantee TASK-014
+was created to provide — that the locals are evaluated by real terraform.
+
+Fix: resolve the binary **once**, in one place, and use it for every terraform
+invocation in the file including `validate`. When falling back to `PATH`, assert
+the resolved binary actually runs (`terraform version`) and fail loudly naming
+what was tried if it does not. A silent fallback is the fail-open shape this
+ticket exists to remove.
+
 ## Impact If Not Fixed
 These tests are the gate that is supposed to catch a regression in the table
 definitions, and today they only prove certain strings are present somewhere in

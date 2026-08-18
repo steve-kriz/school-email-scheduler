@@ -140,6 +140,36 @@ the real thing with a timeout and assert exit 0 plus a bounded process count. Th
 real exit-0 proof at lines 471-482 already does the latter for `test:e2e`, so
 renaming is the cheaper and more honest fix.
 
+### 5. Two `assert.ok(true, ...)` assertions in the terraform scaffold suite
+From the TASK-014 review, and both pre-existing rather than introduced by it.
+`tests/e2e/terraform-scaffold.test.js` contains:
+
+- line 165 — `assert.ok(true, 'terraform validate succeeded')`
+- line 294 — `assert.ok(true, 'lookup() with empty default allows missing keys to be handled gracefully')`
+
+The review found the first; the second was found by grepping for the pattern, so
+assume there may be more of this shape and sweep for `assert.ok(true` and
+`assert.ok(1` across the whole suite rather than fixing only these two.
+
+`assert.ok(true, msg)` verifies nothing. Be precise about severity, because
+neither is currently fail-open: in the validate case the real signal is the
+absence of a throw, and a validate error exits non-zero, throws, and reaches
+`assert.fail` on the catch path. So the test does discriminate today — but by
+control flow rather than by any assertion, and nothing pins that. A future
+refactor that changes `stdio` or swallows the exec error would turn it into a
+genuine always-pass with no assertion left to catch it.
+
+The validate case has a second, smaller gap: it relies on the exit code alone
+rather than parsing `error_count` from the `-json` output. That happens to be
+correct — `terraform validate` exits 0 on warnings, so the 4 pre-existing
+provider deprecation warnings are tolerated — but the tolerance is implicit in
+the exit code rather than stated. An explicit `error_count === 0` check records
+the intent and survives a change in how warnings are reported.
+
+Fix: assert on the actual result. For validate, parse the `-json` output and
+assert `error_count === 0` (never warning-free — there are 4 expected warnings).
+For the `lookup()` case, assert the concrete behaviour the message describes.
+
 ## Impact If Not Fixed
 Finding 1 leaves the suite carrying a test that appears to cover the
 `NEGATED_OBJECT` asymmetry and covers nothing. That is worse than having no test,
@@ -201,6 +231,11 @@ a green suite is worse than a missing test, because it stops anyone looking.
       or is renamed to state only what it checks.
 - [ ] No test in `npm-scripts.test.js` has a name promising a property it does not
       exercise.
+- [ ] No `assert.ok(true` or `assert.ok(1` remains anywhere in the suite — swept,
+      not just the two known lines.
+- [ ] The `terraform validate` test parses the `-json` output and asserts
+      `error_count === 0`, tolerating the 4 expected provider warnings.
+- [ ] The `lookup()` test asserts the behaviour its message describes.
 - [ ] The full suite passes.
 
 ## Cucumber Tests
