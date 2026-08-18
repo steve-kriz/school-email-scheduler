@@ -1,11 +1,11 @@
 ---
 id: TASK-024
 title: Runbook guard gaps — unpinned verb list, owner guard matches non-owners, sentence-split bypass
-status: pr-review
+status: done
 created: 2026-08-18T01:30:00Z
-updated: 2026-08-18T02:01:54Z
+updated: 2026-08-18T02:16:57Z
 review-of: TASK-018
-activities: [{"activity":"code","model":"claude-opus-5","tokens":86740,"note":"43->53 tests"},{"activity":"test","model":"claude-haiku-4-5","tokens":123423,"note":"53->64 tests; all 21 CREATE_VERB tenses pinned, re-verified by orchestrator sweep; 2 bypass shapes pinned as known-open"}]
+activities: [{"activity":"code","model":"claude-opus-5","tokens":86740,"note":"43->53 tests"},{"activity":"test","model":"claude-haiku-4-5","tokens":123423,"note":"53->64 tests; all 21 CREATE_VERB tenses pinned"},{"activity":"review","model":"claude-opus-4-8","tokens":44181,"note":"no critical/high; ACs met. 3 findings all reproduced by orchestrator: carried-path over-fires on correct docs (TASK-027 medium), dead negated-object assertion + ordering guard fails open on reformat (TASK-028 low)"}]
 ---
 
 ## Description
