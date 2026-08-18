@@ -1,11 +1,11 @@
 ---
 id: TASK-019
 title: Wire the node:test e2e suite into the npm scripts so CI actually runs it
-status: testing
+status: pr-review
 created: 2026-08-18T00:12:00Z
-updated: 2026-08-18T00:19:52Z
+updated: 2026-08-18T00:58:12Z
 review-of: TASK-012
-activities: [{"activity":"code","model":"claude-opus-5","startedAt":"2026-08-18T00:13:53Z","finishedAt":"2026-08-18T00:17:40Z","tokens":24445}]
+activities: [{"activity":"code","model":"claude-opus-5","tokens":24445},{"activity":"test","model":"claude-haiku-4-5","tokens":153235,"result":"pass","tests":355},{"activity":"review","model":"claude-opus-4-8","tokens":28133,"verdict":"reject-and-rework","attempt":1},{"activity":"test","model":"claude-haiku-4-5","startedAt":"2026-08-18T00:51:00Z","finishedAt":"2026-08-18T00:56:30Z","tokens":215849,"result":"pass","tests":386,"note":"rework: predicate verified discriminating by execution"}]
 ---
 
 ## Description

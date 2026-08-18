@@ -1,10 +1,11 @@
 ---
 id: TASK-020
 title: Fix the CORS allowlist case bug, close the default, and test the origin gate
-status: todo
+status: testing
 created: 2026-08-18T00:30:00Z
-updated: 2026-08-18T00:30:00Z
+updated: 2026-08-18T00:53:17Z
 review-of: TASK-003
+activities: [{"activity":"code","model":"claude-opus-5","startedAt":"2026-08-18T00:46:57Z","finishedAt":"2026-08-18T00:50:48Z","tokens":36906,"note":"lookalike match was already correct; no high-sev bug found"}]
 ---
 
 ## Description

@@ -1,10 +1,11 @@
 ---
 id: TASK-021
 title: The IAM least-privilege test computes a result and never asserts on it
-status: todo
+status: testing
 created: 2026-08-18T00:30:00Z
-updated: 2026-08-18T00:30:00Z
+updated: 2026-08-18T00:58:13Z
 review-of: TASK-003
+activities: [{"activity":"code","model":"claude-opus-5","startedAt":"2026-08-18T00:47:00Z","finishedAt":"2026-08-18T00:53:05Z","tokens":56348,"note":"also fixed 2 further false-passing assertions"}]
 ---
 
 ## Description
