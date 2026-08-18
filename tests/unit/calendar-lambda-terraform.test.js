@@ -43,10 +43,92 @@ function extractCalendarPolicy(tfContent) {
 }
 
 /**
+ * Asserts that every statement in the policy has Sid as its first key.
+ * This is a requirement of parsePolicyStatements, which splits statements on Sid
+ * boundaries and cannot see a statement whose Sid appears later. A statement with
+ * Sid in a non-first position would have its Resource silently misattributed to
+ * the previous statement, creating a false negative in the resource-scoping guard.
+ */
+function assertAllStatementsHaveSidFirst(policyText) {
+  // Extract the Statement array from the policy using bracket counting
+  // (lazy match fails when brackets nest, e.g., Action = ["..."])
+  const statementArrayPos = policyText.indexOf('Statement = [');
+  if (statementArrayPos === -1) {
+    return; // No Statement array found, skip check
+  }
+
+  const arrayStart = statementArrayPos + 'Statement = ['.length - 1; // position of '['
+  let bracketDepth = 1;
+  let arrayEnd = arrayStart;
+
+  for (let i = arrayStart + 1; i < policyText.length; i++) {
+    if (policyText[i] === '[') {
+      bracketDepth++;
+    } else if (policyText[i] === ']') {
+      bracketDepth--;
+      if (bracketDepth === 0) {
+        arrayEnd = i;
+        break;
+      }
+    }
+  }
+
+  if (bracketDepth !== 0) {
+    return; // Mismatched brackets, skip check
+  }
+
+  const statementsText = policyText.substring(arrayStart + 1, arrayEnd);
+
+  // Find each statement block { ... } and check that Sid comes first
+  let braceDepth = 0;
+  let statementStart = -1;
+
+  for (let i = 0; i < statementsText.length; i++) {
+    const char = statementsText[i];
+
+    if (char === '{') {
+      if (braceDepth === 0) {
+        statementStart = i;
+      }
+      braceDepth++;
+    } else if (char === '}') {
+      braceDepth--;
+      if (braceDepth === 0 && statementStart !== -1) {
+        // We have a complete statement block
+        const statement = statementsText.substring(statementStart, i + 1);
+
+        // Extract the content after the opening brace, removing comments and whitespace
+        const contentAfterBrace = statement
+          .substring(1) // Remove opening {
+          .replace(/^\s+/, '') // Remove leading whitespace
+          .replace(/^(\/\/|#)[^\n]*\n/gm, '') // Remove comment lines
+          .trim();
+
+        // Check that Sid comes first
+        if (!contentAfterBrace.startsWith('Sid')) {
+          assert.fail(
+            'Every statement in the IAM policy must have Sid as its first key. ' +
+            'parsePolicyStatements() attributes Resource values by splitting on Sid boundaries, ' +
+            'and cannot see a statement whose Sid appears later. This would cause a silent false negative. ' +
+            'Reorder the statement so Sid is first. ' +
+            'Statement starts with: ' + contentAfterBrace.substring(0, 80)
+          );
+        }
+
+        statementStart = -1;
+      }
+    }
+  }
+}
+
+/**
  * Splits a policy into one { sid, body } chunk per statement. A chunk runs from
  * its own Sid assignment to the next one (or the end of the policy).
+ * REQUIRES: Every statement has Sid as its first key (enforced by assertAllStatementsHaveSidFirst).
  */
 function parsePolicyStatements(policyText) {
+  assertAllStatementsHaveSidFirst(policyText);
+
   const sidMatches = [...policyText.matchAll(/Sid\s*=\s*"([^"]+)"/g)];
   assert.ok(sidMatches.length > 0, 'no Sid-bearing statements found in IAM policy');
 
@@ -292,43 +374,44 @@ describe('Calendar Lambda Terraform Unit Tests', () => {
           'the real lambda_calendar.tf must never be modified by a test');
       });
 
-      it('When a statement has Sid in a non-first position, Then the parser correctly attributes Resource to that statement', () => {
+      it('When a statement has Sid in a non-first position, Then the parser rejects it loudly', () => {
         const realTfPath = path.join(TERRAFORM_DIR, 'lambda_calendar.tf');
         const original = fs.readFileSync(realTfPath, 'utf-8');
         const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'calendar-iam-fixture-'));
         const fixturePath = path.join(fixtureDir, 'lambda_calendar.tf');
 
         try {
-          // Create a variant where one statement has Sid after Effect (not first key)
-          // Test assumes parser can handle Sid anywhere, or we detect the limitation
+          // Create a policy with a statement that has unscoped Resource = "*" with Sid as last key
+          // This is the exact synthetic test case: a statement that would be a false negative
+          // if Sid positioning is not validated
           const mutated = original.replace(
-            /\{\s+Sid\s*=\s*"CloudWatchLogs"\s+Effect\s*=\s*"Allow"/,
-            '{\nEffect = "Allow",\nSid = "CloudWatchLogs"'
+            /(Statement = \[)/,
+            `$1
+      {
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt"]
+        Resource = "*"
+        Sid      = "SidLastStatement"
+      },`
           );
-
-          // Verify the mutation applied
-          if (mutated === original) {
-            // If mutation didn't apply, the parser issue doesn't exist (Sid already first)
-            // This test verifies the current parser behavior, which is Sid-first-only
-            assert.ok(true, 'CloudWatchLogs already has Sid first (no defect to test)');
-            return;
-          }
 
           fs.writeFileSync(fixturePath, mutated, 'utf-8');
 
-          // Try parsing - if parser fails or misattributes, we detect it
-          try {
-            const statements = parsePolicyStatements(extractCalendarPolicy(fs.readFileSync(fixturePath, 'utf-8')));
-            const cwlStatement = statementBySid(statements, 'CloudWatchLogs');
-            // If we get here, Sid was found correctly (parser is robust to Sid position)
-            assert.ok(cwlStatement, 'Parser correctly handles Sid in non-first position');
-          } catch (parseError) {
-            // Parser limitation found: document it
-            assert.fail(`Parser cannot handle Sid in non-first position: ${parseError.message}`);
-          }
+          // The assertion should fire because Sid is not first
+          assert.throws(
+            () => {
+              const policy = extractCalendarPolicy(fs.readFileSync(fixturePath, 'utf-8'));
+              parsePolicyStatements(policy);
+            },
+            /must have Sid as its first key/,
+            'Parser must reject statements where Sid is not first'
+          );
         } finally {
           fs.rmSync(fixtureDir, { recursive: true, force: true });
         }
+
+        assert.strictEqual(fs.readFileSync(realTfPath, 'utf-8'), original,
+          'the real lambda_calendar.tf must never be modified by a test');
       });
 
     });
