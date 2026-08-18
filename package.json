@@ -13,7 +13,8 @@
     "test:e2e:report": "playwright show-report tests/e2e/playwright-report",
     "test:bdd": "bddgen --config=playwright-bdd.config.js && playwright test --config=playwright-bdd.config.js",
     "test:bdd:headed": "bddgen --config=playwright-bdd.config.js && playwright test --config=playwright-bdd.config.js --headed",
-    "test:bdd:report": "playwright show-report tests/bdd/playwright-report"
+    "test:bdd:report": "playwright show-report tests/bdd/playwright-report",
+    "check:oauth-config": "node scripts/check-oauth-config.mjs"
   },
   "devDependencies": {
     "@playwright/test": "1.49.0",
