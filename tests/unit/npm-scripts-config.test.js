@@ -323,4 +323,184 @@ describe('Unit Tests: NPM Scripts Configuration for TASK-019', () => {
       }
     });
   });
+
+  describe('Feature: Coverage predicate guards against silent directory exclusions', () => {
+    describe('Scenario: Coverage predicate rejects scripts that drop tests/e2e', () => {
+      it('When the test script covers only tests/unit, Then it is rejected', () => {
+        const unitOnlyScript = 'node --test tests/unit';
+        assert.ok(isDirectoryCovered(unitOnlyScript, 'unit'),
+          'Script targeting only unit should cover unit');
+        assert.ok(!isDirectoryCovered(unitOnlyScript, 'e2e'),
+          'Script targeting only unit must NOT cover e2e (regression guard for AC 9)');
+      });
+
+      it('And mirror case: When the test script covers only tests/e2e, Then it rejects unit', () => {
+        const e2eOnlyScript = 'node --test tests/e2e';
+        assert.ok(isDirectoryCovered(e2eOnlyScript, 'e2e'),
+          'Script targeting only e2e should cover e2e');
+        assert.ok(!isDirectoryCovered(e2eOnlyScript, 'unit'),
+          'Script targeting only e2e must NOT cover unit (mirror of AC 9)');
+      });
+
+      it('And the root coverage assertion on the real test script confirms both are included', () => {
+        const packageJson = JSON.parse(fs.readFileSync(PACKAGE_JSON_PATH, 'utf-8'));
+        const testScript = packageJson.scripts.test;
+
+        assert.ok(isDirectoryCovered(testScript, 'unit'),
+          'Real test script must cover tests/unit');
+        assert.ok(isDirectoryCovered(testScript, 'e2e'),
+          'Real test script must cover tests/e2e (AC 1)');
+      });
+    });
+
+    describe('Scenario: All legitimate script forms covering the whole tree are accepted', () => {
+      it('When given "node --test tests", Then it covers all directories', () => {
+        for (const dir of ['unit', 'e2e', 'integration']) {
+          assert.ok(isDirectoryCovered('node --test tests', dir),
+            `"node --test tests" must cover tests/${dir} (AC 1)`);
+        }
+      });
+
+      it('When given "node --test ./tests/", Then it covers all directories', () => {
+        for (const dir of ['unit', 'e2e', 'integration']) {
+          assert.ok(isDirectoryCovered('node --test ./tests/', dir),
+            `"node --test ./tests/" must cover tests/${dir} (AC 2)`);
+        }
+      });
+
+      it('When given "node --test \\"tests/e2e\\"", Then it covers only e2e', () => {
+        assert.ok(isDirectoryCovered('node --test "tests/e2e"', 'e2e'),
+          `"node --test \\"tests/e2e\\"" must cover tests/e2e (AC 3)`);
+        assert.ok(!isDirectoryCovered('node --test "tests/e2e"', 'unit'),
+          'Quoted path to e2e should not cover unit');
+      });
+
+      it('When given "node --test tests/e2e-legacy", Then it does NOT cover e2e', () => {
+        assert.ok(!isDirectoryCovered('node --test tests/e2e-legacy', 'e2e'),
+          `"node --test tests/e2e-legacy" must NOT cover tests/e2e (AC 4, reject substring match)`);
+        assert.ok(isDirectoryCovered('node --test tests/e2e-legacy', 'e2e-legacy'),
+          'Should cover the exact directory e2e-legacy when explicitly present');
+      });
+
+      it('When given a value-taking flag, Then the flag value is not treated as a path', () => {
+        const scriptWithFlagValue = 'node --test --test-name-pattern tests tests/unit';
+        assert.ok(!isDirectoryCovered(scriptWithFlagValue, 'integration'),
+          `Flag value "tests" should not cover tests/integration (AC 5)`);
+        assert.ok(isDirectoryCovered(scriptWithFlagValue, 'unit'),
+          'Explicit tests/unit should be covered');
+      });
+    });
+
+    describe('Scenario: Value-taking flags are handled via allowlist', () => {
+      it('When given --test-name-pattern flag with path-like value, Then the value is skipped and real path is used', () => {
+        // --test-name-pattern takes a value; a bare "tests" token after it is consumed as the value,
+        // not as a path argument. Only tests/unit is the real path argument.
+        // If --test-name-pattern is removed from allowlist, this would incorrectly cover integration.
+        assert.ok(isDirectoryCovered('node --test --test-name-pattern tests tests/unit', 'unit'),
+          'Explicit tests/unit should be covered');
+        assert.ok(!isDirectoryCovered('node --test --test-name-pattern tests tests/unit', 'integration'),
+          '--test-name-pattern value "tests" must NOT be read as a path (PINNED by this case)');
+      });
+
+      it('And --test-reporter flag with path-like value is skipped (PINS allowlist entry)', () => {
+        // --test-reporter takes a value. Here "tests" is its value, not a path.
+        // Only tests/unit is the real path. If --test-reporter is removed from the allowlist,
+        // "tests" would be wrongly treated as a path and tests/integration would be covered.
+        assert.ok(isDirectoryCovered('node --test --test-reporter tests tests/unit', 'unit'),
+          'Explicit tests/unit should be covered');
+        assert.ok(!isDirectoryCovered('node --test --test-reporter tests tests/unit', 'integration'),
+          '--test-reporter value "tests" must NOT be read as a path (PINS allowlist: AC 6)');
+      });
+
+      it('And --test-concurrency flag with path-like value is skipped (PINS allowlist entry)', () => {
+        // --test-concurrency takes a numeric value. If a bare "tests" appears after it,
+        // it is consumed as the value, not a path. Only tests/unit is the real path.
+        // Removing this from allowlist would wrongly cover integration.
+        assert.ok(isDirectoryCovered('node --test --test-concurrency tests tests/unit', 'unit'),
+          'Explicit tests/unit should be covered');
+        assert.ok(!isDirectoryCovered('node --test --test-concurrency tests tests/unit', 'integration'),
+          '--test-concurrency value "tests" must NOT be read as a path (PINS allowlist: AC 6)');
+      });
+
+      it('And --experimental-loader flag with path-like value is skipped (PINS allowlist entry)', () => {
+        // --experimental-loader takes a value. Here "tests" is its value, not a path.
+        // Only tests/unit is the real path. If --experimental-loader is removed from the allowlist,
+        // "tests" would be wrongly treated as a path and tests/integration would be covered.
+        assert.ok(isDirectoryCovered('node --test --experimental-loader tests --test tests/unit', 'unit'),
+          'Explicit tests/unit should be covered');
+        assert.ok(!isDirectoryCovered('node --test --experimental-loader tests --test tests/unit', 'integration'),
+          '--experimental-loader value "tests" must NOT be read as a path (PINS allowlist: AC 6)');
+      });
+
+      it('And --flag=value form never consumes the next token (even for value-taking flags)', () => {
+        // In --flag=value form, the = binds tightly, so the next token is always a real argument.
+        // These must all cover both unit and e2e since tests/ is the actual path argument.
+        assert.ok(isDirectoryCovered('node --test --test-reporter=json tests', 'unit'),
+          '--test-reporter=json should not consume the following tests');
+        assert.ok(isDirectoryCovered('node --test --test-reporter=json tests', 'e2e'),
+          '--test-reporter=value form must treat next token as path (AC 6, =value form test)');
+
+        assert.ok(isDirectoryCovered('node --test --test-concurrency=4 tests', 'unit'),
+          '--test-concurrency=4 should not consume the following tests');
+        assert.ok(isDirectoryCovered('node --test --test-concurrency=4 tests', 'e2e'),
+          '--test-concurrency=value form must treat next token as path');
+      });
+
+      it('But a boolean flag like --test does NOT consume the next token', () => {
+        // --test is a boolean flag, so the token after it is a genuine path
+        for (const dir of ['unit', 'e2e']) {
+          assert.ok(isDirectoryCovered('node --test tests', dir),
+            '--test is a boolean flag and should not consume "tests"');
+        }
+      });
+
+      it('And a boolean flag that is NOT on the allowlist does not consume the next token', () => {
+        // --experimental-test-coverage is a boolean flag, not on the value-taking list
+        // So the next token is a genuine path, not a flag value
+        assert.ok(isDirectoryCovered('node --test --experimental-test-coverage tests/unit', 'unit'),
+          'Boolean flag should not consume the following path');
+        assert.ok(!isDirectoryCovered('node --test --experimental-test-coverage tests/unit', 'e2e'),
+          'Explicit tests/unit should not cover e2e');
+      });
+
+      it('And an unknown flag with space-separated value is NOT treated as consuming the next token', () => {
+        // A flag not on the allowlist followed by a path-like token should treat the token as a path
+        // This prevents the regression of assuming all --flags consume the next token
+        assert.ok(isDirectoryCovered('node --test --some-unknown-flag tests', 'unit'),
+          'Unknown flag should not be assumed to consume "tests"');
+        assert.ok(isDirectoryCovered('node --test --some-unknown-flag tests', 'e2e'),
+          'Unknown flag + tests should cover all directories (AC 6)');
+      });
+    });
+
+    describe('Scenario: The shared predicate is imported not duplicated', () => {
+      it('Then both test files import isDirectoryCovered from script-coverage.mjs', () => {
+        const e2eContent = fs.readFileSync(
+          path.join(PROJECT_ROOT, 'tests', 'e2e', 'npm-scripts.test.js'),
+          'utf-8'
+        );
+        const unitContent = fs.readFileSync(
+          path.join(PROJECT_ROOT, 'tests', 'unit', 'npm-scripts-config.test.js'),
+          'utf-8'
+        );
+
+        assert.ok(e2eContent.includes("from '../helpers/script-coverage.mjs'") ||
+                  e2eContent.includes('from \'../helpers/script-coverage.mjs\''),
+          'e2e test should import from script-coverage.mjs (AC 10)');
+        assert.ok(unitContent.includes("from '../helpers/script-coverage.mjs'") ||
+                  unitContent.includes('from \'../helpers/script-coverage.mjs\''),
+          'unit test should import from script-coverage.mjs (AC 10)');
+
+        // Both should import isDirectoryCovered and extractPathArguments from the shared file
+        assert.ok(e2eContent.includes('isDirectoryCovered') &&
+                  e2eContent.includes('scopeScriptToSingleFile'),
+          'e2e test should import shared helpers');
+        assert.ok(unitContent.includes('isDirectoryCovered') &&
+                  unitContent.includes('extractPathArguments'),
+          'unit test should import shared helpers');
+
+        console.log('Shared predicate confirmed: both layers use same implementation (AC 10)');
+      });
+    });
+  });
 });
