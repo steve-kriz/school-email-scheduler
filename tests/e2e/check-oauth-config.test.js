@@ -36,7 +36,8 @@ function runbookSentences() {
 // prose is examined in context: does a Terraform subject govern it, is the
 // secret its object, and is it negated? A claim only counts as false when a
 // Terraform subject creates a secret and nothing negates it.
-const CREATE_VERB = /\b(create|creates|created|creating|provision|provisions|provisioned|provisioning|makes?|made|sets? up)\b/gi;
+// Also includes ownership-claim verbs (manages, owns, establishes) that would be false claims.
+const CREATE_VERB = /\b(create|creates|created|creating|provision|provisions|provisioned|provisioning|makes?|made|sets? up|manage|manages|managed|managing|own|owns|owned|owning|establish|establishes|established|establishing)\b/gi;
 const SUBJECT_WINDOW = 45;
 const OBJECT_WINDOW = 70;
 const NEGATION_BEFORE_VERB = /\b(not|never|no|nor|neither|without|n't|rather than|instead of)\b(\s+\S+){0,3}\s*$/i;
@@ -513,6 +514,33 @@ describe('Google OAuth Configuration Preflight E2E Tests', () => {
             'terraform/lambda_calendar.tf, with no aws_secretsmanager_secret ' +
             `resource anywhere. Offending clause(s): ${JSON.stringify(claims)}`
         );
+      });
+
+      it('Then it catches false claims using ownership verbs (manages, owns, establishes)', () => {
+        // This test validates that the verb list includes ownership-claim words,
+        // not just creation words. A false claim like "Terraform manages the secret"
+        // should be caught just as "Terraform creates the secret" is.
+        const prose = runbookProse().replace(/\s+/g, ' ');
+        // Note: do not use 'g' flag with test() - it has stateful lastIndex behavior
+        const OWNERSHIP_VERBS = /\b(manage|manages|managed|managing|own|owns|owned|owning|establish|establishes|established|establishing)\b/i;
+
+        // Verify the verb list includes these patterns
+        const exampleClaims = [
+          'Terraform manages the secret',
+          'Terraform owns the secret',
+          'Terraform establishes the secret',
+        ];
+
+        for (const example of exampleClaims) {
+          assert.ok(
+            OWNERSHIP_VERBS.test(example),
+            `Verb pattern should match "${example}"`
+          );
+        }
+
+        // Verify the actual runbook does NOT contain false ownership claims
+        const claims = terraformCreatesSecretClaims();
+        assert.deepEqual(claims, [], 'Runbook should not contain false ownership claims');
       });
 
       it('Then it states positively that Terraform only reads the secret', () => {
