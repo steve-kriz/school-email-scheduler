@@ -1,11 +1,11 @@
 ---
 id: TASK-006
 title: Gmail message fetching with token refresh and incremental scanning
-status: in-progress
+status: testing
 created: 2026-08-17T11:00:00Z
-updated: 2026-08-18T02:54:42Z
+updated: 2026-08-18T03:08:30Z
 depends-on: TASK-005
-agent: build-006
+activities: [{"activity":"code","model":"claude-opus-5","note":"google-token.mjs + gmail.mjs; 17/17 ACs verified by execution by orchestrator incl. base64url, attachment skip, head truncation, 403-no-retry, 429x4, deterministic backoff. 5 judgement calls documented in the summary"}]
 ---
 
 ## Description

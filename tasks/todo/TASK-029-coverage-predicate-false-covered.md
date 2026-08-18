@@ -1,11 +1,11 @@
 ---
 id: TASK-029
 title: Coverage predicate can report a directory as covered when it will not run
-status: in-progress
+status: pr-review
 created: 2026-08-18T02:22:00Z
-updated: 2026-08-18T02:54:42Z
+updated: 2026-08-18T03:16:01Z
 review-of: TASK-023
-agent: build-029
+activities: [{"activity":"code","model":"claude-opus-5","tokens":77775,"note":"lexer segment model; disclosed a survived non-semantic mutation unprompted"},{"activity":"test","model":"claude-haiku-4-5","tokens":69136,"note":"101 tests. Orchestrator swept all 11 allowlist entries (2-6 fail each) and 10 lexer edge cases: all fail closed"}]
 ---
 
 ## Description
