@@ -88,16 +88,212 @@ export const MAX_DOMAIN_LABEL_LENGTH = 63;
  * mailbox. Allowing it would put unrelated private mail through the extraction
  * model, which is both a privacy failure and an unbounded cost. Matched EXACTLY,
  * not as a suffix: "gmail.com" is refused, a hypothetical "mail.gmail.com" is
- * not, because the concern is the shared public host itself.
+ * not, because the concern is the shared public host itself and a school could
+ * legitimately be hosted on a subdomain. See `isPublicMailBrand` below: the
+ * subdomain allowance is deliberate in BOTH checks and is pinned by tests - do
+ * not "fix" it into a suffix match.
+ *
+ * REGIONAL VARIANTS ARE NOT OPTIONAL. This is an Australian deployment, so
+ * "outlook.com.au" and "yahoo.com.au" are exactly what a local user types; a list
+ * that only knows the .com forms lets the most likely mistake straight through.
+ * The list is still only the fast path - `PUBLIC_MAIL_BRANDS` is what catches the
+ * suffix nobody thought of.
  */
 export const PUBLIC_MAIL_DOMAINS = Object.freeze([
+  // Google
   "gmail.com",
   "googlemail.com",
+  // Microsoft
   "outlook.com",
+  "outlook.com.au",
+  "outlook.co.uk",
   "hotmail.com",
+  "hotmail.com.au",
+  "hotmail.co.uk",
+  "hotmail.fr",
+  "live.com",
+  "live.com.au",
+  "live.co.uk",
+  "msn.com",
+  // Yahoo
   "yahoo.com",
+  "yahoo.com.au",
+  "yahoo.co.uk",
+  "yahoo.ca",
+  "ymail.com",
+  "rocketmail.com",
+  // AOL
+  "aol.com",
+  // Apple
   "icloud.com",
+  "me.com",
+  "mac.com",
+  // Proton
+  "proton.me",
+  "protonmail.com",
+  "pm.me",
+  // United Internet
+  "gmx.com",
+  "gmx.de",
+  "gmx.net",
+  "mail.com",
+  // Other high-traffic consumer hosts
+  "zoho.com",
+  "yandex.com",
+  "yandex.ru",
+  "qq.com",
+  "163.com",
+  "126.com",
+  "fastmail.com",
+  "tutanota.com",
 ]);
+
+/**
+ * Provider BRANDS, matched on the registrable name under any public suffix.
+ *
+ * The second line of defence behind PUBLIC_MAIL_DOMAINS. A literal host list is
+ * always one launch behind reality - "hotmail.com.br" exists today and
+ * "yahoo.<something>" will exist next year - and every miss is silent: the scan
+ * succeeds, so the only symptoms are noisy events and a bigger Anthropic bill.
+ * Matching the brand instead of the host closes that class of gap without another
+ * edit.
+ *
+ * Brands only. This list is refusal-by-name, so every entry is a domain a school
+ * can no longer register with us under ANY suffix, and a false positive blocks a
+ * real customer at the settings form. The short, word-like entries ("me", "mac",
+ * "mail", "live", "qq") are the ones to weigh before adding more: they are here
+ * because each is a live consumer mail brand whose regional forms are exactly what
+ * an AU user mistypes, and a school registered at "mail.<tld>" or "me.<tld>" is
+ * implausible enough to trade for that. A school that puts one of these words in
+ * FRONT of its own name ("mail.stmarys.edu.au") is unaffected - see
+ * `registrableName`. Do not add generic English words on this reasoning.
+ */
+export const PUBLIC_MAIL_BRANDS = Object.freeze([
+  "gmail",
+  "googlemail",
+  "outlook",
+  "hotmail",
+  "live",
+  "msn",
+  "yahoo",
+  "ymail",
+  "rocketmail",
+  "aol",
+  "icloud",
+  "me",
+  "mac",
+  "proton",
+  "protonmail",
+  "gmx",
+  "mail",
+  "zoho",
+  "yandex",
+  "qq",
+]);
+
+/**
+ * Second-level labels that are part of a PUBLIC SUFFIX rather than a name anyone
+ * registered, when they sit under a two-letter ccTLD.
+ *
+ * "stmarys.edu.au" is registered at the third level, "stmarys.com" at the second,
+ * and telling those apart is what the Public Suffix List is for. We deliberately
+ * do NOT take a PSL dependency for this - it is a large, frequently-updated data
+ * file, and the whole of this module is dependency-free and runs with no network.
+ *
+ * THE HEURISTIC: if the last label is a two-letter ccTLD AND the label before it
+ * is one of these well-known registry labels, the suffix is two labels long;
+ * otherwise it is one.
+ *
+ * ITS LIMITS, stated rather than discovered later:
+ *   - It over-shortens exotic multi-label suffixes not listed here (e.g.
+ *     "example.act.edu.au" reads "edu" as the registrable name). That direction is
+ *     harmless: "edu" is not a provider brand, so nothing is wrongly refused.
+ *   - It over-lengthens a genuine two-label registration under a listed pair
+ *     (someone who really owns "co.xx"). Also harmless here, for the same reason.
+ * Both failure modes only ever produce a WRONG registrable name for domains whose
+ * name is not a provider brand, so the worst case is that a brand slips through to
+ * the exact-match list - never that a school domain is refused.
+ */
+const CCTLD_SECOND_LEVEL_LABELS = Object.freeze([
+  "com",
+  "co",
+  "net",
+  "ne",
+  "org",
+  "or",
+  "edu",
+  "ac",
+  "sch",
+  "gov",
+  "govt",
+  "gob",
+  "mil",
+  "id",
+  "in",
+  "info",
+  "biz",
+  "nom",
+  "asn",
+]);
+
+/**
+ * The registrable name of a host: the label immediately left of its public suffix.
+ *
+ *   "mail.com"             -> { name: "mail",    subdomain: false }
+ *   "hotmail.com.br"       -> { name: "hotmail", subdomain: false }
+ *   "yahoo.example"        -> { name: "yahoo",   subdomain: false }
+ *   "stmarys.edu.au"       -> { name: "stmarys", subdomain: false }
+ *   "mail.stmarys.edu.au"  -> { name: "stmarys", subdomain: true  }
+ *   "mail.gmail.com"       -> { name: "gmail",   subdomain: true  }
+ *
+ * `subdomain` records whether anything sat to the LEFT of the registrable name.
+ * That flag is the whole reason "mail.com" and "mail.stmarys.edu.au" can be told
+ * apart: in the first, "mail" IS the registered name and the host is a public
+ * provider; in the second, "mail" is just a label a school put in front of its own
+ * name, which is the most ordinary thing in the world.
+ *
+ * @param {string} value Already normalised, lower-cased, shape-checked.
+ * @returns {{ name: string, subdomain: boolean }|null} Null when there is no
+ *   registrable name at all (e.g. the bare suffix "com.au").
+ */
+export function registrableName(value) {
+  if (typeof value !== "string") return null;
+  const labels = value.split(".");
+  if (labels.length < 2) return null;
+
+  const last = labels[labels.length - 1];
+  const secondLast = labels[labels.length - 2];
+  const suffixLength =
+    last.length === 2 && CCTLD_SECOND_LEVEL_LABELS.includes(secondLast) ? 2 : 1;
+
+  const nameIndex = labels.length - suffixLength - 1;
+  if (nameIndex < 0) return null;
+
+  return { name: labels[nameIndex], subdomain: nameIndex > 0 };
+}
+
+/**
+ * Is this host a public mail provider the scanner must refuse?
+ *
+ * Two checks, in this order:
+ *  1. Exact match against PUBLIC_MAIL_DOMAINS - the fast, unambiguous path.
+ *  2. Brand match: the REGISTRABLE NAME is a known provider brand, under any
+ *     public suffix. Only when the brand is the registered name itself, never when
+ *     it is a subdomain label - so "hotmail.com.br" is refused while
+ *     "mail.gmail.com" and "mail.stmarys.edu.au" are both allowed, matching the
+ *     exact-match rule's own subdomain stance (see PUBLIC_MAIL_DOMAINS).
+ *
+ * @param {string} domain Already normalised and shape-checked.
+ * @returns {boolean}
+ */
+export function isPublicMailDomain(domain) {
+  if (typeof domain !== "string" || domain === "") return false;
+  if (PUBLIC_MAIL_DOMAINS.includes(domain)) return true;
+
+  const registrable = registrableName(domain);
+  if (!registrable || registrable.subdomain) return false;
+  return PUBLIC_MAIL_BRANDS.includes(registrable.name);
+}
 
 /** Accepted `scheduleFrequency` values. TASK-008 owns what they mean. */
 export const SCHEDULE_FREQUENCIES = Object.freeze(["daily", "weekly"]);
@@ -280,7 +476,9 @@ export function validateSchoolName(raw) {
  *     fifteen domains is reported as "too many" rather than silently collapsing
  *     to a number that happens to fit.
  *  2. Normalise, then shape-check each entry.
- *  3. Refuse public mail hosts, naming the offender.
+ *  3. Refuse public mail hosts - by exact host, then by provider brand under any
+ *     public suffix (`isPublicMailDomain`) - naming the offender either way, so the
+ *     user can see which of their entries was the problem.
  *  4. De-duplicate.
  *
  * Duplicates COLLAPSE rather than erroring. Two spellings of the same domain are
@@ -313,7 +511,7 @@ export function validateSearchDomains(raw) {
         `"${echo(entry)}" is not a valid email domain`
       );
     }
-    if (PUBLIC_MAIL_DOMAINS.includes(domain)) {
+    if (isPublicMailDomain(domain)) {
       throw new SettingsValidationError(
         "searchDomains",
         `${domain} is a public email provider, not a school domain - use the school's own domain`

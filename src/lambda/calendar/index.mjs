@@ -868,6 +868,42 @@ export async function routeSettingsRequest(path, method, event, options = {}) {
 }
 
 /**
+ * Narrow the handler's third argument down to route dependency overrides.
+ *
+ * SECURITY: the Node.js Lambda runtime invokes handlers with THREE arguments -
+ * `(event, context, callback)` - async handlers included. So in production this
+ * parameter receives the runtime's callback FUNCTION and the `= {}` default never
+ * applies. `routeAuthRequest`/`routeSettingsRequest` spread it, so any own
+ * enumerable property on whatever arrives third would land in the route layer as
+ * a dependency override - `tokenEndpoint`, `fetchImpl` and `exchangeCode`
+ * included. Pointing the code exchange at an attacker-controlled token endpoint
+ * is by itself enough to mint a site session for any account it names, because
+ * the `id_token` signature is deliberately not verified (see `decodeIdToken` in
+ * backend/google-oauth.mjs).
+ *
+ * A function happens to contribute nothing today, but only by accident: a
+ * function's built-in `name`/`length` are non-enumerable, and the runtime's
+ * callback carries no assigned own properties. Nothing in the code or the tests
+ * would notice that margin disappearing - an APM/instrumentation wrapper, a
+ * runtime change or in-house middleware could re-supply a callback with an own
+ * property on it. This check makes the guarantee structural instead: only a
+ * plain object (prototype `Object.prototype`, or null) is honoured as injection;
+ * a function, class instance, array or primitive contributes no overrides at all.
+ *
+ * The rule is identical in production and under test on purpose: it reads no
+ * NODE_ENV, no test-only env var, and no other signal that is absent in prod.
+ *
+ * @param {unknown} value The third handler argument.
+ * @returns {object} `value` when it is a plain object, otherwise `{}`.
+ */
+function asRouteDeps(value) {
+  if (value === null || typeof value !== "object") return {};
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) return {};
+  return value;
+}
+
+/**
  * Lambda handler for the school calendar app, invoked by the shared web-app ALB
  * on the /calendar* path prefix.
  *
@@ -875,18 +911,25 @@ export async function routeSettingsRequest(path, method, event, options = {}) {
  * deliberately open. The Google sign-in routes follow. The events API and the
  * frontend are added by later tickets.
  *
- * The third parameter is an injection seam, not part of the Lambda contract: AWS
- * calls `handler(event, context)`, and a test can call
+ * The third parameter is an injection seam, not part of the Lambda contract: the
+ * runtime calls `handler(event, context, callback)` and its callback is a
+ * function, which `asRouteDeps` rejects, so production supplies no overrides. A
+ * test can call
  * `handler(event, {}, { getConnection, putConnection, exchangeCode, env, ... })`
- * to exercise a route with no AWS credentials and no network. Anything passed
- * here is forwarded verbatim to the route handlers, which document their own
- * dependencies.
+ * to exercise a route with no AWS credentials and no network. A plain object
+ * passed here is forwarded verbatim to the route handlers, which document their
+ * own dependencies; anything that is not a plain object is ignored.
  *
  * @param {object} event
  * @param {object} [context]
- * @param {object} [deps] Route dependency overrides (tests only).
+ * @param {object} [deps] Route dependency overrides. Honoured only when it is a
+ *   plain object, so the runtime's `callback` argument cannot inject anything.
  */
 export async function handler(event, context = undefined, deps = {}) {
+  // Production receives the runtime's callback here; only a plain object is
+  // honoured as dependency overrides (see asRouteDeps for why this is enforced).
+  const routeDeps = asRouteDeps(deps);
+
   const path = event?.path || "/";
   const method = (event?.httpMethod || "GET").toUpperCase();
   const headers = event?.multiValueHeaders || event?.headers || {};
@@ -916,14 +959,14 @@ export async function handler(event, context = undefined, deps = {}) {
   // Google sign-in, session and connection status. `origin` is resolved once
   // above; `allowlist` is left to buildResponse's default unless a caller
   // overrides it (never pass null - see TASK-022).
-  const authResponse = await routeAuthRequest(path, method, event, { origin, ...deps });
+  const authResponse = await routeAuthRequest(path, method, event, { origin, ...routeDeps });
   if (authResponse) {
     return authResponse;
   }
 
   // School name and search domains. Authenticated: every response is either the
   // signed-in user's own settings or a 401.
-  const settingsResponse = await routeSettingsRequest(path, method, event, { origin, ...deps });
+  const settingsResponse = await routeSettingsRequest(path, method, event, { origin, ...routeDeps });
   if (settingsResponse) {
     return settingsResponse;
   }
@@ -934,6 +977,7 @@ export async function handler(event, context = undefined, deps = {}) {
 
 // Exported for unit tests and for the route modules added by later tickets.
 export {
+  asRouteDeps,
   buildResponse,
   jsonResponse,
   getCorsOrigin,

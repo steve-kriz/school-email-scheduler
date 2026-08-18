@@ -380,9 +380,27 @@ export async function exchangeCodeForTokens(
  * response, so a JWKS signature check would be verifying Google's word against
  * Google's own keys fetched over the same TLS trust. The CLAIMS are still fully
  * validated (see `validateIdTokenClaims`) because those are what the session is
- * minted from. Any future path that accepts an `id_token` from a CLIENT must add
- * real JWKS verification before trusting it.
+ * minted from.
  *
+ * That argument rests on WHERE the token came from, so it expires the moment
+ * either boundary condition below stops holding. Both must add real JWKS
+ * signature verification first:
+ *
+ *  1. A CLIENT-SUPPLIED `id_token`. Any future path that accepts an `id_token`
+ *     from a browser, a request body, a header or a query parameter has an
+ *     attacker directly in the position this reasoning assumes is empty.
+ *  2. `tokenEndpoint`, `fetchImpl` or `exchangeCode` becoming configurable from
+ *     the environment or from request input. They are injection seams for tests
+ *     only: `tokenEndpoint` defaults to the `GOOGLE_TOKEN_ENDPOINT` https
+ *     constant and is never read from `process.env`, and the Lambda handler
+ *     honours dependency overrides only from a plain object (see `asRouteDeps`
+ *     in src/lambda/calendar/index.mjs), so the runtime's `callback` argument
+ *     cannot supply one. If any of the three could be steered from outside the
+ *     code, the "response came from Google over authenticated TLS" premise is
+ *     gone: an attacker-chosen endpoint's unsigned `id_token` would be trusted,
+ *     and its `sub`/`email` claims would mint a valid session for any account.
+ *
+
  * @param {string} jwt
  * @returns {object|null} Claims, or null if the token is not a decodable JWT.
  */
