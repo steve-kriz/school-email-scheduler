@@ -1,10 +1,11 @@
 ---
 id: TASK-029
 title: Coverage predicate can report a directory as covered when it will not run
-status: todo
+status: in-progress
 created: 2026-08-18T02:22:00Z
-updated: 2026-08-18T02:22:00Z
+updated: 2026-08-18T02:54:42Z
 review-of: TASK-023
+agent: build-029
 ---
 
 ## Description

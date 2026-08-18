@@ -114,6 +114,14 @@ Security and correctness requirements:
       states, not error text.
 - [ ] No served file contains an `innerHTML =` assignment that includes a value
       from an API response.
+- [ ] A stored `schoolName` of `<img src=x onerror=alert(1)>` renders as literal
+      text on the settings page and on the setup prompt.
+      (From the TASK-005 review: this ticket scoped its escape rule to "every
+      value that came from an email", and its only concrete XSS criterion tested
+      an event title. `schoolName` comes from settings, not an email, so an
+      implementer reading the rule as email-scoped would render it unescaped.
+      Self-XSS only — same authenticated user — but the storage layer documents
+      this escaping as its mitigation, so it must be pinned here.)
 - [ ] An event whose title is `<img src=x onerror=alert(1)>` renders as literal
       text and executes no script.
 - [ ] A date-only `startsAt` renders on that calendar date with no timezone

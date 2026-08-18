@@ -1,10 +1,11 @@
 ---
 id: TASK-006
 title: Gmail message fetching with token refresh and incremental scanning
-status: todo
+status: in-progress
 created: 2026-08-17T11:00:00Z
-updated: 2026-08-17T11:00:00Z
+updated: 2026-08-18T02:54:42Z
 depends-on: TASK-005
+agent: build-006
 ---
 
 ## Description

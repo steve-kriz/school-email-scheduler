@@ -1,11 +1,11 @@
 ---
 id: TASK-005
 title: Connection settings API for school name and search domains
-status: pr-review
+status: done
 created: 2026-08-17T11:00:00Z
-updated: 2026-08-18T02:48:08Z
+updated: 2026-08-18T03:00:22Z
 depends-on: TASK-004
-activities: [{"activity":"code","model":"claude-opus-5","tokens":102248,"note":"settings.mjs + routes; scope extended into connections.mjs with cause"},{"activity":"test","model":"claude-haiku-4-5","tokens":90613,"note":"153 tests. Orchestrator mutation-verified 3 hazards: Set->JSON 4 fail, empty-SS 2 fail, sanitisation 5 fail. Tester reported suite as 1204; actual 803"}]
+activities: [{"activity":"code","model":"claude-opus-5","tokens":102248,"note":"settings.mjs + routes; scope extended into connections.mjs with cause"},{"activity":"test","model":"claude-haiku-4-5","tokens":90613,"note":"153 tests; 3 hazards mutation-verified"},{"activity":"review","model":"claude-opus-4-8","tokens":46164,"note":"no critical/high in executable code. Read TASK-007 and TASK-010 and found the raw-storage obligations settings.mjs documents do NOT cover schoolName -> ACs added to both tickets directly. Blocklist misses 10 consumer hosts incl outlook.com.au/yahoo.com.au -> TASK-032"}]
 ---
 
 ## Description
