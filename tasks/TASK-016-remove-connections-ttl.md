@@ -1,11 +1,11 @@
 ---
 id: TASK-016
 title: Remove the TTL reaper from the connections table
-status: testing
+status: done
 created: 2026-08-18T00:05:00Z
-updated: 2026-08-18T00:13:35Z
+updated: 2026-08-18T00:23:30Z
 review-of: TASK-002
-activities: [{"activity":"code","model":"claude-opus-5","startedAt":"2026-08-18T00:08:20Z","finishedAt":"2026-08-18T00:10:45Z","tokens":35955}]
+activities: [{"activity":"code","model":"claude-opus-5","startedAt":"2026-08-18T00:08:20Z","finishedAt":"2026-08-18T00:10:45Z","tokens":35955},{"activity":"test","model":"claude-haiku-4-5","startedAt":"2026-08-18T00:14:00Z","finishedAt":"2026-08-18T00:16:39Z","tokens":39821,"result":"pass","tests":238},{"activity":"review","model":"claude-opus-4-8","startedAt":"2026-08-18T00:19:55Z","finishedAt":"2026-08-18T00:21:09Z","tokens":29063,"verdict":"accept","followUps":["folded into TASK-017"]}]
 ---
 
 ## Description

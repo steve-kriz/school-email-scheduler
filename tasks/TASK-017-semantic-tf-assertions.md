@@ -47,7 +47,29 @@ than `refreshTokenEnc` and `refreshTokenKeyId`, so a genuinely plaintext
 Do not weaken existing coverage while refactoring: the suite must still cover
 every acceptance criterion TASK-002 listed.
 
-Note for sequencing: TASK-016 also edits these two test files, and TASK-014 and
+**Folded in from the TASK-016 review — brace counting is unsafe as it stands.**
+TASK-016 added `extractResourceBody(content, type, name)` and
+`bodyDeclaresTtlBlock(body)` at module scope in both dynamodb test files, and
+the shared helper this ticket builds must supersede them rather than sit
+alongside them. `extractResourceBody` counts braces without skipping string
+literals or comments. It works on today's files only because every brace-bearing
+construct happens to be balanced (`${local.name_prefix}`,
+`merge(var.tags, { ... })`). A future resource containing an unbalanced brace in
+a string, a comment, or a heredoc — `description = "use { here"`, or an inline
+IAM policy — makes the extractor return a **truncated** body, and a truncated
+body that omits a real `ttl` block yields a **false negative**: the TTL guard
+passes when it should fail.
+
+That is the worst failure mode available here, because the guard exists
+specifically to protect the table holding every user's OAuth grant, and later
+tickets add richer `.tf` files (TASK-003's `lambda_calendar.tf` already contains
+inline IAM policy JSON). So the shared helper must skip braces inside double-quoted
+strings, `#`/`//` line comments, and `<<EOT`/`<<-EOT` heredocs, and must be tested
+against a fixture containing each of those. Migrate both dynamodb test files onto
+the shared helper and delete the local copies, so there is exactly one
+implementation to keep correct.
+
+Note for sequencing: TASK-016 also edited these two test files, and TASK-014 and
 TASK-015 edit the scaffold test pair for the same class of reason. None of these
 tickets may be built concurrently with each other.
 
@@ -84,6 +106,21 @@ is.
 - [ ] The full suite passes under `node --test tests/unit tests/e2e`.
 - [ ] Mutated fixtures are written to a temp location and cleaned up even when a
       test fails; the real `.tf` files are never modified by a test.
+- [ ] The shared resource-body extractor ignores braces inside double-quoted
+      strings, `#` and `//` line comments, and `<<EOT` / `<<-EOT` heredocs.
+- [ ] A fixture containing an unbalanced brace in a string (e.g.
+      `description = "use { here"`) is extracted correctly, and a `ttl` block
+      placed *after* that string is still detected — proving the extractor
+      cannot produce a false negative by truncating the body.
+- [ ] Equivalent fixtures cover an unbalanced brace in a comment and in a
+      heredoc.
+- [ ] The extractor is verified against `terraform/lambda_calendar.tf`, which
+      contains inline IAM policy JSON, not only against the two dynamodb files.
+- [ ] `extractResourceBody` and `bodyDeclaresTtlBlock` exist in exactly one
+      place — the shared helper — and the local copies in both dynamodb test
+      files are deleted, not left duplicated.
+- [ ] TASK-016's TTL guard still passes after migrating onto the shared helper,
+      and its mutated-fixture test still fails when the block is re-added.
 
 ## Cucumber Tests
 ```gherkin
