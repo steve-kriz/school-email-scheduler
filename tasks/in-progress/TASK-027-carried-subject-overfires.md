@@ -1,11 +1,11 @@
 ---
 id: TASK-027
 title: Runbook guard over-fires — the carried-subject path never checks the carried verb's object
-status: pr-review
+status: done
 created: 2026-08-18T02:15:00Z
-updated: 2026-08-18T02:42:13Z
+updated: 2026-08-18T02:53:57Z
 review-of: TASK-024
-activities: [{"activity":"code","model":"claude-opus-5","note":"deviated from ticket instruction with cause; SECRET_ANAPHOR + antecedent gate"},{"activity":"test","model":"claude-haiku-4-5","tokens":65665,"note":"75 tests. Orchestrator re-swept all 23 CREATE_VERB branches: 23/23 pinned. Tester reported suite as 1051; actual is 650"}]
+activities: [{"activity":"code","model":"claude-opus-5","note":"deviated from ticket instruction with cause"},{"activity":"test","model":"claude-haiku-4-5","tokens":65665,"note":"75 tests; 23/23 CREATE_VERB branches pinned"},{"activity":"review","model":"claude-opus-4-8","tokens":59991,"note":"confirmed the deviation was correct. No critical/high. Found the false-negative direction: guard misses a claim that paraphrases secret (TASK-030 medium) plus over-fire breadth + weak pin (TASK-031 low). Both reproduced by orchestrator: 5/5 synonyms MISSED, 3 over-fires confirmed"}]
 ---
 
 ## Description
