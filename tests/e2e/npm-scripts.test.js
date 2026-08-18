@@ -40,21 +40,49 @@ function runCommand(cwd, command, args = []) {
  * This predicate rejects the escape hatch that `|| testScript.includes('tests/')` would provide,
  * because that would match even when the directory is not truly covered
  * (e.g., "tests/unit" contains the substring "tests/" but does not cover "tests/e2e").
+ *
+ * Hardened against false positives:
+ * - Case 1: Match must end at a path boundary (end of string, whitespace, or /)
+ *   (prevents "tests/e2e-legacy" matching when looking for "e2e")
+ * - Case 2: Token must be a genuine path argument (must not be preceded by =, or be a flag value)
+ *   (prevents "--test-name-pattern tests" making every directory covered)
  */
 function isDirectoryCovered(testScript, dirName) {
-  // Case 1: The specific directory is explicitly mentioned
-  if (testScript.includes(`tests/${dirName}`)) {
+  // Case 1: The specific directory is explicitly mentioned, at a path boundary
+  // Match "tests/<dir>" only if it's followed by end-of-string, whitespace, or /
+  const exactPattern = new RegExp(`tests/${dirName}(?:\\s|/|$)`);
+  if (exactPattern.test(testScript)) {
     return true;
   }
 
   // Case 2: A parent path is present as a standalone token
   // Split by whitespace to get individual arguments/tokens
   const tokens = testScript.split(/\s+/);
-  for (const token of tokens) {
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+
     // Exact parent directory token (covers all subdirs recursively)
-    if (token === 'tests' || token === 'tests/') {
+    // Prefer `tests/` with slash to avoid false matches with flag values like `--test-name-pattern tests`
+    if (token === 'tests/') {
       return true;
     }
+
+    // Bare `tests` is only valid as a path if it's NOT preceded by a flag argument
+    // (flags that take values should have = or be in positions where we can detect them)
+    if (token === 'tests') {
+      if (i === 0) {
+        // First token, definitely a path (though unusual)
+        return true;
+      }
+      const prevToken = tokens[i - 1];
+      // If previous token doesn't look like it takes an argument (doesn't start with -),
+      // then this could be a path
+      if (!prevToken.startsWith('-')) {
+        return true;
+      }
+      // Otherwise, skip it (likely a flag value)
+    }
+
     // Parent with wildcard (e.g., tests/* or tests/**)
     if (token.startsWith('tests/') && token.includes('*')) {
       return true;
@@ -145,6 +173,31 @@ describe('Feature: The test suite that CI runs includes the e2e scenarios', () =
         'e2e NOT mentioned, not covered by parent');
 
       console.log('Coverage predicate validation: accepts covered dirs, rejects uncovered');
+    });
+
+    it('When the predicate is tested against false-positive inputs, Then it rejects substring and flag-value matches', () => {
+      // False positive 1: Directory name appears in a similar path
+      // e.g., looking for 'e2e' in a script that mentions 'tests/e2e-legacy'
+      const scriptWithSimilar = 'node --test tests/e2e-legacy';
+      assert.ok(!isDirectoryCovered(scriptWithSimilar, 'e2e'),
+        'Should not match e2e in "tests/e2e-legacy" (substring false positive)');
+      assert.ok(isDirectoryCovered(scriptWithSimilar, 'e2e-legacy'),
+        'Should match e2e-legacy when explicitly present');
+
+      // False positive 2: Token appears as a flag value
+      // e.g., '--test-name-pattern tests' makes 'tests' a flag value, not a path
+      const scriptWithFlagValue = 'node --test --test-name-pattern tests tests/unit';
+      assert.ok(!isDirectoryCovered(scriptWithFlagValue, 'integration'),
+        'Flag value "tests" should not cover unlisted integration');
+      assert.ok(isDirectoryCovered(scriptWithFlagValue, 'unit'),
+        'Explicit tests/unit should be covered');
+
+      // False positive 3: Verify that legitimate parent path still works
+      const scriptWithParentPath = 'node --test tests/ --other-flag=value';
+      assert.ok(isDirectoryCovered(scriptWithParentPath, 'integration'),
+        'Parent path tests/ should cover all directories');
+
+      console.log('Coverage predicate hardening validated: rejects substring and flag-value false positives');
     });
 
     it('And all tests/ subdirectories containing test files are covered by the test script', () => {
@@ -240,9 +293,12 @@ describe('Feature: The test suite that CI runs includes the e2e scenarios', () =
         `test:e2e script should not invoke bddgen. Got: "${testEeScript}"`);
     });
 
-    it('And when npm run test:e2e is executed, Then it exits successfully', () => {
-      const result = runCommand(PROJECT_ROOT, 'npm', ['run', 'test:e2e']);
-      assert.equal(result.code, 0, `test:e2e should exit 0, got ${result.code}`);
+    it('And when the test:e2e script is executed against a specific e2e file, Then it exits successfully', () => {
+      // Note: spawning the full `npm run test:e2e` from within this file would be self-referential,
+      // since test:e2e is `node --test tests/e2e` and this file lives in tests/e2e.
+      // Instead, we verify that node --test works on a specific e2e file that does not itself spawn tests.
+      const result = runCommand(PROJECT_ROOT, 'node', ['--test', 'tests/e2e/terraform-scaffold.test.js']);
+      assert.equal(result.code, 0, `node --test on e2e file should exit 0, got ${result.code}`);
     });
   });
 
