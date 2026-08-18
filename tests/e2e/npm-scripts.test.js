@@ -183,6 +183,54 @@ describe('Feature: The test suite that CI runs includes the e2e scenarios', () =
       console.log('Coverage predicate accepts equivalent whole-tree script forms');
     });
 
+    it('When the predicate sees a directory that will NOT run, Then it never reports it covered', () => {
+      // TASK-029: the fail-open direction. Every script below runs tests/unit only,
+      // yet each reported tests/e2e as covered before the fix. The unit layer pins
+      // the same rules against the same shared predicate.
+      const runsUnitOnly = [
+        'node --import tests/e2e/setup.mjs --test tests/unit',
+        'node --require tests/e2e/setup.js --test tests/unit',
+        'node -r tests/e2e/setup.js --test tests/unit',
+        'node --loader tests/e2e/loader.mjs --test tests/unit',
+        'node --env-file tests/e2e/.env --test tests/unit',
+        'node --env-file-if-exists tests/e2e/.env --test tests/unit',
+        'node --test --import tests/e2e/setup.mjs tests/unit',
+        'node --test --loader tests/e2e/loader.mjs tests/unit',
+        'node --test --test-reporter-destination tests/e2e/out.txt tests/unit',
+        'echo tests && node --test tests/unit',
+        'node --test tests/unit && echo tests',
+        'node --test tests/unit ; echo tests',
+        'node --test tests/unit | grep tests',
+        'node --test tests/unit || echo tests',
+        'CI=1 node --test tests/unit',
+      ];
+
+      for (const script of runsUnitOnly) {
+        assert.ok(!isDirectoryCovered(script, 'e2e'),
+          `"${script}" runs only tests/unit; it must NOT be reported as covering tests/e2e`);
+        assert.ok(isDirectoryCovered(script, 'unit'),
+          `"${script}" does run tests/unit and must be reported as covering it`);
+      }
+
+      // A shape the predicate cannot resolve must answer "not covered", never "covered".
+      const undecidable = [
+        'node --test $(cat dirs.txt)',
+        'node --test "tests',
+        'node runner.mjs --test tests',
+        'node --test',
+        'npx mocha tests',
+      ];
+
+      for (const script of undecidable) {
+        for (const dir of ['unit', 'e2e']) {
+          assert.ok(!isDirectoryCovered(script, dir),
+            `Undecidable script "${script}" must not report tests/${dir} as covered`);
+        }
+      }
+
+      console.log('Fail-open direction closed: setup-file flags and foreign commands never report covered');
+    });
+
     it('And all tests/ subdirectories containing test files are covered by the test script', () => {
       // Discover which subdirectories of tests/ contain test files (any extension)
       const testsDir = path.join(PROJECT_ROOT, 'tests');

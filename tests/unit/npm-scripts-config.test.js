@@ -473,6 +473,173 @@ describe('Unit Tests: NPM Scripts Configuration for TASK-019', () => {
       });
     });
 
+    describe('Scenario: Path-valued node flags are not mistaken for directories to run', () => {
+      // The dangerous direction (TASK-029): reporting a directory as COVERED when it
+      // will not run. `--import tests/e2e/setup.mjs` registers a setup module; it is
+      // not a directory that executes. Each case below reported `true` before the fix.
+      const setupFileShapes = [
+        ['--import', 'node --import tests/e2e/setup.mjs --test tests/unit'],
+        ['--require', 'node --require tests/e2e/setup.js --test tests/unit'],
+        ['-r', 'node -r tests/e2e/setup.js --test tests/unit'],
+        ['--loader', 'node --loader tests/e2e/loader.mjs --test tests/unit'],
+        ['--env-file', 'node --env-file tests/e2e/.env --test tests/unit'],
+        ['--env-file-if-exists', 'node --env-file-if-exists tests/e2e/.env --test tests/unit'],
+      ];
+
+      for (const [flag, script] of setupFileShapes) {
+        it(`When ${flag} names a file under tests/e2e, Then tests/e2e is NOT reported covered`, () => {
+          assert.ok(!isDirectoryCovered(script, 'e2e'),
+            `"${script}" only runs tests/unit; tests/e2e must NOT be reported covered (AC 1/AC 2)`);
+          assert.ok(isDirectoryCovered(script, 'unit'),
+            `"${script}" does run tests/unit, which must still be reported covered`);
+        });
+      }
+
+      it('And the same holds when the setup flag follows --test (PINS the allowlist entries)', () => {
+        // These shapes are the allowlist pins for the path-valued flags: with the flag
+        // on VALUE_TAKING_FLAGS its value is consumed, so only tests/unit runs. Remove
+        // any one entry and its path value is read as a positional test path, which
+        // reports tests/e2e as covered by a command that never runs it.
+        const pinned = [
+          ['--import', 'node --test --import tests/e2e/setup.mjs tests/unit'],
+          ['--require', 'node --test --require tests/e2e/setup.js tests/unit'],
+          ['-r', 'node --test -r tests/e2e/setup.js tests/unit'],
+          ['--loader', 'node --test --loader tests/e2e/loader.mjs tests/unit'],
+          ['--env-file', 'node --test --env-file tests/e2e/.env tests/unit'],
+          ['--env-file-if-exists', 'node --test --env-file-if-exists tests/e2e/.env tests/unit'],
+          ['--test-reporter-destination', 'node --test --test-reporter-destination tests/e2e/out.txt tests/unit'],
+        ];
+
+        for (const [flag, script] of pinned) {
+          assert.ok(!isDirectoryCovered(script, 'e2e'),
+            `${flag} value must NOT be read as a test path (PINS allowlist entry). Got covered for "${script}"`);
+          assert.ok(isDirectoryCovered(script, 'unit'),
+            `Explicit tests/unit should still be covered in "${script}"`);
+        }
+      });
+
+      it('And a path-valued flag in =value form is also not a directory to run', () => {
+        const script = 'node --test --import=tests/e2e/setup.mjs tests/unit';
+        assert.ok(!isDirectoryCovered(script, 'e2e'),
+          `"${script}" must NOT report tests/e2e as covered`);
+        assert.ok(isDirectoryCovered(script, 'unit'), 'tests/unit should be covered');
+      });
+    });
+
+    describe('Scenario: Only the command that runs the tests contributes paths', () => {
+      it('When a bare "tests" token belongs to another command, Then it does not cover anything', () => {
+        // `echo tests` cannot run any test; before the fix its bare `tests` token
+        // satisfied the whole-tree short-circuit for the entire script (AC 3).
+        const script = 'echo tests && node --test tests/unit';
+        assert.ok(!isDirectoryCovered(script, 'e2e'),
+          `"${script}" must NOT report tests/e2e as covered (AC 3)`);
+        assert.ok(!isDirectoryCovered(script, 'integration'),
+          `"${script}" must NOT report tests/integration as covered`);
+        assert.ok(isDirectoryCovered(script, 'unit'),
+          'The node --test segment does run tests/unit');
+      });
+
+      it('And commands are split on &&, ||, ; and | (AC 4)', () => {
+        const separators = ['&&', '||', ';', '|'];
+        for (const separator of separators) {
+          const leading = `echo tests ${separator} node --test tests/unit`;
+          const trailing = `node --test tests/unit ${separator} echo tests`;
+          assert.ok(!isDirectoryCovered(leading, 'e2e'),
+            `"${leading}" must NOT report tests/e2e as covered (split on "${separator}")`);
+          assert.ok(!isDirectoryCovered(trailing, 'e2e'),
+            `"${trailing}" must NOT report tests/e2e as covered (split on "${separator}")`);
+          assert.ok(isDirectoryCovered(leading, 'unit'),
+            `"${leading}" should still cover tests/unit`);
+          assert.ok(isDirectoryCovered(trailing, 'unit'),
+            `"${trailing}" should still cover tests/unit`);
+        }
+      });
+
+      it('And each test-runner segment contributes its own paths', () => {
+        const script = 'echo tests && node --test tests/unit && node --test tests/e2e';
+        assert.ok(isDirectoryCovered(script, 'unit'), 'First runner segment covers tests/unit');
+        assert.ok(isDirectoryCovered(script, 'e2e'), 'Second runner segment covers tests/e2e');
+        assert.ok(!isDirectoryCovered(script, 'integration'),
+          'Neither runner segment mentions tests/integration');
+      });
+
+      it('And a segment that is not a node --test invocation contributes nothing', () => {
+        // node stops parsing its own flags at the first positional, so in
+        // "node runner.mjs --test tests" the --test belongs to runner.mjs and no
+        // directory under tests/ is discovered.
+        assert.ok(!isDirectoryCovered('node runner.mjs --test tests', 'e2e'),
+          '"node runner.mjs --test tests" runs runner.mjs, not the test runner');
+        assert.ok(!isDirectoryCovered('npx mocha tests', 'e2e'),
+          'A non-node runner is not recognised, so it must not report covered');
+        assert.ok(!isDirectoryCovered('node scripts/check-oauth-config.mjs tests', 'e2e'),
+          'A plain node script invocation runs no test directory');
+      });
+
+      it('And an environment-variable prefix does not change the answer', () => {
+        assert.ok(!isDirectoryCovered('CI=1 node --test tests/unit', 'e2e'),
+          '"CI=1 node --test tests/unit" must NOT cover tests/e2e (AC 9)');
+        assert.ok(isDirectoryCovered('CI=1 node --test tests/unit', 'unit'),
+          '"CI=1 node --test tests/unit" still covers tests/unit');
+        assert.ok(isDirectoryCovered('CI=1 node --test tests', 'e2e'),
+          '"CI=1 node --test tests" covers the whole tree');
+      });
+    });
+
+    describe('Scenario: A shape the predicate cannot parse never reports covered', () => {
+      it('When the script shape is unrecognised or unparseable, Then it is not covered', () => {
+        // The governing rule: a guard that cannot decide must not answer "covered".
+        const undecidable = [
+          'node --test $(cat dirs.txt)',
+          'node --test `cat dirs.txt`',
+          'node --test ${TEST_DIRS}',
+          'node --test "tests',
+          "node --test 'tests",
+          'node --test tests/unit > tests/e2e',
+          'node --test tests/unit < tests/e2e',
+          'node --test',              // no explicit path: absent evidence, not proof
+          '',
+          '   ',
+          'not-a-command at all',
+        ];
+
+        for (const script of undecidable) {
+          for (const dir of ['unit', 'e2e', 'integration']) {
+            let result;
+            try {
+              result = isDirectoryCovered(script, dir);
+            } catch (error) {
+              // Failing loud is acceptable; reporting covered is not.
+              continue;
+            }
+            assert.equal(result, false,
+              `Unparseable/unrecognised script "${script}" must not report tests/${dir} as covered (AC 8)`);
+          }
+        }
+      });
+
+      it('And a non-string or empty input is never covered', () => {
+        for (const value of [null, undefined, 0, 42, {}, [], true]) {
+          assert.equal(isDirectoryCovered(value, 'e2e'), false,
+            `Input ${JSON.stringify(value)} must not report covered`);
+        }
+        assert.equal(isDirectoryCovered('node --test tests', ''), false,
+          'An empty directory name must not report covered');
+        assert.equal(isDirectoryCovered('node --test tests', null), false,
+          'A null directory name must not report covered');
+      });
+
+      it('And extractPathArguments returns no speculative paths for those shapes', () => {
+        assert.deepEqual(extractPathArguments('echo tests && node --test tests/unit'), ['tests/unit'],
+          'Only the runner segment contributes paths');
+        assert.deepEqual(extractPathArguments('node --import tests/e2e/setup.mjs --test tests/unit'), ['tests/unit'],
+          'A setup module is not a path argument');
+        assert.deepEqual(extractPathArguments('node --test $(cat dirs.txt)'), [],
+          'An unparseable segment contributes nothing');
+        assert.deepEqual(extractPathArguments('node runner.mjs --test tests'), [],
+          'A non-runner segment contributes nothing');
+      });
+    });
+
     describe('Scenario: The shared predicate is imported not duplicated', () => {
       it('Then both test files import isDirectoryCovered from script-coverage.mjs', () => {
         const e2eContent = fs.readFileSync(
