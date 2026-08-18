@@ -1,10 +1,11 @@
 ---
 id: TASK-019
 title: Wire the node:test e2e suite into the npm scripts so CI actually runs it
-status: todo
+status: in-progress
 created: 2026-08-18T00:12:00Z
-updated: 2026-08-18T00:12:00Z
+updated: 2026-08-18T00:13:53Z
 review-of: TASK-012
+agent: build-019
 ---
 
 ## Description
