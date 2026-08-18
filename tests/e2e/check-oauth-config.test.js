@@ -636,7 +636,12 @@ describe('Google OAuth Configuration Preflight E2E Tests', () => {
         { tense: 'future', verb: 'create', sentence: 'Terraform will create the secret.' },
         { tense: 'passive', verb: 'created', sentence: 'The secret is created by Terraform.' },
         { tense: 'progressive', verb: 'creating', sentence: 'Terraform is creating the secret.' },
-        { tense: 'progressive', verb: 'establishing', sentence: 'Terraform is establishing the secret for you.' }
+        { tense: 'progressive', verb: 'establishing', sentence: 'Terraform is establishing the secret for you.' },
+        // Two unpinned verb branches: makes? and sets? up
+        { tense: 'base', verb: 'make', sentence: 'Terraform will make the secret for this stack.' },
+        { tense: 'active', verb: 'makes', sentence: 'Terraform makes the secret for you.' },
+        { tense: 'base', verb: 'set up', sentence: 'Terraform will set up the secret for this stack.' },
+        { tense: 'active', verb: 'sets up', sentence: 'Terraform sets up the secret for you.' }
       ];
 
       OWNERSHIP_CLAIM_FIXTURES.forEach((fixture) => {
@@ -830,6 +835,36 @@ describe('Google OAuth Configuration Preflight E2E Tests', () => {
             `Expected the known-open bypass "${fixture.name}" to NOT be caught: "${fixture.text}". ` +
               'This boundary must remain open to avoid false positives on legitimate prose about other stacks. ' +
               'If this test fails, the carry logic has changed and the bypass is no longer open.'
+          );
+        });
+      });
+
+      // Documented over-fire: The anaphor rule is position-sensitive and can fire when
+      // an anaphor word (payload, value, etc.) appears in the object phrase but is a
+      // modifier (like "payload schema") rather than the head noun referring to the
+      // secret. The rule would need to parse noun phrase structure to distinguish
+      // these cases, which is beyond the scope of this regex-based guard. This over-fire
+      // is rare and legitimate documentation often uses these words to describe system
+      // components (e.g., the events table schema), so it is acceptable to leave open.
+      const KNOWN_OVER_FIRE_FIXTURES = [
+        {
+          name: 'anaphor word as modifier of a different noun',
+          text: 'Terraform reads this secret. It also creates the payload schema for the events table.',
+          reason: 'payload modifies schema, not referring to the secret itself'
+        }
+      ];
+
+      KNOWN_OVER_FIRE_FIXTURES.forEach((fixture) => {
+        it(`Then the documented over-fire "${fixture.name}" IS caught as expected`, () => {
+          const mutated = `${runbookText()}\n\n${fixture.text}\n`;
+          const claims = terraformCreatesSecretClaimsIn(mutated);
+
+          assert.ok(
+            claims.length > 0,
+            `Expected the known over-fire "${fixture.name}" to be caught: "${fixture.text}". ` +
+              `This boundary is left open (and caught as a false positive) because: ${fixture.reason} ` +
+              'Tightening this would require parsing noun phrase structure, which is beyond scope of ' +
+              'a regex-based guard. If this test fails, the anaphor rule has changed and behavior has shifted.'
           );
         });
       });
