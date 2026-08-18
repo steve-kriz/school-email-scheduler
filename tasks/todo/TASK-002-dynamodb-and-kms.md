@@ -1,11 +1,11 @@
 ---
 id: TASK-002
 title: DynamoDB connection and event tables with a KMS CMK
-status: testing
+status: done
 created: 2026-08-17T11:00:00Z
-updated: 2026-08-17T23:54:27Z
+updated: 2026-08-18T00:04:48Z
 depends-on: TASK-001
-activities: [{"activity":"code","model":"claude-opus-5","startedAt":"2026-08-17T23:50:31Z","finishedAt":"2026-08-17T23:53:10Z","tokens":24737}]
+activities: [{"activity":"code","model":"claude-opus-5","startedAt":"2026-08-17T23:50:31Z","finishedAt":"2026-08-17T23:53:10Z","tokens":24737},{"activity":"test","model":"claude-haiku-4-5","startedAt":"2026-08-17T23:54:30Z","finishedAt":"2026-08-17T23:58:02Z","tokens":52536,"result":"pass","tests":152},{"activity":"review","model":"claude-opus-4-8","startedAt":"2026-08-18T00:00:56Z","finishedAt":"2026-08-18T00:02:35Z","tokens":36634,"verdict":"accept","followUps":["TASK-016","TASK-017"]}]
 ---
 
 ## Description
