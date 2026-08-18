@@ -40,6 +40,21 @@ export const SECRET_ATTRIBUTES = ["refreshTokenEnc"];
  */
 export const PUBLIC_ATTRIBUTES = ["email", "schoolName"];
 
+/**
+ * Whether the caller could determine the connection state at all.
+ *
+ * "not_connected" and "unknown" are deliberately DIFFERENT answers. Collapsing
+ * them means a transient DynamoDB error renders in the UI as a confident "not
+ * connected", which invites the user to re-authorise a grant they already hold -
+ * minting a second refresh token and overwriting a working connection to fix
+ * what was a blip. A caller that cannot tell the two apart cannot avoid that.
+ */
+export const CONNECTION_STATUS = {
+  CONNECTED: "connected",
+  NOT_CONNECTED: "not_connected",
+  UNKNOWN: "unknown",
+};
+
 /** Fallback region when the Lambda runtime has not set AWS_REGION. */
 const DEFAULT_REGION = "ap-southeast-2";
 
@@ -184,20 +199,37 @@ export function stripSecrets(item) {
  * refresh token exists, never from the token itself, so no response body can
  * carry token material.
  *
+ * `connectionStatus` carries the answer `connected` cannot express: whether the
+ * state is KNOWN. A caller that could not read the table passes
+ * `lookupFailed: true` and gets `connected: false` with
+ * `connectionStatus: "unknown"`, so the UI can say "could not check" instead of
+ * inviting the user to re-authorise a grant they already hold. `connected` stays
+ * a plain boolean, and is only ever `true` when a stored grant was actually seen.
+ *
  * @param {object|null} connection A row from `getConnection`, or null.
  * @param {object} [fallback] Values to fall back on when there is no row yet
  *   (the session's email, typically - a user who has signed in but whose row has
  *   not been written).
- * @returns {{ email: string|null, schoolName: string|null, connected: boolean }}
+ * @param {object} [options]
+ * @param {boolean} [options.lookupFailed] True when the read threw, i.e. the
+ *   connection state could not be determined.
+ * @returns {{ email: string|null, schoolName: string|null, connected: boolean, connectionStatus: string }}
  */
-export function toPublicJson(connection, fallback = {}) {
+export function toPublicJson(connection, fallback = {}, { lookupFailed = false } = {}) {
   const source = connection && typeof connection === "object" ? connection : {};
   const out = {};
   for (const attribute of PUBLIC_ATTRIBUTES) {
     const value = source[attribute] !== undefined ? source[attribute] : fallback[attribute];
     out[attribute] = value === undefined || value === null || value === "" ? null : value;
   }
-  out.connected = source.hasRefreshToken === true;
+
+  const known = lookupFailed !== true;
+  out.connected = known && source.hasRefreshToken === true;
+  out.connectionStatus = !known
+    ? CONNECTION_STATUS.UNKNOWN
+    : out.connected
+      ? CONNECTION_STATUS.CONNECTED
+      : CONNECTION_STATUS.NOT_CONNECTED;
   return out;
 }
 

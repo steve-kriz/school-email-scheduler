@@ -560,9 +560,14 @@ export async function handleAuthLogout(event, options = {}) {
  * GET /calendar/api/auth/me - who is signed in, and are they connected?
  *
  * Response body is the `toPublicJson` projection: `email`, `schoolName`,
- * `connected`. No token, no ciphertext, no key id - `connected` is derived from
- * whether a wrapped refresh token exists, so the answer never requires touching
- * the token itself.
+ * `connected` and `connectionStatus`. No token, no ciphertext, no key id -
+ * `connected` is derived from whether a wrapped refresh token exists, so the
+ * answer never requires touching the token itself.
+ *
+ * `connectionStatus` is "connected" | "not_connected" | "unknown". "unknown"
+ * means the connections table could not be read: the session is still valid and
+ * the identity is still reported, but the caller must not present that as "not
+ * connected" (see the catch block below for why that distinction matters).
  *
  * @param {object} event
  * @param {object} [options]
@@ -607,18 +612,27 @@ export async function handleAuthMe(event, options = {}) {
   }
 
   let connection = null;
+  let lookupFailed = false;
   try {
     connection = await loadConnection(connectionUserId(claims.sub), { env });
   } catch (err) {
-    // A lookup failure must not log the user out: the session is valid on its
-    // own. Report the identity we can prove and connected=false, and say so.
-    logBasic("[Calendar] Connection lookup failed; reporting connected=false:", {
+    // A lookup failure must not log the user out - the session is valid on its
+    // own - but it must not masquerade as "not connected" either. Reporting a
+    // confident false here would invite the user to re-authorise a grant they
+    // already hold, minting a second refresh token over a working connection to
+    // fix what was a blip. So the identity is still reported and the connection
+    // state is reported as unknown.
+    lookupFailed = true;
+    logBasic("[Calendar] Connection lookup failed; reporting connectionStatus=unknown:", {
       errorName: err?.name || "Error",
       errorMessage: err?.message || "unknown error",
     });
   }
 
-  return jsonResponse(200, toPublicJson(connection, { email: claims.email }), { origin, allowlist });
+  return jsonResponse(200, toPublicJson(connection, { email: claims.email }, { lookupFailed }), {
+    origin,
+    allowlist,
+  });
 }
 
 /**
