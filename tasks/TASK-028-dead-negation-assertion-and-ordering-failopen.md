@@ -1,20 +1,27 @@
 ---
 id: TASK-028
-title: A dead negated-object assertion and an ordering guard that fails open on reformat
+title: Four assertions that do not verify what they claim (preflight guard + npm-scripts)
 status: todo
 created: 2026-08-18T02:15:00Z
-updated: 2026-08-18T02:15:00Z
-review-of: TASK-024
+updated: 2026-08-18T02:22:00Z
+review-of: TASK-024, TASK-023
 ---
 
 ## Description
-Two low findings from the TASK-024 review, both in
-`tests/e2e/check-oauth-config.test.js`, both verified by execution.
+Four low findings, all the same defect class: an assertion that reports success
+over behaviour it never exercises. Two come from the TASK-024 review and live in
+`tests/e2e/check-oauth-config.test.js`; two come from the TASK-023 review and live
+in `tests/e2e/npm-scripts.test.js`. All four were verified by execution or by
+reading the predicate.
 
-They share the "must never fail open" principle with **TASK-017**, but they are
-filed separately on purpose: TASK-017 owns the terraform/HCL helpers in the
-dynamodb and lambda test files, and folding a different file's guards into it
-would make an already-large ticket harder to finish. Treat the two as siblings,
+They are grouped because the fix is the same discipline in each case — make the
+assertion depend on the thing its name promises — not because the files are
+related. Sections 1-2 and 3-4 can be done independently.
+
+These share the "must never fail open" principle with **TASK-017** (terraform/HCL
+helpers) and **TASK-029** (the coverage predicate's false-covered cases), and are
+filed separately from both: TASK-017 owns a different subsystem, and TASK-029 is a
+medium fail-open defect rather than a weak assertion. Treat all three as siblings,
 not duplicates.
 
 ### 1. The negated-object assertion can never fail (dead assertion)
@@ -88,6 +95,51 @@ make the guard **throw** rather than `return` when the marker is missing. A guar
 that cannot find what it is guarding must be loud — the same requirement TASK-017
 imposes on the terraform helpers, for the same reason.
 
+### 3. "executes successfully" never checks the exit code
+`tests/e2e/npm-scripts.test.js:259-264`:
+
+```js
+it('And the node --test tests/unit command executes successfully', () => {
+  const result = runCommand(PROJECT_ROOT, 'node', ['--test', 'tests/unit/terraform-scaffold.test.js']);
+  // Should not error, though exit code may vary
+  const output = result.stdout + result.stderr;
+  assert.ok(output.length > 0, 'node --test should produce output');
+});
+```
+
+The test is named "executes successfully" and never inspects `result.code`. Its own
+comment concedes the point — *"exit code may vary"*. `node --test` writes output on
+failure as well as success, so `output.length > 0` holds either way.
+
+Undetected mutation: make `tests/unit/terraform-scaffold.test.js` fail with a
+non-zero exit — this test still passes, because stderr is non-empty.
+
+It also hardcodes `tests/unit/terraform-scaffold.test.js`, which is the file that
+shells out to `terraform validate -json`. That does not affect pass/fail here
+(output is non-empty whether or not terraform exists), but it means the test's
+runtime depends on an external binary for no benefit. Point it at
+`tests/helpers/exit-zero-fixture.mjs` — created by TASK-023 precisely to be a
+dependency-free spawn target — and assert `result.code === 0`.
+
+### 4. "npm test completes without hanging or excessive forking" never runs npm test
+`tests/e2e/npm-scripts.test.js:568-586`. The test name promises that `npm test`
+completes without hanging or forking. The body checks that the fixture file exists
+and that `scopeScriptToSingleFile(...)` output excludes `tests/e2e`. It never
+invokes `npm test`.
+
+Undetected mutation: if `npm test` genuinely hung or fork-bombed, this test would
+still pass, because the behaviour it names is never executed.
+
+The comment acknowledges the substitution — *"the existence of a fixture file and
+the scoping logic prove no re-entrance occurs"* — and that reasoning is sound as
+far as it goes: `node --test <file>` performs no directory discovery, so
+re-entrance genuinely cannot occur. The defect is the **name**, which claims an
+empirical property the test does not measure. Either rename it to describe what it
+actually checks (the scoped command excludes the e2e directory), or make it spawn
+the real thing with a timeout and assert exit 0 plus a bounded process count. The
+real exit-0 proof at lines 471-482 already does the latter for `test:e2e`, so
+renaming is the cheaper and more honest fix.
+
 ## Impact If Not Fixed
 Finding 1 leaves the suite carrying a test that appears to cover the
 `NEGATED_OBJECT` asymmetry and covers nothing. That is worse than having no test,
@@ -104,9 +156,20 @@ exists returns `ResourceNotFoundException`. If the steps were later reordered
 while the commands happened to be reformatted, that trap could ship with the
 suite green.
 
-Neither has a security consequence and neither is failing today. Both are on the
-board because they are the same defect class this project has now hit fifteen
-times: an assertion reporting success over nothing.
+Findings 3 and 4 cannot drop a directory or weaken a guarantee — the properties
+they name are covered elsewhere (the real exit-0 proof at lines 471-482, and the
+scoped-command recursion checks). Their cost is misdirection: a reviewer auditing
+this suite reads "executes successfully" and "completes without hanging or
+excessive forking" and concludes exit-code health and fork safety are measured
+here. Neither is. When someone later needs to know whether those properties are
+guarded — most likely while debugging a CI hang — the test names will send them to
+the wrong place and they will trust an answer the suite never established.
+
+None of the four has a security consequence and none is failing today. All four
+are on the board because they are the same defect class this project has now hit
+sixteen times: an assertion reporting success over behaviour it does not exercise.
+The recurring lesson is that a test's name is a claim, and an unexercised claim in
+a green suite is worse than a missing test, because it stops anyone looking.
 
 ## Acceptance Criteria
 - [ ] The negated-object assertion contains no constant that forces its predicate
@@ -128,6 +191,16 @@ times: an assertion reporting success over nothing.
       passing.
 - [ ] The real runbook still passes unchanged.
 - [ ] No test writes to `docs/google-oauth-setup.md`; fixtures stay in memory.
+- [ ] The "executes successfully" test asserts `result.code === 0`.
+- [ ] That test spawns `tests/helpers/exit-zero-fixture.mjs` rather than the
+      terraform-shelling file, so it needs no external binary.
+- [ ] Making the spawn target exit non-zero turns that test red — verified by
+      mutation.
+- [ ] The "completes without hanging or excessive forking" test either runs
+      `npm test` with a timeout and asserts exit 0 plus a bounded process count,
+      or is renamed to state only what it checks.
+- [ ] No test in `npm-scripts.test.js` has a name promising a property it does not
+      exercise.
 - [ ] The full suite passes.
 
 ## Cucumber Tests
@@ -153,6 +226,20 @@ Feature: Guards in the preflight suite cannot pass vacuously or fail open
     Given the unmodified runbook
     When the suite runs
     Then every assertion passes
+
+  Scenario: "executes successfully" depends on the exit code
+    Given a spawn target that exits non-zero
+    When the executes-successfully test runs
+    Then it fails
+
+  Scenario: The spawn target needs no external binary
+    Given a machine with no terraform installed
+    When the executes-successfully test runs
+    Then it still passes
+
+  Scenario: No test name promises what it does not measure
+    Given every test in npm-scripts.test.js
+    Then each name describes a property its body exercises
 ```
 
 ## Additional Context

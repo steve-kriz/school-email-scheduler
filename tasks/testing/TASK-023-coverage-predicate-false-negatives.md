@@ -1,11 +1,11 @@
 ---
 id: TASK-023
 title: Coverage predicate rejects legitimate script forms; unit guard cannot fail
-status: pr-review
+status: done
 created: 2026-08-18T01:20:00Z
-updated: 2026-08-18T02:05:57Z
+updated: 2026-08-18T02:25:11Z
 review-of: TASK-019
-activities: [{"activity":"code","model":"claude-opus-5","tokens":52758,"note":"predicate 7/7 verified by execution"},{"activity":"test","model":"claude-haiku-4-5","tokens":119810,"note":"2 attempts: 71 tests. Attempt 1 left 3 of 4 allowlist entries unpinned; all 4 now pinned, re-verified by orchestrator sweep"}]
+activities: [{"activity":"code","model":"claude-opus-5","tokens":52758,"note":"predicate 7/7 verified"},{"activity":"test","model":"claude-haiku-4-5","tokens":119810,"note":"2 attempts; 71 tests; all 4 allowlist entries pinned"},{"activity":"review","model":"claude-opus-4-8","tokens":51706,"note":"recursion guard now explicit (not incidental) - confirmed. No critical/high. Found predicate CAN return false-covered: 5 shapes reproduced by orchestrator -> TASK-029 medium. 2 weak assertions -> folded into TASK-028"}]
 ---
 
 ## Description
