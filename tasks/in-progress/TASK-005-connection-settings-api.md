@@ -1,10 +1,11 @@
 ---
 id: TASK-005
 title: Connection settings API for school name and search domains
-status: todo
+status: in-progress
 created: 2026-08-17T11:00:00Z
-updated: 2026-08-17T11:00:00Z
+updated: 2026-08-18T02:26:01Z
 depends-on: TASK-004
+agent: build-005
 ---
 
 ## Description

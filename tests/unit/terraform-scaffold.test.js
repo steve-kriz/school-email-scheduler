@@ -85,6 +85,19 @@ describe('Terraform Scaffold Unit Tests', () => {
       assert.ok(variablesContent.length > 0, 'variables.tf is empty');
     });
 
+    // Reads the right-hand side of a `<name> = ...` assignment inside a locals
+    // block. Scoping to the assignment is what makes the ordering assertions
+    // below meaningful: a file-wide `includes()` cannot tell tenant-first from
+    // environment-first. The evaluated behaviour is covered for real by
+    // `terraform console` in tests/e2e/terraform-scaffold.test.js.
+    function localAssignment(name) {
+      const match = variablesContent.match(
+        new RegExp(`^[ \\t]*${name}[ \\t]*=[ \\t]*(\\S.*)$`, 'm')
+      );
+      assert.ok(match, `${name} local assignment not found in variables.tf`);
+      return match[1].trim();
+    }
+
     it('should define local.name_prefix', () => {
       assert.ok(variablesContent.includes('locals {'),
         'locals block not found');
@@ -98,11 +111,23 @@ describe('Terraform Scaffold Unit Tests', () => {
         'local.name_prefix does not reference var.project_name');
     });
 
+    it('should interpolate local.name_prefix as tenant-environment-project_name in that order', () => {
+      assert.equal(localAssignment('name_prefix'),
+        '"${var.tenant}-${var.environment}-${var.project_name}"',
+        'local.name_prefix must interpolate var.tenant, var.environment then var.project_name in that order');
+    });
+
     it('should define local.name_prefix_short', () => {
       assert.ok(variablesContent.includes('name_prefix_short'),
         'name_prefix_short local not defined');
       assert.ok(variablesContent.includes('project_name_short'),
         'local.name_prefix_short does not reference var.project_name_short');
+    });
+
+    it('should interpolate local.name_prefix_short as tenant-environment-project_name_short in that order', () => {
+      assert.equal(localAssignment('name_prefix_short'),
+        '"${var.tenant}-${var.environment}-${var.project_name_short}"',
+        'local.name_prefix_short must interpolate var.tenant, var.environment then var.project_name_short in that order');
     });
 
     it('should define local.secret_name', () => {
@@ -114,6 +139,12 @@ describe('Terraform Scaffold Unit Tests', () => {
         'local.secret_name does not reference var.tenant');
       assert.ok(variablesContent.includes('app-config/school_calendar_services'),
         'local.secret_name does not reference correct secret path');
+    });
+
+    it('should interpolate local.secret_name as environment-tenant/app-config/school_calendar_services in that order', () => {
+      assert.equal(localAssignment('secret_name'),
+        '"${var.environment}-${var.tenant}/app-config/school_calendar_services"',
+        'local.secret_name must interpolate var.environment then var.tenant, followed by /app-config/school_calendar_services');
     });
 
     it('should declare variable.project_name', () => {

@@ -1,10 +1,11 @@
 ---
 id: TASK-027
 title: Runbook guard over-fires — the carried-subject path never checks the carried verb's object
-status: todo
+status: in-progress
 created: 2026-08-18T02:15:00Z
-updated: 2026-08-18T02:15:00Z
+updated: 2026-08-18T02:26:01Z
 review-of: TASK-024
+agent: build-027
 ---
 
 ## Description

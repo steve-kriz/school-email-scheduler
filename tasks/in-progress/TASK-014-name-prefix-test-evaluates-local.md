@@ -1,10 +1,11 @@
 ---
 id: TASK-014
 title: name_prefix test must evaluate the Terraform local, not re-implement it
-status: todo
+status: in-progress
 created: 2026-08-18T00:00:00Z
-updated: 2026-08-18T00:00:00Z
+updated: 2026-08-18T02:26:02Z
 review-of: TASK-001
+agent: build-014
 ---
 
 ## Description

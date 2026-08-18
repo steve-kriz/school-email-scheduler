@@ -12,6 +12,133 @@ const PROJECT_ROOT = path.join(__dirname, '..', '..');
 const TERRAFORM_DIR = path.join(PROJECT_ROOT, 'terraform');
 const CONFIG_DIR = path.join(TERRAFORM_DIR, 'config');
 
+// The terraform locals below are evaluated for real with `terraform console`.
+// That cannot run inside terraform/ itself: the s3 backend declared in
+// provider.tf demands AWS credentials. So variables.tf plus config/ are copied
+// into a throwaway workspace which contains no backend and no providers, and
+// is initialised with -backend=false.
+const DEV_AU_VAR_FILE = 'config/dev/au.tfvars';
+const TERRAFORM_BIN = resolveTerraformBin();
+
+function resolveTerraformBin() {
+  const candidates = [
+    'C:/External/Terraform/terraform.exe',
+    'C:/External/Terraform/terraform'
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  // Fall back to whatever is on PATH. If terraform is not installed at all the
+  // exec calls below throw, and every caller turns that into a hard failure -
+  // this helper must never let a missing terraform become a silent skip.
+  return 'terraform';
+}
+
+function describeExecError(error) {
+  const parts = [];
+  if (error.status !== undefined && error.status !== null) parts.push(`exit status ${error.status}`);
+  if (error.message) parts.push(error.message);
+  const stdout = (error.stdout || '').toString().trim();
+  const stderr = (error.stderr || '').toString().trim();
+  if (stdout) parts.push(`stdout: ${stdout}`);
+  if (stderr) parts.push(`stderr: ${stderr}`);
+  return parts.join(' | ');
+}
+
+function removeWorkspace(workspace) {
+  if (!workspace) return;
+  try {
+    fs.rmSync(workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  } catch (error) {
+    // Never mask the real test result with a cleanup error, but do not leave a
+    // leaked workspace unannounced either.
+    console.error(`Failed to remove temporary terraform workspace ${workspace}: ${error.message}`);
+  }
+}
+
+/**
+ * Build a throwaway terraform workspace holding variables.tf (optionally
+ * mutated) and config/, and run `terraform init -backend=false` in it once.
+ * Callers reuse the returned directory for every `terraform console` call -
+ * init is the slow part, evaluation is not.
+ */
+function createTerraformConsoleWorkspace(mutateVariablesTf) {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'tf-locals-'));
+  try {
+    const variablesTfPath = path.join(TERRAFORM_DIR, 'variables.tf');
+    const original = fs.readFileSync(variablesTfPath, 'utf-8');
+    const contents = mutateVariablesTf ? mutateVariablesTf(original) : original;
+    fs.writeFileSync(path.join(workspace, 'variables.tf'), contents, 'utf-8');
+    fs.cpSync(CONFIG_DIR, path.join(workspace, 'config'), { recursive: true });
+
+    execSync(`"${TERRAFORM_BIN}" init -backend=false -input=false -no-color`, {
+      cwd: workspace,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 180000
+    });
+  } catch (error) {
+    removeWorkspace(workspace);
+    throw new Error(`Failed to prepare terraform console workspace: ${describeExecError(error)}`);
+  }
+  return workspace;
+}
+
+/**
+ * Evaluate a single terraform expression by feeding it to `terraform console`
+ * on stdin, and return the string it printed. Throws - never returns a
+ * fallback - if terraform fails or the output cannot be parsed.
+ */
+function evaluateTerraformExpression(workspace, expression, varFile = DEV_AU_VAR_FILE) {
+  let stdout;
+  try {
+    stdout = execSync(`"${TERRAFORM_BIN}" console -no-color -var-file=${varFile}`, {
+      cwd: workspace,
+      input: `${expression}\n`,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 120000
+    });
+  } catch (error) {
+    throw new Error(`terraform console failed evaluating "${expression}": ${describeExecError(error)}`);
+  }
+
+  // Strip any ANSI escapes before looking for the quoted result.
+  const clean = stdout.replace(/\u001b\[[0-9;]*m/g, '');
+  const match = clean.match(/"((?:[^"\\]|\\.)*)"/);
+  if (!match) {
+    throw new Error(
+      `Could not parse a string value for "${expression}" from terraform console output: ${JSON.stringify(clean)}`
+    );
+  }
+  return match[1];
+}
+
+// Matches the `name_prefix = ...` assignment whatever spacing is used, so a
+// reformat of variables.tf cannot quietly turn the mutation below into a no-op.
+// name_prefix_short is not matched: `name_prefix` there is followed by `_`.
+const NAME_PREFIX_ASSIGNMENT = /^([ \t]*name_prefix[ \t]*=[ \t]*)(\S.*)$/m;
+const REORDERED_NAME_PREFIX = '"${var.environment}-${var.tenant}-${var.project_name}"';
+
+function reorderNamePrefixInterpolation(variablesTfContents) {
+  if (!NAME_PREFIX_ASSIGNMENT.test(variablesTfContents)) {
+    throw new Error(
+      'Could not find the `name_prefix =` assignment in terraform/variables.tf, so the ordering ' +
+      'mutation could not be applied. Fix this test rather than letting the mutation silently no-op.'
+    );
+  }
+  const mutated = variablesTfContents.replace(
+    NAME_PREFIX_ASSIGNMENT,
+    (fullMatch, lhs) => `${lhs}${REORDERED_NAME_PREFIX}`
+  );
+  if (mutated === variablesTfContents) {
+    throw new Error('The ordering mutation left terraform/variables.tf unchanged - the mutation is not being applied.');
+  }
+  return mutated;
+}
+
 describe('Terraform Scaffold E2E Tests', () => {
   describe('Feature: Terraform scaffold', () => {
     describe('Scenario: The shared layer validates on its own', () => {
@@ -47,28 +174,62 @@ describe('Terraform Scaffold E2E Tests', () => {
     });
 
     describe('Scenario: Resource names are prefixed per tenant and environment', () => {
+      // One workspace, one `terraform init`, reused by every evaluation below.
+      let workspace;
+
+      before(() => {
+        workspace = createTerraformConsoleWorkspace();
+      });
+
+      after(() => {
+        removeWorkspace(workspace);
+        workspace = undefined;
+      });
+
       it('Given the dev/au tfvars are loaded, When the name_prefix local is evaluated, Then it equals "au-dev-receptionhq"', () => {
-        // Parse the tfvars and variables.tf manually to derive name_prefix
-        const tfvarsPath = path.join(CONFIG_DIR, 'dev', 'au.tfvars');
-        const tfvarsContent = fs.readFileSync(tfvarsPath, 'utf-8');
-
-        const tenantMatch = tfvarsContent.match(/tenant\s*=\s*"([^"]+)"/);
-        const envMatch = tfvarsContent.match(/environment\s*=\s*"([^"]+)"/);
-        const projMatch = tfvarsContent.match(/project_name\s*=\s*"([^"]+)"/);
-
-        const tenant = tenantMatch ? tenantMatch[1] : null;
-        const env = envMatch ? envMatch[1] : null;
-        const proj = projMatch ? projMatch[1] : null;
-
-        assert.ok(tenant, 'tenant not found in tfvars');
-        assert.ok(env, 'environment not found in tfvars');
-        assert.ok(proj, 'project_name not found in tfvars');
-
-        // The name_prefix is defined in variables.tf as: ${var.tenant}-${var.environment}-${var.project_name}
-        const namePrefix = `${tenant}-${env}-${proj}`;
-
+        const namePrefix = evaluateTerraformExpression(workspace, 'local.name_prefix');
         assert.equal(namePrefix, 'au-dev-receptionhq',
-          `Expected name_prefix to be "au-dev-receptionhq", got "${namePrefix}"`);
+          `Expected terraform to evaluate local.name_prefix to "au-dev-receptionhq", got "${namePrefix}"`);
+      });
+
+      it('Given the dev/au tfvars are loaded, When the name_prefix_short local is evaluated, Then it equals "au-dev-rhq"', () => {
+        const namePrefixShort = evaluateTerraformExpression(workspace, 'local.name_prefix_short');
+        assert.equal(namePrefixShort, 'au-dev-rhq',
+          `Expected terraform to evaluate local.name_prefix_short to "au-dev-rhq", got "${namePrefixShort}"`);
+      });
+
+      it('Given the dev/au tfvars are loaded, When the secret_name local is evaluated, Then it equals "dev-au/app-config/school_calendar_services"', () => {
+        const secretName = evaluateTerraformExpression(workspace, 'local.secret_name');
+        assert.equal(secretName, 'dev-au/app-config/school_calendar_services',
+          `Expected terraform to evaluate local.secret_name to "dev-au/app-config/school_calendar_services", got "${secretName}"`);
+      });
+
+      it('Given the name_prefix interpolation is reordered in a temp copy, When it is evaluated, Then it no longer equals "au-dev-receptionhq"', () => {
+        // Proves the assertions above discriminate: the same harness, given a
+        // wrong local, must produce a different value. If this ever passes with
+        // the reordered interpolation still yielding "au-dev-receptionhq", the
+        // evaluation is not really reading variables.tf.
+        const baseline = evaluateTerraformExpression(workspace, 'local.name_prefix');
+        assert.equal(baseline, 'au-dev-receptionhq',
+          `Baseline local.name_prefix should be "au-dev-receptionhq" before mutating, got "${baseline}"`);
+
+        let mutatedWorkspace;
+        try {
+          mutatedWorkspace = createTerraformConsoleWorkspace(reorderNamePrefixInterpolation);
+
+          const mutatedSource = fs.readFileSync(path.join(mutatedWorkspace, 'variables.tf'), 'utf-8');
+          assert.ok(mutatedSource.includes(REORDERED_NAME_PREFIX),
+            'The temp copy of variables.tf does not contain the reordered interpolation');
+
+          const mutatedPrefix = evaluateTerraformExpression(mutatedWorkspace, 'local.name_prefix');
+          assert.notEqual(mutatedPrefix, 'au-dev-receptionhq',
+            'Reordering the name_prefix interpolation still evaluated to "au-dev-receptionhq" - ' +
+            'the test is not evaluating the local and would pass with the ordering wrong');
+          assert.equal(mutatedPrefix, 'dev-au-receptionhq',
+            `Expected the reordered interpolation to evaluate to "dev-au-receptionhq", got "${mutatedPrefix}"`);
+        } finally {
+          removeWorkspace(mutatedWorkspace);
+        }
       });
     });
 

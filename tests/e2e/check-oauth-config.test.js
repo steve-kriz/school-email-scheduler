@@ -74,6 +74,24 @@ const BACK_REFERRING_SUBJECT =
 // Only consulted on the carried path, where the object comes from the previous
 // clause and so cannot itself carry the negation.
 const NEGATED_OBJECT = /^\s*(nothing|none|no|neither|nor)\b/i;
+// On the carried path the object must be the *carried verb's own* object, not
+// merely a secret mentioned in the previous clause. Asking only "did the
+// previous clause mention a secret?" over-fires badly: the secret is this
+// runbook's main subject, so a nearby mention is the normal case, and
+// "Terraform reads the secret. It also creates the DynamoDB table." is accurate
+// documentation (terraform/dynamodb_calendar_events.tf et al. really do exist)
+// yet was reported as a false claim.
+//
+// So the carried object counts only when it denotes the secret: either it names
+// it outright ("It creates the secret on the first apply"), or it is an anaphor
+// for the secret carried over the boundary — a secret's "value"/"contents" is
+// the secret, which is what makes "Terraform handles this secret. It provisions
+// the value for you." a genuine claim. The previous clause is consulted only to
+// supply that anaphor's antecedent, never as the object test on its own; a
+// carried verb acting on some other named resource is not a claim about the
+// secret however close the nearest secret mention is.
+const SECRET_ANAPHOR =
+  /^\s*(?:the|its|this|that|these|those)?\s*(?:value|values|contents?|payload|version)\b/i;
 
 /** Clauses in the given document that claim Terraform creates the secret. */
 function terraformCreatesSecretClaimsIn(documentText) {
@@ -109,7 +127,9 @@ function terraformCreatesSecretClaimsIn(documentText) {
     const secretIsTheObject =
       /\bsecrets?\b/i.test(after.slice(0, OBJECT_WINDOW)) ||
       /\bsecrets?\b/i.test(before.slice(-OBJECT_WINDOW)) ||
-      (carriesTerraformSubject && /\bsecrets?\b/i.test(priorClause));
+      (carriesTerraformSubject &&
+        SECRET_ANAPHOR.test(after) &&
+        /\bsecrets?\b/i.test(priorClause));
     if (!secretIsTheObject) continue;
 
     if (NEGATION_BEFORE_VERB.test(before)) continue;
@@ -664,6 +684,79 @@ describe('Google OAuth Configuration Preflight E2E Tests', () => {
               'subject and create verb sit in separate clauses must still be reported.'
           );
         });
+      });
+
+      // The carry's object test must look at what the *carried verb* operates
+      // on. Asking only whether the previous clause mentioned a secret made the
+      // guard over-fire on accurate documentation: Terraform in this project
+      // genuinely does create the Lambda execution role, the DynamoDB tables
+      // and the KMS CMK (terraform/lambda_calendar.tf,
+      // dynamodb_calendar_connections.tf, dynamodb_calendar_events.tf,
+      // kms_calendar.tf), and the secret is this runbook's main subject, so a
+      // nearby secret mention is the normal case rather than a rare one.
+      // Re-loosening the object test back to "the prior clause mentions a
+      // secret" turns every case below red.
+      const CARRIED_VERB_OTHER_OBJECT_FIXTURES = [
+        {
+          object: 'Lambda execution role',
+          text: 'Terraform reads this secret. It then creates the Lambda execution role.'
+        },
+        {
+          object: 'DynamoDB table',
+          text: 'Terraform reads the secret. It also creates the DynamoDB table.'
+        },
+        {
+          object: 'KMS key',
+          text: 'Terraform reads the secret. It also creates the KMS key.'
+        },
+        {
+          object: 'CloudWatch log group',
+          text: 'Terraform reads the secret. It also provisions the CloudWatch log group.'
+        },
+        {
+          object: 'IAM policy (passive-adjacent phrasing)',
+          text: 'Terraform reads this secret. It manages the IAM policy for the function.'
+        }
+      ];
+
+      CARRIED_VERB_OTHER_OBJECT_FIXTURES.forEach((fixture) => {
+        it(`Then a carried verb whose object is the ${fixture.object} is not reported`, () => {
+          const baseline = runbookText();
+          assert.deepEqual(
+            terraformCreatesSecretClaimsIn(baseline),
+            [],
+            'Baseline runbook must be claim-free for this fixture to mean anything'
+          );
+
+          const mutated = `${baseline}\n\n${fixture.text}\n`;
+          assert.deepEqual(
+            terraformCreatesSecretClaimsIn(mutated),
+            [],
+            `The guard false-positived on accurate documentation: "${fixture.text}". ` +
+              'On the carried path the secret must be the object of the carried verb; ' +
+              'a secret merely mentioned in the previous clause is not enough, or every ' +
+              'true statement about what Terraform does create is reported as a false claim.'
+          );
+        });
+      });
+
+      // The counterpart to the table above: tightening the carried object test
+      // must not go so far as to drop the carry altogether. The carried verb
+      // acting on the secret itself, or on an anaphor for it, is still a claim.
+      it('Then tightening the carried object test did not disable the carry', () => {
+        const carriedClaims = [
+          'Terraform handles this secret. It provisions the value for you.',
+          'Terraform is the home of this secret. It creates the secret on the first apply.'
+        ];
+
+        for (const text of carriedClaims) {
+          const mutated = `${runbookText()}\n\n${text}\n`;
+          assert.ok(
+            terraformCreatesSecretClaimsIn(mutated).length > 0,
+            `The carried path went dead: "${text}" must still be reported. Excluding ` +
+              'other objects must not be implemented by refusing to carry at all.'
+          );
+        }
       });
 
       // Documented boundary. The carry is deliberately limited to one clause and
