@@ -69,6 +69,47 @@ against a fixture containing each of those. Migrate both dynamodb test files ont
 the shared helper and delete the local copies, so there is exactly one
 implementation to keep correct.
 
+**Also folded in from the TASK-021 review — the Sid-first guard disables itself
+silently (medium).** `tests/unit/calendar-lambda-terraform.test.js` gained
+`assertAllStatementsHaveSidFirst` (lines ~52–78) to close a false negative where a
+statement with `Sid` in a later position hid its `Resource = "*"` from the
+least-privilege guard. That fix has the same weakness as the extractor above: it
+locates the policy array with `indexOf('Statement = [')` and then counts `[`/`]`
+without skipping string literals, and on **any** mismatch or missing marker it
+`return`s silently, skipping the whole check.
+
+Verified by execution. With the marker reformatted from `Statement = [` to
+`Statement=[`, a synthetic statement carrying `Resource = "*"` with its `Sid`
+last is not reported at all:
+
+```
+normal `Statement = [` marker      -> THREW (guard active)
+reformatted `Statement=[` marker   -> SILENT PASS -> ["VPCNetworkInterfaces"]
+```
+
+So a whitespace edit turns off the guard protecting the KMS decrypt path for every
+user's refresh token, with the suite still green. Two requirements:
+
+- The shared extractor must find the `Statement` array by a tolerant pattern
+  (`/Statement\s*=\s*\[/`), not a literal string, and must skip brackets inside
+  strings, comments and heredocs.
+- **It must never fail open.** If the policy cannot be parsed, the helper must
+  throw with a message saying so — not `return` silently. A guard that cannot
+  find what it is guarding has to be loud. Add a fixture proving that an
+  unparseable policy fails rather than passes.
+
+**And the brittleness the same review raised (low).** The Sid-first check hard-fails
+whenever `Sid` is not the first key, rather than attributing correctly. That was
+the right immediate call over a silent false negative, and the message is
+actionable ("Reorder the statement so Sid is first"). But it fails the suite on
+correct HCL if someone alphabetises keys so `Action` precedes `Sid`, sending them
+to fix test plumbing rather than code. (`terraform fmt` only aligns `=`; it does
+not reorder keys, so routine formatting is safe.) Once the shared extractor parses
+statement objects structurally, attribute `Resource` to its enclosing statement
+regardless of key order and **delete the Sid-first constraint** — it exists only
+because the current parser splits on Sid boundaries. Keep a test proving a
+Sid-last statement's unscoped `Resource` is still caught.
+
 Note for sequencing: TASK-016 also edited these two test files, and TASK-014 and
 TASK-015 edit the scaffold test pair for the same class of reason. None of these
 tickets may be built concurrently with each other.
@@ -121,6 +162,20 @@ is.
       files are deleted, not left duplicated.
 - [ ] TASK-016's TTL guard still passes after migrating onto the shared helper,
       and its mutated-fixture test still fails when the block is re-added.
+- [ ] The `Statement` array is located by a tolerant pattern, so `Statement=[`
+      (no spaces) and `Statement  =  [` are both found.
+- [ ] The helper **throws** rather than returning silently when a policy cannot
+      be parsed — verified with an unparseable fixture that must fail, not pass.
+- [ ] With the marker reformatted to `Statement=[`, a Sid-last statement carrying
+      `Resource = "*"` is still reported (or the run fails loudly) — the silent
+      pass demonstrated in the TASK-021 review no longer occurs.
+- [ ] `Resource` is attributed to its enclosing statement regardless of key
+      order, and the `assertAllStatementsHaveSidFirst` constraint is deleted once
+      that holds.
+- [ ] A test proves an unscoped `Resource` in a Sid-last statement is caught by
+      attribution, not by the deleted key-order constraint.
+- [ ] Alphabetising a statement's keys so `Action` precedes `Sid` no longer fails
+      the suite.
 
 ## Cucumber Tests
 ```gherkin
