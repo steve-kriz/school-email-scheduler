@@ -1,10 +1,11 @@
 ---
 id: TASK-003
 title: Calendar Lambda, IAM, security group and ALB wiring
-status: todo
+status: in-progress
 created: 2026-08-17T11:00:00Z
-updated: 2026-08-17T11:00:00Z
+updated: 2026-08-18T00:05:25Z
 depends-on: TASK-002
+agent: build-003
 ---
 
 ## Description

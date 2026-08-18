@@ -51,14 +51,6 @@ resource "aws_dynamodb_table" "calendar_connections" {
     type = "S"
   }
 
-  # No TTL expiry in practice - a connection lives until the user disconnects.
-  # The attribute is enabled so an operator can stamp `ttl` on an orphaned row
-  # and have it reaped without a manual delete.
-  ttl {
-    attribute_name = "ttl"
-    enabled        = true
-  }
-
   point_in_time_recovery {
     enabled = true
   }

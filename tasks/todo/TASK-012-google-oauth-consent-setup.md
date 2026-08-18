@@ -1,10 +1,10 @@
 ---
 id: TASK-012
 title: Google OAuth client setup runbook and restricted-scope verification path
-status: testing
+status: pr-review
 created: 2026-08-18T09:00:00Z
-updated: 2026-08-18T00:00:54Z
-activities: [{"activity":"code","model":"claude-opus-5","startedAt":"2026-08-17T23:50:32Z","finishedAt":"2026-08-17T23:57:42Z","tokens":63761,"note":"built in worktree; salvaged by file copy"}]
+updated: 2026-08-18T00:08:19Z
+activities: [{"activity":"code","model":"claude-opus-5","startedAt":"2026-08-17T23:50:32Z","finishedAt":"2026-08-17T23:57:42Z","tokens":63761,"note":"built in worktree; salvaged by file copy"},{"activity":"test","model":"claude-haiku-4-5","startedAt":"2026-08-18T00:01:00Z","finishedAt":"2026-08-18T00:06:13Z","tokens":63697,"result":"pass","tests":231}]
 ---
 
 ## Description

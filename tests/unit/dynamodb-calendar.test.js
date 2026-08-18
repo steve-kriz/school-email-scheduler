@@ -9,6 +9,42 @@ const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.join(__dirname, '..', '..');
 const TERRAFORM_DIR = path.join(PROJECT_ROOT, 'terraform');
 
+// -----------------------------------------------------------------------------
+// TTL guard helpers (TASK-016)
+// -----------------------------------------------------------------------------
+// The connections table must declare NO ttl block: it holds the only copy of
+// each user's encrypted OAuth grant, and an enabled reaper would silently and
+// permanently expire it if any writer ever stamped a `ttl` attribute. The events
+// table's ttl block is legitimate, so the guard is scoped to a single resource
+// body by brace counting rather than searching the whole file.
+
+/** Return the body text of `resource "<type>" "<name>" { ... }`, or null. */
+function extractResourceBody(content, resourceType, resourceName) {
+  const header = new RegExp(`resource\\s+"${resourceType}"\\s+"${resourceName}"\\s*\\{`);
+  const match = header.exec(content);
+  if (!match) return null;
+
+  const open = match.index + match[0].length - 1; // index of the opening brace
+  let depth = 0;
+  for (let i = open; i < content.length; i++) {
+    if (content[i] === '{') depth++;
+    else if (content[i] === '}') {
+      depth--;
+      if (depth === 0) return content.slice(open + 1, i);
+    }
+  }
+  return null;
+}
+
+/** True if the given resource body declares a `ttl { ... }` block. */
+function bodyDeclaresTtlBlock(body) {
+  const withoutComments = body
+    .split('\n')
+    .filter(line => !line.trim().startsWith('#') && !line.trim().startsWith('//'))
+    .join('\n');
+  return /(^|\n)\s*ttl\s*\{/.test(withoutComments);
+}
+
 describe('DynamoDB Calendar Unit Tests', () => {
 
   describe('KMS key (kms_calendar.tf)', () => {
@@ -165,6 +201,22 @@ describe('DynamoDB Calendar Unit Tests', () => {
         'server_side_encryption should be enabled');
       assert.ok(connectionsContent.includes('kms_key_arn = aws_kms_key.calendar.arn'),
         'server_side_encryption should use the calendar CMK');
+    });
+
+    it('should NOT declare a ttl block (no reaper on the OAuth grant table)', () => {
+      const content = fs.readFileSync(
+        path.join(TERRAFORM_DIR, 'dynamodb_calendar_connections.tf'), 'utf-8');
+      const body = extractResourceBody(content, 'aws_dynamodb_table', 'calendar_connections');
+      assert.ok(body, 'aws_dynamodb_table.calendar_connections resource body not found');
+      assert.equal(bodyDeclaresTtlBlock(body), false,
+        'connections table must not declare a ttl block - a reaper here would silently expire the only copy of a user\'s OAuth grant');
+    });
+
+    it('should not document an operator-stamped connections TTL', () => {
+      const content = fs.readFileSync(
+        path.join(TERRAFORM_DIR, 'dynamodb_calendar_connections.tf'), 'utf-8');
+      assert.ok(!content.includes('reaped'),
+        'the comment justifying a connections TTL should be removed along with the block');
     });
 
     it('should define refreshTokenEnc attribute in the schema', () => {

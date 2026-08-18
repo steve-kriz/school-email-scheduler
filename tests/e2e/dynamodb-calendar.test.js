@@ -2,6 +2,7 @@ import { describe, it, before, after } from 'node:test';
 import * as assert from 'node:assert';
 import { execSync } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +11,50 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.join(__dirname, '..', '..');
 const TERRAFORM_DIR = path.join(PROJECT_ROOT, 'terraform');
+
+// -----------------------------------------------------------------------------
+// TTL guard helpers (TASK-016)
+// -----------------------------------------------------------------------------
+// Scoped to one resource body by brace counting so the guard fires only on the
+// connections table and never on the events table's legitimate ttl block.
+
+/** Return the body text of `resource "<type>" "<name>" { ... }`, or null. */
+function extractResourceBody(content, resourceType, resourceName) {
+  const header = new RegExp(`resource\\s+"${resourceType}"\\s+"${resourceName}"\\s*\\{`);
+  const match = header.exec(content);
+  if (!match) return null;
+
+  const open = match.index + match[0].length - 1; // index of the opening brace
+  let depth = 0;
+  for (let i = open; i < content.length; i++) {
+    if (content[i] === '{') depth++;
+    else if (content[i] === '}') {
+      depth--;
+      if (depth === 0) return content.slice(open + 1, i);
+    }
+  }
+  return null;
+}
+
+/** True if the given resource body declares a `ttl { ... }` block. */
+function bodyDeclaresTtlBlock(body) {
+  const withoutComments = body
+    .split('\n')
+    .filter(line => !line.trim().startsWith('#') && !line.trim().startsWith('//'))
+    .join('\n');
+  return /(^|\n)\s*ttl\s*\{/.test(withoutComments);
+}
+
+/**
+ * The guard assertion under test. Throws if the connections table in `content`
+ * declares a ttl block.
+ */
+function assertNoConnectionsTtl(content) {
+  const body = extractResourceBody(content, 'aws_dynamodb_table', 'calendar_connections');
+  assert.ok(body, 'aws_dynamodb_table.calendar_connections resource body not found');
+  assert.equal(bodyDeclaresTtlBlock(body), false,
+    'connections table must not declare a ttl block');
+}
 
 describe('DynamoDB Calendar E2E Tests', () => {
   describe('Feature: Calendar data stores', () => {
@@ -231,6 +276,81 @@ describe('DynamoDB Calendar E2E Tests', () => {
           'point_in_time_recovery block not found');
         assert.ok(connectionsContent.includes('enabled = true'),
           'point_in_time_recovery not enabled');
+      });
+    });
+  });
+
+  describe('Feature: The OAuth grant table has no expiry reaper', () => {
+    const connectionsPath = path.join(TERRAFORM_DIR, 'dynamodb_calendar_connections.tf');
+    const eventsPath = path.join(TERRAFORM_DIR, 'dynamodb_calendar_events.tf');
+
+    describe('Scenario: The connections table declares no TTL', () => {
+      it('Given terraform/dynamodb_calendar_connections.tf, Then it contains no ttl block', () => {
+        const content = fs.readFileSync(connectionsPath, 'utf-8');
+        assertNoConnectionsTtl(content);
+      });
+    });
+
+    describe('Scenario: The events table keeps its TTL', () => {
+      it('Given terraform/dynamodb_calendar_events.tf, Then it declares a ttl block enabled on attribute "ttl"', () => {
+        const content = fs.readFileSync(eventsPath, 'utf-8');
+        const body = extractResourceBody(content, 'aws_dynamodb_table', 'calendar_events');
+        assert.ok(body, 'aws_dynamodb_table.calendar_events resource body not found');
+        assert.equal(bodyDeclaresTtlBlock(body), true,
+          'events table should still declare a ttl block');
+        assert.ok(/ttl\s*\{[^}]*attribute_name\s*=\s*"ttl"[^}]*enabled\s*=\s*true/.test(body),
+          'events table ttl should be enabled on attribute "ttl"');
+      });
+    });
+
+    describe('Scenario: Re-adding the connections TTL turns the suite red', () => {
+      it('Given a mutated copy of the connections file, When the guard runs, Then it fails', () => {
+        const content = fs.readFileSync(connectionsPath, 'utf-8');
+        const mutated = content.replace(
+          /(\n\s*point_in_time_recovery\s*\{)/,
+          '\n  ttl {\n    attribute_name = "ttl"\n    enabled        = true\n  }\n$1'
+        );
+        assert.notEqual(mutated, content, 'fixture mutation did not apply');
+
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'task016-ttl-guard-'));
+        const tmpFile = path.join(tmpDir, 'dynamodb_calendar_connections.tf');
+        try {
+          fs.writeFileSync(tmpFile, mutated, 'utf-8');
+          assert.throws(
+            () => assertNoConnectionsTtl(fs.readFileSync(tmpFile, 'utf-8')),
+            assert.AssertionError,
+            'guard should fail when a ttl block is re-added to the connections table'
+          );
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      });
+    });
+
+    describe('Scenario: The test does not confuse the two tables', () => {
+      it("Given the events table's legitimate ttl block, When the connections guard runs, Then it does not fire", () => {
+        const eventsContent = fs.readFileSync(eventsPath, 'utf-8');
+        assert.equal(
+          extractResourceBody(eventsContent, 'aws_dynamodb_table', 'calendar_connections'),
+          null,
+          'the connections guard should find no connections resource in the events file');
+
+        // The guard, run over both files concatenated, still passes: the events
+        // table's ttl block is outside the connections resource body.
+        const connectionsContent = fs.readFileSync(connectionsPath, 'utf-8');
+        assertNoConnectionsTtl(`${eventsContent}\n${connectionsContent}`);
+        assertNoConnectionsTtl(`${connectionsContent}\n${eventsContent}`);
+      });
+    });
+
+    describe('Scenario: Durability settings survive the change', () => {
+      it('Then point_in_time_recovery is enabled and server_side_encryption references the calendar KMS key', () => {
+        const content = fs.readFileSync(connectionsPath, 'utf-8');
+        const body = extractResourceBody(content, 'aws_dynamodb_table', 'calendar_connections');
+        assert.ok(/point_in_time_recovery\s*\{[^}]*enabled\s*=\s*true/.test(body),
+          'point_in_time_recovery should still be enabled');
+        assert.ok(/server_side_encryption\s*\{[^}]*kms_key_arn\s*=\s*aws_kms_key\.calendar\.arn/.test(body),
+          'server_side_encryption should still reference the calendar CMK');
       });
     });
   });
