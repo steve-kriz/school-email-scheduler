@@ -5,9 +5,12 @@ depends on, plus the verification path required before general release.
 
 This document describes **human steps in the Google Cloud Console and the AWS
 CLI**. Nothing here is automated by Terraform: the OAuth client lives in a
-Google Cloud project, not in AWS, and the Secrets Manager *values* are populated
-by an operator (Terraform creates and reads the secret, it never writes
-credentials into it).
+Google Cloud project, not in AWS, and both the Secrets Manager secret *and* its
+values are created by an operator. Terraform only ever **reads** that secret —
+it does not create the secret and it never writes credentials into it, so the
+secret must already exist and hold a version before the first `terraform apply`.
+[Section 4](#4-populating-the-secrets-manager-secret) covers both the create and
+the populate step.
 
 The automated half of this ticket is the preflight described in
 [Section 7](#7-preflight-verifying-the-configuration) — run it after Section 4
@@ -174,8 +177,9 @@ Rules that bite in practice:
 ### After creating the client
 
 Google shows the client ID and client secret **once**. Copy both straight into
-the Secrets Manager command in Section 4 — do not paste them into a ticket, a
-chat message, a `.env` file that might be committed, or this runbook. The client
+the `put-secret-value` command in Section 4 (§4.2) — do not paste them into a
+ticket, a chat message, a `.env` file that might be committed, or this runbook.
+The client
 ID always ends with `.apps.googleusercontent.com`; the client secret is a short
 opaque string that can be rotated from the same Console screen if leaked.
 
@@ -187,10 +191,24 @@ Section 7 — it surfaces only as a failed user sign-in.
 
 ## 4. Populating the Secrets Manager secret
 
-Terraform creates and reads the per-tenant secret
+Terraform **only reads** the per-tenant secret
 `${environment}-${tenant}/app-config/school_calendar_services`
-(`local.secret_name` in `terraform/variables.tf`). The payload is a flat JSON
-object. Populate it once per environment/tenant pair, in that account and region:
+(`local.secret_name` in `terraform/variables.tf`). It does not create it:
+
+- `terraform/main.tf` reads the *value* through
+  `data "aws_secretsmanager_secret_version"`.
+- `terraform/lambda_calendar.tf` reads the *ARN* through
+  `data "aws_secretsmanager_secret"`, only so the Lambda's IAM policy can be
+  scoped to this one secret.
+
+Both are read-only data sources, and there is no `resource
+"aws_secretsmanager_secret"` anywhere under `terraform/`. So the secret must
+exist **and already hold a version** before the first `terraform apply` for that
+environment/tenant pair — otherwise the plan fails reading a secret, or a secret
+version, that is not there.
+
+The payload is a flat JSON object. Create it once (§4.1) and populate it (§4.2)
+per environment/tenant pair, in that account and region:
 
 | Environment | Tenant | Secret id | Region |
 | --- | --- | --- | --- |
@@ -198,6 +216,39 @@ object. Populate it once per environment/tenant pair, in that account and region
 | `prod` | `au` | `prod-au/app-config/school_calendar_services` | `ap-southeast-2` |
 | `prod` | `uk` | `prod-uk/app-config/school_calendar_services` | `eu-west-2` |
 | `prod` | `us` | `prod-us/app-config/school_calendar_services` | `us-west-1` |
+
+### Who creates the secret
+
+Checked at the time of writing, so you do not have to search Terraform for a
+resource that was never written:
+
+- **This repository does not create it.** Only the two read-only data sources
+  above.
+- **The sibling `ohq-chatbot2` stack does not create its equivalent either.** It
+  reads `${environment}-${tenant}/app-config/ohq_chatbot_services` through the
+  same read-only `data "aws_secretsmanager_secret_version"` source, and that
+  project's own docs create its secrets by hand with
+  `aws secretsmanager create-secret`.
+- **The shared `tf-cloudinfra` stack does not create them either.** It reads
+  several `${environment}-${tenant}/app-config/...` secrets (for example
+  `consoleapi-cnfg`) and declares no `aws_secretsmanager_secret` *resource*
+  at all.
+- **`tf-basestack` was not inspectable from here.** It is the repo named at the
+  top of `terraform/config/<environment>/<tenant>.tfvars` and the source of
+  `data.terraform_remote_state.basestack`, so it cannot be ruled out as the
+  owner.
+
+On that evidence, the `app-config` secrets are an **operator-owned
+prerequisite**: something a human establishes out of band, outside every stack
+listed above. So §4.1 below does it by hand.
+
+Before running §4.1 for a **brand-new environment or tenant**, confirm with
+whoever owns platform secret provisioning (the `tf-basestack` owners) that no
+other stack is expected to create this secret. If one is, let that stack create
+it and skip to §4.2 — creating it by hand would leave the secret outside the
+state file that expects to manage it. For an environment that is already running,
+the secret exists already and §4.1 is a no-op you can confirm rather than a step
+you need.
 
 ### Keys
 
@@ -218,11 +269,67 @@ fresh one:
 openssl rand -base64 32
 ```
 
-### The command
+### 4.1 Create the secret
+
+Once per environment/tenant pair, in that pair's account and region. The payload
+here is a **placeholder skeleton** — it establishes the secret and its first
+version so Terraform's data sources resolve; §4.2 puts the real values in.
+
+Your AWS profile needs `secretsmanager:CreateSecret` for this step and
+`secretsmanager:PutSecretValue` for §4.2, in that account and region. The secret
+is encrypted with the account's default Secrets Manager KMS key unless you pass
+`--kms-key-id`; nothing in this stack requires a customer-managed key for it.
+
+```bash
+aws secretsmanager create-secret \
+  --region ap-southeast-2 \
+  --name "dev-au/app-config/school_calendar_services" \
+  --description "School Email Scheduler app config (dev-au)" \
+  --secret-string '{
+    "GOOGLE_CLIENT_ID": "REPLACE_ME_CLIENT_ID.apps.googleusercontent.com",
+    "GOOGLE_CLIENT_SECRET": "REPLACE_ME_GOOGLE_CLIENT_SECRET",
+    "SESSION_SECRET": "REPLACE_ME_BASE64_OF_32_RANDOM_BYTES",
+    "ANTHROPIC_API_KEY": "REPLACE_ME_ANTHROPIC_API_KEY",
+    "ALLOWED_ORIGINS": "REPLACE_ME_TENANT_ORIGIN"
+  }'
+```
+
+`--name` must be exactly `local.secret_name` for that pair — the Secret id column
+in the table above. A typo here does not fail here; it fails later as
+`ResourceNotFoundException` on `terraform plan`, against the *correct* name.
+
+The skeleton is deliberately not a working config. The Section 7 preflight will
+fail against it until §4.2 has run, which is the intended reading: §4.1 makes the
+secret exist, §4.2 makes it valid.
+
+#### If the secret already exists
+
+For an existing environment or tenant — or if a colleague got there first — the
+command fails with:
+
+```
+An error occurred (ResourceExistsException) when calling the CreateSecret
+operation: The operation failed because the secret
+dev-au/app-config/school_calendar_services already exists.
+```
+
+**That is the expected signal that §4.1 is already done. Skip straight to §4.2**,
+which updates the existing secret in place. Nothing is broken and nothing needs
+undoing.
+
+Do **not** delete and recreate the secret to get a clean run. Deletion is
+scheduled, not immediate, the name stays reserved for the recovery window, and
+every other reader of the secret breaks in the meantime. If you genuinely need to
+reset the payload, `put-secret-value` in §4.2 already replaces it wholesale.
+
+### 4.2 Populate the secret
 
 Placeholders only. Substitute real values at the shell, and never in a file that
 is committed or in shell history you keep (prefix the command with a space where
 your shell honours `HISTCONTROL=ignorespace`).
+
+`put-secret-value` requires the secret to exist: a `ResourceNotFoundException`
+here means §4.1 has not been run for this environment/tenant pair.
 
 ```bash
 aws secretsmanager put-secret-value \
@@ -237,8 +344,10 @@ aws secretsmanager put-secret-value \
   }'
 ```
 
-Repeat per row of the table above, changing `--region`, `--secret-id`, and the
-`ALLOWED_ORIGINS` origin to that tenant's own host. `put-secret-value` replaces
+Repeat §4.1 then §4.2 per row of the table above, changing `--region`, the secret
+name/id, and the `ALLOWED_ORIGINS` origin to that tenant's own host — the origin
+is that tenant's `https://calendar.<hosted_zone>` from the Section 3 matrix, with
+no path and no trailing slash. `put-secret-value` replaces
 the whole payload, so always send **all five keys** — sending a subset silently
 drops the others, and `terraform apply` then reads empty strings for them
 (`main.tf` reads every key through `lookup(local.secrets, "...", "")`, so a
