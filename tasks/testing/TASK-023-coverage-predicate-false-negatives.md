@@ -1,11 +1,11 @@
 ---
 id: TASK-023
 title: Coverage predicate rejects legitimate script forms; unit guard cannot fail
-status: testing
+status: pr-review
 created: 2026-08-18T01:20:00Z
-updated: 2026-08-18T01:42:23Z
+updated: 2026-08-18T02:05:57Z
 review-of: TASK-019
-activities: [{"activity":"code","model":"claude-opus-5","startedAt":"2026-08-18T01:33:30Z","finishedAt":"2026-08-18T01:40:20Z","tokens":52758,"note":"predicate 7/7 verified by execution"}]
+activities: [{"activity":"code","model":"claude-opus-5","tokens":52758,"note":"predicate 7/7 verified by execution"},{"activity":"test","model":"claude-haiku-4-5","tokens":119810,"note":"2 attempts: 71 tests. Attempt 1 left 3 of 4 allowlist entries unpinned; all 4 now pinned, re-verified by orchestrator sweep"}]
 ---
 
 ## Description

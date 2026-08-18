@@ -1,11 +1,11 @@
 ---
 id: TASK-004
 title: Google OAuth sign-in, session cookie, and encrypted refresh-token storage
-status: failed-testing
+status: done
 created: 2026-08-17T11:00:00Z
-updated: 2026-08-18T01:52:51Z
+updated: 2026-08-18T02:08:42Z
 depends-on: TASK-003
-activities: [{"activity":"code","model":"claude-opus-5","note":"worktree 021a249 merged; 16/17 security checks verified by execution"},{"activity":"test","model":"claude-haiku-4-5","tokens":90645,"note":"attempt 1/3: 167 tests green but mutation testing found the plaintext-canary test tautological (mock performs the invariant) and timingSafeEqual unasserted; returned"}]
+activities: [{"activity":"code","model":"claude-opus-5","note":"worktree 021a249 merged"},{"activity":"test","model":"claude-haiku-4-5","tokens":334475,"note":"3 attempts; 175 tests; 5 mutations RED-verified"},{"activity":"review","model":"claude-opus-4-8","tokens":101941,"note":"id_token signature-skip RULED ACCEPTABLE (token never browser-delivered, endpoint hardcoded HTTPS). No critical/high. 3 lows -> TASK-025/026. Orchestrator found the ruling premise wrong: Lambda DOES pass a 3rd arg; safety is incidental -> TASK-025"}]
 ---
 
 ## Description
