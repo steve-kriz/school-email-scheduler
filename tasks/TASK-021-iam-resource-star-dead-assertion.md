@@ -49,6 +49,23 @@ While you are in this file, check whether any **other** assertion in it computes
 a value it never uses, and fix those too — report each one you find. Do not
 refactor assertions that are already sound.
 
+**Also in scope: a third dead-code instance, in a different file.**
+`tests/e2e/npm-scripts.test.js` defines a `parseCounts` helper (around lines
+38–45) that parses `# tests` / `# pass` totals out of a `node --test` stdout with
+`line.match(/^# tests (\d+)/)` and `parseInt`. It is **never called**. It was
+written toward a count-equality assertion that was ultimately not needed — the
+same file's subdirectory-discovery check covers that defect class better — so the
+helper is leftover scaffolding.
+
+Either delete `parseCounts`, or use it for something that earns its place. One
+genuinely useful use, if you want to keep it: assert that
+`npm run test:unit` and `npm run test:e2e` totals **sum** to the `npm test`
+total, which is a real invariant the discovery check does not cover (it would
+catch a file matched by one invocation but not another, e.g. a stray
+`.test.mjs` extension or a nested directory only one path walks). If you keep it,
+it must be exercised; if you delete it, say so. Do not leave it defined and
+unused.
+
 Note: TASK-020 also came out of the TASK-003 review but touches
 `src/lambda/calendar/index.mjs` and `tests/e2e/calendar-lambda.test.js`, so it
 does not overlap this ticket's file and the two may run concurrently.
