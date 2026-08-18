@@ -1,0 +1,11 @@
+{
+  "name": "school-calendar",
+  "version": "1.0.0",
+  "description": "School Calendar - scans a parent's Gmail for school emails and renders the extracted events as a calendar",
+  "type": "module",
+  "main": "index.mjs",
+  "scripts": {
+    "test": "echo \"Tests live in the repo-root tests/ tree\""
+  },
+  "dependencies": {}
+}
