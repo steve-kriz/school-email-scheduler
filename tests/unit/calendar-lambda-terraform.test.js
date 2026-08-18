@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +11,81 @@ const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.join(__dirname, '..', '..');
 const TERRAFORM_DIR = path.join(PROJECT_ROOT, 'terraform');
 const CONFIG_DIR = path.join(TERRAFORM_DIR, 'config');
+
+// --- IAM policy parsing helpers ---
+// The calendar policy is an inline `policy = jsonencode({ ... })` block in HCL,
+// not JSON on disk (its resources are unresolved Terraform references), so it
+// cannot be JSON.parse'd. These helpers attribute each `Resource` assignment to
+// the Sid of the statement that encloses it, by splitting the policy text on
+// Sid boundaries. Sid is the first key of every statement in this policy.
+
+// Matches an UNSCOPED resource - literally `Resource = "*"`. It deliberately
+// does not match a scoped value that merely contains a wildcard, such as
+// `Resource = "arn:aws:logs:*:*:*"`.
+const UNSCOPED_RESOURCE = /Resource\s*=\s*"\*"/;
+
+// The only statements allowed an unscoped resource. The VPC network-interface
+// actions do not support resource-level permissions, so AWS requires "*".
+const ALLOWED_UNSCOPED_SIDS = ['VPCNetworkInterfaces'];
+
+/**
+ * Returns the calendar Lambda's inline IAM policy text with HCL comment lines
+ * removed, so that prose mentioning `Resource = "*"` cannot be mistaken for a
+ * real grant (the VPC statement's comment does exactly that).
+ */
+function extractCalendarPolicy(tfContent) {
+  const policyMatch = tfContent.match(/policy = jsonencode\(\{[\s\S]*?\}\)/);
+  assert.ok(policyMatch, 'IAM policy not found');
+  return policyMatch[0]
+    .split('\n')
+    .filter(line => !line.trim().startsWith('#') && !line.trim().startsWith('//'))
+    .join('\n');
+}
+
+/**
+ * Splits a policy into one { sid, body } chunk per statement. A chunk runs from
+ * its own Sid assignment to the next one (or the end of the policy).
+ */
+function parsePolicyStatements(policyText) {
+  const sidMatches = [...policyText.matchAll(/Sid\s*=\s*"([^"]+)"/g)];
+  assert.ok(sidMatches.length > 0, 'no Sid-bearing statements found in IAM policy');
+
+  return sidMatches.map((match, index) => {
+    const next = sidMatches[index + 1];
+    return {
+      sid: match[1],
+      body: policyText.slice(match.index, next ? next.index : policyText.length)
+    };
+  });
+}
+
+/** The sorted Sids of the statements that grant an unscoped `Resource = "*"`. */
+function sidsWithUnscopedResource(policyText) {
+  return parsePolicyStatements(policyText)
+    .filter(statement => UNSCOPED_RESOURCE.test(statement.body))
+    .map(statement => statement.sid)
+    .sort();
+}
+
+function statementBySid(statements, sid) {
+  const statement = statements.find(candidate => candidate.sid === sid);
+  assert.ok(statement, `statement "${sid}" not found in IAM policy`);
+  return statement;
+}
+
+/** The single-valued `Resource = <expr>` of a statement, as written in HCL. */
+function scalarResource(statement) {
+  const match = statement.body.match(/Resource\s*=\s*([^\n]+)/);
+  assert.ok(match, `statement "${statement.sid}" has no Resource assignment`);
+  return match[1].trim().replace(/,$/, '');
+}
+
+/** The entries of a statement's `Resource = [ ... ]` list, as written in HCL. */
+function resourceList(statement) {
+  const match = statement.body.match(/Resource\s*=\s*\[([\s\S]*?)\]/);
+  assert.ok(match, `statement "${statement.sid}" has no Resource list`);
+  return match[1].split(',').map(entry => entry.trim()).filter(Boolean);
+}
 
 describe('Calendar Lambda Terraform Unit Tests', () => {
   describe('Feature: Calendar Lambda and ALB wiring', () => {
@@ -130,49 +206,90 @@ describe('Calendar Lambda Terraform Unit Tests', () => {
     });
 
     describe('Scenario: IAM policy scoping', () => {
-      it('Given iam_policy for calendar lambda, Then no statement uses Resource = "*" except CloudWatch Logs and VPC EC2 actions', () => {
+      it('Given iam_policy for calendar lambda, Then the statements using an unscoped Resource = "*" are exactly the VPC network-interface statement', () => {
         const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
+        const policyText = extractCalendarPolicy(tfContent);
+        const statements = parsePolicyStatements(policyText);
 
-        // Extract the policy content
-        const policyMatch = tfContent.match(/policy = jsonencode\(\{[\s\S]*?\}\)/);
-        assert.ok(policyMatch, 'IAM policy not found');
-        const policyText = policyMatch[0];
+        // Every statement must name a resource; otherwise an over-broad grant
+        // could hide from the check below simply by omitting Resource.
+        for (const statement of statements) {
+          assert.match(statement.body, /Resource\s*=/,
+            `statement "${statement.sid}" has no Resource assignment`);
+        }
 
-        // Check for statements that use Resource = "*"
-        const allResourceStarLines = policyText.split('\n').filter(line => line.includes('Resource = "*"'));
+        assert.deepStrictEqual(sidsWithUnscopedResource(policyText), ALLOWED_UNSCOPED_SIDS,
+          'the statements granting an unscoped Resource = "*" must be exactly ' +
+          `${ALLOWED_UNSCOPED_SIDS.join(', ')} (the EC2 network-interface actions AWS cannot scope)`);
 
-        // We expect exactly 2 such statements: CloudWatch Logs and VPC EC2
-        // The order and exact content varies, but we can check for the Sids
-        assert.ok(policyText.includes('CloudWatchLogs') || policyText.includes('CloudWatch'),
-          'CloudWatch Logs statement not found');
-        assert.ok(policyText.includes('VPC') || policyText.includes('NetworkInterface'),
-          'VPC EC2 statement not found');
-
-        // Count the Resource = "*" lines and ensure there are only 2 for allowed statements
-        const statementCount = (policyText.match(/Sid\s*=/g) || []).length;
-        assert.ok(statementCount >= 5, `Expected at least 5 statements, found ${statementCount}`);
+        // CloudWatch Logs is scoped-with-wildcards, not unscoped: it must keep
+        // its logs ARN pattern rather than degrade to "*".
+        assert.strictEqual(scalarResource(statementBySid(statements, 'CloudWatchLogs')),
+          '"arn:aws:logs:*:*:*"',
+          'CloudWatch Logs statement is not scoped to the logs ARN pattern');
       });
 
-      it('When DynamoDB statement is configured, Then it includes both table ARNs and index ARNs', () => {
+      it('When DynamoDB statement is configured, Then its resources are both table ARNs and the events index ARN', () => {
         const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
-        assert.ok(tfContent.includes('aws_dynamodb_table.calendar_connections.arn'),
-          'connections table ARN not in DynamoDB resources');
-        assert.ok(tfContent.includes('aws_dynamodb_table.calendar_events.arn'),
-          'events table ARN not in DynamoDB resources');
-        assert.ok(tfContent.includes('${aws_dynamodb_table.calendar_events.arn}/index/*'),
-          'events table index ARN not in DynamoDB resources');
+        const statements = parsePolicyStatements(extractCalendarPolicy(tfContent));
+
+        // Index Queries are authorised against the INDEX ARN, not the table ARN,
+        // so "<events table arn>/index/*" must be listed explicitly.
+        assert.deepStrictEqual(
+          resourceList(statementBySid(statements, 'DynamoDBCalendarTables')),
+          [
+            'aws_dynamodb_table.calendar_connections.arn',
+            'aws_dynamodb_table.calendar_events.arn',
+            '"${aws_dynamodb_table.calendar_events.arn}/index/*"'
+          ],
+          'DynamoDB resources must be exactly both table ARNs plus the events table index ARN');
       });
 
       it('When KMS statement is configured, Then Resource is exactly the calendar CMK ARN', () => {
         const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
-        assert.ok(tfContent.includes('Resource = aws_kms_key.calendar.arn'),
-          'KMS statement resource not correctly scoped to calendar CMK ARN');
+        const statements = parsePolicyStatements(extractCalendarPolicy(tfContent));
+
+        assert.strictEqual(scalarResource(statementBySid(statements, 'KMSCalendarKey')),
+          'aws_kms_key.calendar.arn',
+          'KMS statement must be scoped to exactly the calendar CMK ARN - a broader ' +
+          'grant would let the Lambda decrypt with any key in the account');
       });
 
       it('When Secrets Manager statement is configured, Then Resource is the app-config secret ARN', () => {
         const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
-        assert.ok(tfContent.includes('Resource = data.aws_secretsmanager_secret.app_config.arn'),
-          'Secrets Manager statement resource not correctly scoped to app_config secret ARN');
+        const statements = parsePolicyStatements(extractCalendarPolicy(tfContent));
+
+        assert.strictEqual(scalarResource(statementBySid(statements, 'SecretsManagerAppConfig')),
+          'data.aws_secretsmanager_secret.app_config.arn',
+          'Secrets Manager statement must be scoped to the app-config secret ARN');
+      });
+
+      it('When a mutated copy broadens the KMS statement to Resource = "*", Then the scoping assertion fails', () => {
+        const realTfPath = path.join(TERRAFORM_DIR, 'lambda_calendar.tf');
+        const original = fs.readFileSync(realTfPath, 'utf-8');
+        const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'calendar-iam-fixture-'));
+        const fixturePath = path.join(fixtureDir, 'lambda_calendar.tf');
+
+        try {
+          const mutated = original.replace(/Resource = aws_kms_key\.calendar\.arn/, 'Resource = "*"');
+          assert.notStrictEqual(mutated, original,
+            'fixture mutation did not apply - the KMS Resource assignment was not found');
+          fs.writeFileSync(fixturePath, mutated, 'utf-8');
+
+          const mutatedSids = sidsWithUnscopedResource(
+            extractCalendarPolicy(fs.readFileSync(fixturePath, 'utf-8')));
+
+          assert.deepStrictEqual(mutatedSids, ['KMSCalendarKey', 'VPCNetworkInterfaces'],
+            'the mutated fixture should attribute an unscoped resource to the KMS statement');
+          assert.throws(
+            () => assert.deepStrictEqual(mutatedSids, ALLOWED_UNSCOPED_SIDS),
+            'the scoping assertion must fail when the KMS statement is broadened to Resource = "*"');
+        } finally {
+          fs.rmSync(fixtureDir, { recursive: true, force: true });
+        }
+
+        assert.strictEqual(fs.readFileSync(realTfPath, 'utf-8'), original,
+          'the real lambda_calendar.tf must never be modified by a test');
       });
     });
 
@@ -338,11 +455,15 @@ describe('Calendar Lambda Terraform Unit Tests', () => {
 
       it('When anthropic_model is documented, Then description mentions claude-sonnet-5 as cheaper option', () => {
         const varsContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'variables.tf'), 'utf-8');
-        const anthropicSection = varsContent.match(/variable "anthropic_model"[\s\S]*?description = "([\s\S]*?)"/);
+        // The description is a heredoc, so match the whole variable block: a
+        // `description = "` pattern finds no quote here and runs on into the
+        // next variable, capturing the wrong block's description.
+        const anthropicSection = varsContent.match(/variable "anthropic_model" \{[\s\S]*?\n\}/);
         assert.ok(anthropicSection, 'anthropic_model variable not found');
-        assert.ok(varsContent.includes('claude-sonnet-5'),
+        const anthropicBlock = anthropicSection[0];
+        assert.ok(anthropicBlock.includes('claude-sonnet-5'),
           'claude-sonnet-5 not mentioned in anthropic_model description');
-        assert.ok(varsContent.includes('NO DATE SUFFIX') || varsContent.includes('no date suffix'),
+        assert.ok(anthropicBlock.includes('NO DATE SUFFIX') || anthropicBlock.includes('no date suffix'),
           'Date suffix warning not in anthropic_model description');
       });
 
@@ -358,7 +479,7 @@ describe('Calendar Lambda Terraform Unit Tests', () => {
         const varsContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'variables.tf'), 'utf-8');
         const validationSection = varsContent.match(/variable "calendar_log_level"[\s\S]*?validation \{[\s\S]*?\}/);
         assert.ok(validationSection, 'calendar_log_level validation block not found');
-        assert.ok(varsContent.includes('calendar_log_level must be one of'),
+        assert.ok(validationSection[0].includes('calendar_log_level must be one of'),
           'calendar_log_level error message not clear');
       });
     });

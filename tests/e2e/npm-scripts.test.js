@@ -10,6 +10,9 @@ const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.join(__dirname, '..', '..');
 const PACKAGE_JSON_PATH = path.join(PROJECT_ROOT, 'package.json');
 
+// Extensions that node --test recognizes
+const TEST_EXTENSIONS = ['.test.js', '.test.mjs', '.test.cjs'];
+
 /**
  * Spawns a command (non-test) and returns the result
  */
@@ -29,116 +32,167 @@ function runCommand(cwd, command, args = []) {
 }
 
 /**
- * Parses TAP output and extracts test/pass counts
+ * Checks if a directory is covered by a test script.
+ * A directory is covered if:
+ * 1. The script explicitly names it (tests/<dir>), OR
+ * 2. The script names a genuine parent path (tests/ or tests or tests/* wildcard)
+ *
+ * This predicate rejects the escape hatch that `|| testScript.includes('tests/')` would provide,
+ * because that would match even when the directory is not truly covered
+ * (e.g., "tests/unit" contains the substring "tests/" but does not cover "tests/e2e").
  */
-function parseTestCounts(output) {
-  const lines = output.split('\n');
-  const counts = { tests: 0, pass: 0 };
-
-  for (const line of lines) {
-    const testMatch = line.match(/^# tests (\d+)/);
-    const passMatch = line.match(/^# pass (\d+)/);
-
-    if (testMatch) counts.tests = parseInt(testMatch[1], 10);
-    if (passMatch) counts.pass = parseInt(passMatch[1], 10);
+function isDirectoryCovered(testScript, dirName) {
+  // Case 1: The specific directory is explicitly mentioned
+  if (testScript.includes(`tests/${dirName}`)) {
+    return true;
   }
 
-  return counts;
+  // Case 2: A parent path is present as a standalone token
+  // Split by whitespace to get individual arguments/tokens
+  const tokens = testScript.split(/\s+/);
+  for (const token of tokens) {
+    // Exact parent directory token (covers all subdirs recursively)
+    if (token === 'tests' || token === 'tests/') {
+      return true;
+    }
+    // Parent with wildcard (e.g., tests/* or tests/**)
+    if (token.startsWith('tests/') && token.includes('*')) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Recursively checks if a directory contains test files
+ */
+function hasAnyTestFiles(dirPath) {
+  try {
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        if (hasAnyTestFiles(path.join(dirPath, entry.name))) {
+          return true;
+        }
+      } else if (TEST_EXTENSIONS.some(ext => entry.name.endsWith(ext))) {
+        return true;
+      }
+    }
+  } catch (e) {
+    // Directory doesn't exist or not readable
+  }
+  return false;
+}
+
+/**
+ * Finds all immediate subdirectories of tests/ that contain test files
+ */
+function findTestDirectories(testsPath) {
+  const dirsWithTests = [];
+  try {
+    const entries = fs.readdirSync(testsPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const subdirPath = path.join(testsPath, entry.name);
+      if (hasAnyTestFiles(subdirPath)) {
+        dirsWithTests.push(entry.name);
+      }
+    }
+  } catch (e) {
+    // Directory doesn't exist or not readable
+  }
+  return dirsWithTests;
 }
 
 describe('Feature: The test suite that CI runs includes the e2e scenarios', () => {
   describe('Scenario: npm test runs both directories', () => {
-    it('Given package.json, When the test script is checked, Then it includes both tests/unit and tests/e2e', () => {
+    it('Given package.json, When the test script is checked, Then it covers both tests/unit and tests/e2e', () => {
       const pkgJson = JSON.parse(fs.readFileSync(PACKAGE_JSON_PATH, 'utf-8'));
       assert.ok(pkgJson.scripts.test, 'test script should exist');
 
       const testScript = pkgJson.scripts.test;
-      assert.strictEqual(testScript, 'node --test tests/unit tests/e2e',
-        `test script should be "node --test tests/unit tests/e2e". Got: "${testScript}"`);
+      // Semantic check: the script must cover both directories, either explicitly or via parent path
+      assert.ok(isDirectoryCovered(testScript, 'unit'),
+        `test script should cover tests/unit. Got: "${testScript}"`);
+      assert.ok(isDirectoryCovered(testScript, 'e2e'),
+        `test script should cover tests/e2e. Got: "${testScript}"`);
     });
 
-    it('When the command configured in npm test is executed, Then the test count matches the expected directories', () => {
-      // The npm test script is configured as: "node --test tests/unit tests/e2e"
-      // This test verifies that the npm scripts correctly wire both directories.
+    it('When the coverage predicate is tested with synthetic inputs, Then it rejects uncovered directories', () => {
+      // Prove the predicate discriminates by testing it with fabricated scenarios
+      const scriptExplicit = 'node --test tests/unit tests/e2e';
+      const scriptWithParent = 'node --test tests/';
+      const scriptWithoutDir = 'node --test tests/unit';
 
-      // Count test files in each directory
-      const unitDir = path.join(PROJECT_ROOT, 'tests', 'unit');
-      const e2eDir = path.join(PROJECT_ROOT, 'tests', 'e2e');
+      // Explicit mentions should be covered
+      assert.ok(isDirectoryCovered(scriptExplicit, 'unit'), 'unit explicitly mentioned');
+      assert.ok(isDirectoryCovered(scriptExplicit, 'e2e'), 'e2e explicitly mentioned');
 
-      const unitTestFiles = fs.readdirSync(unitDir)
-        .filter(f => f.endsWith('.test.js')).length;
-      const e2eTestFiles = fs.readdirSync(e2eDir)
-        .filter(f => f.endsWith('.test.js')).length;
+      // Uncovered directory should be rejected
+      assert.ok(!isDirectoryCovered(scriptExplicit, 'integration'),
+        'integration NOT mentioned should not be covered');
 
-      assert.ok(unitTestFiles > 0, `tests/unit should contain test files, found ${unitTestFiles}`);
-      assert.ok(e2eTestFiles > 0, `tests/e2e should contain test files, found ${e2eTestFiles}`);
+      // Parent path should cover all
+      assert.ok(isDirectoryCovered(scriptWithParent, 'unit'), 'unit covered by parent tests/');
+      assert.ok(isDirectoryCovered(scriptWithParent, 'e2e'), 'e2e covered by parent tests/');
+      assert.ok(isDirectoryCovered(scriptWithParent, 'integration'),
+        'integration covered by parent tests/');
 
-      // Verify the test script explicitly names both directories
-      const pkgJson = JSON.parse(fs.readFileSync(PACKAGE_JSON_PATH, 'utf-8'));
-      const testScript = pkgJson.scripts.test;
+      // Without parent, only mentioned dirs are covered
+      assert.ok(isDirectoryCovered(scriptWithoutDir, 'unit'), 'unit explicitly mentioned');
+      assert.ok(!isDirectoryCovered(scriptWithoutDir, 'e2e'),
+        'e2e NOT mentioned, not covered by parent');
 
-      const hasUnit = testScript.includes('tests/unit');
-      const hasE2e = testScript.includes('tests/e2e');
-
-      assert.ok(hasUnit, `test script should reference tests/unit. Got: "${testScript}"`);
-      assert.ok(hasE2e, `test script should reference tests/e2e. Got: "${testScript}"`);
-
-      // Report directory statistics for verification
-      console.log(`Test file discovery: tests/unit has ${unitTestFiles} test files, tests/e2e has ${e2eTestFiles} test files`);
-      console.log(`npm test script: "${testScript}"`);
+      console.log('Coverage predicate validation: accepts covered dirs, rejects uncovered');
     });
 
-    it('And all tests/ subdirectories containing .test.js files are covered by the test script', () => {
-      // Discover which subdirectories of tests/ contain .test.js files
+    it('And all tests/ subdirectories containing test files are covered by the test script', () => {
+      // Discover which subdirectories of tests/ contain test files (any extension)
       const testsDir = path.join(PROJECT_ROOT, 'tests');
-      const entries = fs.readdirSync(testsDir, { withFileTypes: true });
-      const dirsWithTests = [];
-
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-
-        const subdir = entry.name;
-        const subdirPath = path.join(testsDir, subdir);
-        const testFiles = fs.readdirSync(subdirPath)
-          .filter(f => f.endsWith('.test.js'));
-
-        if (testFiles.length > 0) {
-          dirsWithTests.push(subdir);
-        }
-      }
+      const dirsWithTests = findTestDirectories(testsDir);
 
       // Get the test script from package.json
       const pkgJson = JSON.parse(fs.readFileSync(PACKAGE_JSON_PATH, 'utf-8'));
       const testScript = pkgJson.scripts.test || '';
 
-      // Check that each directory with tests is covered
+      // Check that each directory with tests is covered (no silent exclusions)
       for (const dir of dirsWithTests) {
-        const isCovered = testScript.includes(`tests/${dir}`) || testScript.includes('tests/');
-        assert.ok(isCovered,
-          `Directory "tests/${dir}" contains .test.js files but is not covered by the test script. ` +
+        assert.ok(isDirectoryCovered(testScript, dir),
+          `Directory "tests/${dir}" contains test files but is NOT covered by test script. ` +
           `Test script: "${testScript}". ` +
           `Discovered test directories: ${dirsWithTests.join(', ')}`);
       }
 
+      // Verify we're detecting nested test files (if any) by asserting recursion was used
+      const unitNestedPath = path.join(PROJECT_ROOT, 'tests', 'unit', 'subdir', 'foo.test.js');
+      if (fs.existsSync(unitNestedPath)) {
+        assert.ok(dirsWithTests.includes('unit'),
+          'Nested test files under unit should be discovered');
+      }
+
       // Report the discovered directories for verification
-      console.log(`Discovered test directories with .test.js files: ${dirsWithTests.join(', ')}`);
+      console.log(`Discovered test directories (containing .test.{js,mjs,cjs}): ${dirsWithTests.join(', ')}`);
     });
 
     it('And both tests/unit and tests/e2e directories contain test files', () => {
-      // Verify that test files exist in both directories
+      // Verify that test files exist in both directories (with all recognized extensions)
       const unitDir = path.join(PROJECT_ROOT, 'tests', 'unit');
       const e2eDir = path.join(PROJECT_ROOT, 'tests', 'e2e');
 
       assert.ok(fs.existsSync(unitDir), 'tests/unit directory should exist');
       assert.ok(fs.existsSync(e2eDir), 'tests/e2e directory should exist');
 
-      const unitFiles = fs.readdirSync(unitDir).filter(f => f.endsWith('.test.js'));
-      const e2eFiles = fs.readdirSync(e2eDir).filter(f => f.endsWith('.test.js'));
+      // Count files with all supported extensions
+      const unitFiles = fs.readdirSync(unitDir)
+        .filter(f => TEST_EXTENSIONS.some(ext => f.endsWith(ext)));
+      const e2eFiles = fs.readdirSync(e2eDir)
+        .filter(f => TEST_EXTENSIONS.some(ext => f.endsWith(ext)));
 
-      assert.ok(unitFiles.length > 0, 'tests/unit should contain test files');
-      assert.ok(e2eFiles.length > 0, 'tests/e2e should contain test files');
+      assert.ok(unitFiles.length > 0, `tests/unit should contain test files, found ${unitFiles.length}`);
+      assert.ok(e2eFiles.length > 0, `tests/e2e should contain test files, found ${e2eFiles.length}`);
 
-      // Verify both contain test patterns
+      // Verify files contain test patterns
       for (const file of unitFiles) {
         const content = fs.readFileSync(path.join(unitDir, file), 'utf-8');
         assert.ok(content.includes('describe(') || content.includes('it('),
@@ -154,15 +208,16 @@ describe('Feature: The test suite that CI runs includes the e2e scenarios', () =
   });
 
   describe('Scenario: The fast inner loop is still scoped', () => {
-    it('Given package.json, When the test:unit script is checked, Then it only references tests/unit', () => {
+    it('Given package.json, When the test:unit script is checked, Then it covers tests/unit but not tests/e2e', () => {
       const pkgJson = JSON.parse(fs.readFileSync(PACKAGE_JSON_PATH, 'utf-8'));
       assert.ok(pkgJson.scripts['test:unit'], 'test:unit script should exist');
 
       const testUnitScript = pkgJson.scripts['test:unit'];
-      assert.strictEqual(testUnitScript, 'node --test tests/unit',
-        `test:unit script should be "node --test tests/unit". Got: "${testUnitScript}"`);
-      assert.ok(!testUnitScript.includes('tests/e2e'),
-        'test:unit should not include tests/e2e');
+      // Semantic check: must cover unit, must not cover e2e (no sweeping parent path)
+      assert.ok(isDirectoryCovered(testUnitScript, 'unit'),
+        `test:unit should cover tests/unit. Got: "${testUnitScript}"`);
+      assert.ok(!isDirectoryCovered(testUnitScript, 'e2e'),
+        `test:unit should NOT cover tests/e2e. Got: "${testUnitScript}"`);
     });
 
     it('And the node --test tests/unit command executes successfully', () => {
@@ -296,6 +351,14 @@ describe('Feature: The test suite that CI runs includes the e2e scenarios', () =
                           output.includes('--tenant') ||
                           output.includes('required');
       assert.ok(hasGuidance, 'check:oauth-config should provide usage information');
+    });
+
+    it('And when "npm run test:bdd" is executed, Then it exits 0 (as required by existing assertions)', () => {
+      // Note: tests/bdd/ is retained only because tests/unit/terraform-scaffold.test.js:406
+      // asserts that the test:bdd script exists. This assertion ensures it exits cleanly,
+      // so that future cleanup does not accidentally break existing test assertions.
+      const result = runCommand(PROJECT_ROOT, 'npm', ['run', 'test:bdd']);
+      assert.equal(result.code, 0, `test:bdd should exit 0, got exit code ${result.code}`);
     });
   });
 });
