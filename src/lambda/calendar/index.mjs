@@ -41,6 +41,15 @@ import {
   SettingsValidationError,
   toSettingsJson,
 } from "./backend/settings.mjs";
+import {
+  acknowledgeEvent,
+  dismissEvent,
+  EventNotFoundError,
+  EventValidationError,
+  queryEventsInRange,
+  queryUpcomingEvents,
+  restoreEvent,
+} from "./backend/events.mjs";
 import { runScan, SCAN_STATUS } from "./backend/scan.mjs";
 import {
   deleteScanSchedule,
@@ -1255,6 +1264,329 @@ export async function routeScanRequest(path, method, event, options = {}) {
   return null;
 }
 
+// --- Events API routes (TASK-009) ---
+// What the scanner found, made readable: a range query for the calendar grid, a
+// deadline-ordered list of things still to do, and three mutations that clear an
+// item. The queries, the condition expressions and the response projection all
+// live in backend/events.mjs; this file only maps them onto HTTP, exactly as the
+// auth, settings and scan routes above do.
+//
+// THE USER ID IS NEVER TAKEN FROM THE REQUEST. Every handler below derives it
+// from `resolveSession` -> `connectionUserId`, and none of them reads a `userId`
+// query parameter, body field or header. A `?userId=` on any of these URLs is
+// inert: it is not read, so it cannot be honoured. That is the whole of the
+// tenancy boundary on the read side, because `queryEventsInRange` /
+// `queryUpcomingEvents` put that value in the Query's HASH KEY - there is no
+// broad read and no post-hoc filter that could be skipped.
+//
+// Error mapping, once, for all five routes:
+//   EventValidationError -> 400 with the offending `field` (bad date range, bad
+//     eventId). Its message is client-safe by construction and never echoes the
+//     offending value.
+//   EventNotFoundError   -> 404. NEVER 403: the row either is not this user's or
+//     does not exist, and distinguishing those two would confirm that another
+//     account's event id is real.
+//   anything else        -> 500, with the error's name/message logged but never
+//     its contents echoed.
+
+/** Route paths for the events endpoints. */
+const EVENTS_PATH = "/calendar/api/events";
+const EVENTS_UPCOMING_PATH = "/calendar/api/events/upcoming";
+
+/**
+ * `/calendar/api/events/{eventId}/{action}`.
+ *
+ * The id group is deliberately greedy `(.+)` rather than a single path segment.
+ * A traversal attempt like `/calendar/api/events/../../etc/passwd/acknowledge`
+ * must reach `requireEventId` and come back as a 400 "that is not an event id";
+ * a `[^/]+` group would simply not match, and the request would fall through to
+ * the router's generic 404, which says nothing useful and hides the attempt from
+ * the events-route logs.
+ */
+const EVENT_ACTION_PATTERN = /^\/calendar\/api\/events\/(.+)\/(acknowledge|dismiss|restore)$/;
+
+/** The three mutations, so the dispatch table and the handlers cannot drift. */
+const EVENT_ACTIONS = Object.freeze({
+  ACKNOWLEDGE: "acknowledge",
+  DISMISS: "dismiss",
+  RESTORE: "restore",
+});
+
+/**
+ * Split an event mutation path into its id and its action, or null when the path
+ * is not one.
+ *
+ * The captured id is percent-decoded (ALB delivers path text still encoded) and
+ * then handed to `requireEventId` unchanged - decoding here is what stops
+ * `%2E%2E%2F` from looking like a plausible id, since the decoded value fails the
+ * 64-hex test just as the raw one does.
+ *
+ * @param {string} path
+ * @returns {{ eventId: string, action: string }|null}
+ */
+export function parseEventActionPath(path) {
+  const match = EVENT_ACTION_PATTERN.exec(String(path ?? ""));
+  if (!match) return null;
+  return { eventId: decodeQueryValue(match[1]), action: match[2] };
+}
+
+/**
+ * Map an events-layer error onto a response, or return null when it is not one
+ * of the two the API models.
+ *
+ * Both classes are matched by `instanceof` AND by `name`, matching the settings
+ * routes: a test that has loaded backend/events.mjs as a second module instance
+ * would otherwise fall through to a 500.
+ *
+ * @param {unknown} err
+ * @param {{ origin?: string|null, allowlist?: string[] }} responseOptions
+ * @returns {object|null}
+ */
+function eventErrorResponse(err, responseOptions) {
+  if (err instanceof EventValidationError || err?.name === "EventValidationError") {
+    return jsonResponse(400, { error: err.message, field: err.field ?? null }, responseOptions);
+  }
+  if (err instanceof EventNotFoundError || err?.name === "EventNotFoundError") {
+    // 404, never 403 - see the note at the top of this section.
+    return jsonResponse(404, { error: "Event not found" }, responseOptions);
+  }
+  return null;
+}
+
+/**
+ * GET /calendar/api/events?from=YYYY-MM-DD&to=YYYY-MM-DD - the calendar grid.
+ *
+ * Both parameters are optional; omitting them both is the current calendar
+ * month. An unusable range (unparseable, reversed, or wider than a quarter) is a
+ * 400 naming the field, decided before any DynamoDB call.
+ *
+ * @param {object} event
+ * @param {object} [options]
+ * @param {string|null} [options.origin]
+ * @param {string[]} [options.allowlist]
+ * @param {Record<string, string|undefined>} [options.env]
+ * @param {number} [options.nowSeconds]
+ * @param {typeof queryEventsInRange} [options.queryEventsInRange] Injectable read.
+ * @param {Function} [options.query] Injectable raw DynamoDB Query.
+ * @param {() => number} [options.now] Injectable epoch-ms clock.
+ * @param {number} [options.maxItems]
+ * @param {number} [options.maxPages]
+ * @param {string|null} [options.tableName]
+ * @param {Function} [options.log]
+ * @returns {Promise<object>} ALB response.
+ */
+export async function handleGetEvents(event, options = {}) {
+  const {
+    origin = null,
+    allowlist,
+    env = process.env,
+    nowSeconds = Math.floor(Date.now() / 1000),
+    queryEventsInRange: runRangeQuery = queryEventsInRange,
+    query,
+    now,
+    maxItems,
+    maxPages,
+    tableName = null,
+    log,
+  } = options;
+
+  const session = resolveSession(event, { env, nowSeconds });
+  if (!session.ok) {
+    return jsonResponse(session.statusCode, session.payload, { origin, allowlist });
+  }
+
+  // The ONLY two request-supplied values this route reads. `userId` comes from
+  // the verified session below and from nowhere else.
+  const from = getQueryParam(event, "from");
+  const to = getQueryParam(event, "to");
+  const userId = connectionUserId(session.claims.sub);
+
+  let result;
+  try {
+    result = await runRangeQuery({ userId, from, to, tableName }, { query, now, maxItems, maxPages, env, log });
+  } catch (err) {
+    const mapped = eventErrorResponse(err, { origin, allowlist });
+    if (mapped) return mapped;
+    logBasic("[Calendar] Could not read events:", { errorName: err?.name || "Error", errorMessage: err?.message || "" });
+    return jsonResponse(500, { error: "Could not read your calendar" }, { origin, allowlist });
+  }
+
+  return jsonResponse(200, result, { origin, allowlist });
+}
+
+/**
+ * GET /calendar/api/events/upcoming?limit=N - the "needs attention" list.
+ *
+ * Ordered by deadline, soonest first, straight out of the sparse AttentionIndex.
+ * `limit` defaults to 20 and is clamped to 100; an unusable value falls back to
+ * the default rather than failing the request, because a page size is not data.
+ *
+ * @param {object} event
+ * @param {object} [options] As `handleGetEvents`, with
+ *   `queryUpcomingEvents` in place of `queryEventsInRange`.
+ * @returns {Promise<object>} ALB response.
+ */
+export async function handleGetUpcoming(event, options = {}) {
+  const {
+    origin = null,
+    allowlist,
+    env = process.env,
+    nowSeconds = Math.floor(Date.now() / 1000),
+    queryUpcomingEvents: runAttentionQuery = queryUpcomingEvents,
+    query,
+    now,
+    maxPages,
+    tableName = null,
+    log,
+  } = options;
+
+  const session = resolveSession(event, { env, nowSeconds });
+  if (!session.ok) {
+    return jsonResponse(session.statusCode, session.payload, { origin, allowlist });
+  }
+
+  const limit = getQueryParam(event, "limit");
+  const userId = connectionUserId(session.claims.sub);
+
+  let result;
+  try {
+    result = await runAttentionQuery({ userId, limit, tableName }, { query, now, maxPages, env, log });
+  } catch (err) {
+    const mapped = eventErrorResponse(err, { origin, allowlist });
+    if (mapped) return mapped;
+    logBasic("[Calendar] Could not read the attention list:", {
+      errorName: err?.name || "Error",
+      errorMessage: err?.message || "",
+    });
+    return jsonResponse(500, { error: "Could not read your reminders" }, { origin, allowlist });
+  }
+
+  return jsonResponse(200, result, { origin, allowlist });
+}
+
+/**
+ * The body of all three mutation routes.
+ *
+ * `options.eventId` is set by `routeEventsRequest` from the URL path AFTER the
+ * caller's options are spread, so the path value always wins - a dependency
+ * override can never redirect a mutation at a different row than the one the URL
+ * named.
+ *
+ * @param {object} event
+ * @param {object} options
+ * @param {string} action One of EVENT_ACTIONS.
+ * @returns {Promise<object>} ALB response.
+ */
+async function handleEventMutation(event, options, action) {
+  const {
+    origin = null,
+    allowlist,
+    env = process.env,
+    nowSeconds = Math.floor(Date.now() / 1000),
+    eventId = null,
+    acknowledgeEvent: doAcknowledge = acknowledgeEvent,
+    dismissEvent: doDismiss = dismissEvent,
+    restoreEvent: doRestore = restoreEvent,
+    updateEvent,
+    getEvent,
+    now,
+    tableName = null,
+    log,
+  } = options;
+
+  // Session first, exactly as everywhere else in this file: an unauthenticated
+  // caller gets a 401 and learns nothing about whether the id was well-formed.
+  const session = resolveSession(event, { env, nowSeconds });
+  if (!session.ok) {
+    return jsonResponse(session.statusCode, session.payload, { origin, allowlist });
+  }
+
+  const userId = connectionUserId(session.claims.sub);
+  const mutate =
+    action === EVENT_ACTIONS.ACKNOWLEDGE ? doAcknowledge : action === EVENT_ACTIONS.DISMISS ? doDismiss : doRestore;
+
+  let updated;
+  try {
+    // `eventId` is validated inside the events module before it resolves a table
+    // name or touches DynamoDB, so a malformed id costs no call at all.
+    updated = await mutate({ userId, eventId, tableName }, { updateEvent, getEvent, now, env, log });
+  } catch (err) {
+    const mapped = eventErrorResponse(err, { origin, allowlist });
+    if (mapped) return mapped;
+    logBasic("[Calendar] Could not update an event:", {
+      action,
+      errorName: err?.name || "Error",
+      errorMessage: err?.message || "",
+    });
+    return jsonResponse(500, { error: "Could not update the event" }, { origin, allowlist });
+  }
+
+  return jsonResponse(200, { event: updated }, { origin, allowlist });
+}
+
+/**
+ * POST /calendar/api/events/{eventId}/acknowledge
+ * @param {object} event
+ * @param {object} [options] Carries the path-derived `eventId`.
+ * @returns {Promise<object>} ALB response.
+ */
+export async function handleAcknowledgeEvent(event, options = {}) {
+  return handleEventMutation(event, options, EVENT_ACTIONS.ACKNOWLEDGE);
+}
+
+/**
+ * POST /calendar/api/events/{eventId}/dismiss
+ * @param {object} event
+ * @param {object} [options] Carries the path-derived `eventId`.
+ * @returns {Promise<object>} ALB response.
+ */
+export async function handleDismissEvent(event, options = {}) {
+  return handleEventMutation(event, options, EVENT_ACTIONS.DISMISS);
+}
+
+/**
+ * POST /calendar/api/events/{eventId}/restore
+ * @param {object} event
+ * @param {object} [options] Carries the path-derived `eventId`.
+ * @returns {Promise<object>} ALB response.
+ */
+export async function handleRestoreEvent(event, options = {}) {
+  return handleEventMutation(event, options, EVENT_ACTIONS.RESTORE);
+}
+
+/**
+ * Dispatch the events routes. Returns null when the request is not one of them,
+ * so the handler can carry on to the frontend/404 paths.
+ *
+ * `/calendar/api/events/upcoming` is matched BEFORE the mutation pattern, and the
+ * mutation pattern requires a trailing action segment, so the literal path can
+ * never be read as an event id.
+ *
+ * @param {string} path
+ * @param {string} method
+ * @param {object} event
+ * @param {object} [options] Passed straight through to the route handlers.
+ * @returns {Promise<object|null>}
+ */
+export async function routeEventsRequest(path, method, event, options = {}) {
+  if (path === EVENTS_UPCOMING_PATH) {
+    return method === "GET" ? handleGetUpcoming(event, options) : null;
+  }
+  if (path === EVENTS_PATH) {
+    return method === "GET" ? handleGetEvents(event, options) : null;
+  }
+
+  const action = parseEventActionPath(path);
+  if (!action || method !== "POST") return null;
+
+  // Path last: the URL decides which row is mutated, never the options object.
+  const withEventId = { ...options, eventId: action.eventId };
+  if (action.action === EVENT_ACTIONS.ACKNOWLEDGE) return handleAcknowledgeEvent(event, withEventId);
+  if (action.action === EVENT_ACTIONS.DISMISS) return handleDismissEvent(event, withEventId);
+  if (action.action === EVENT_ACTIONS.RESTORE) return handleRestoreEvent(event, withEventId);
+  return null;
+}
+
 /**
  * Narrow the handler's third argument down to route dependency overrides.
  *
@@ -1296,8 +1628,8 @@ function asRouteDeps(value) {
  * on the /calendar* path prefix.
  *
  * The health check is what the target group polls, so it answers first and stays
- * deliberately open. The Google sign-in routes follow. The events API and the
- * frontend are added by later tickets.
+ * deliberately open. The Google sign-in routes follow, then settings, the scan/
+ * schedule endpoints and the events API. The frontend is added by TASK-010.
  *
  * The third parameter is an injection seam, not part of the Lambda contract: the
  * runtime calls `handler(event, context, callback)` and its callback is a
@@ -1404,7 +1736,16 @@ export async function handler(event, context = undefined, deps = {}) {
     return finalise(scanResponse);
   }
 
-  // 404 for everything else — later tickets add the real routes.
+  // The events API (TASK-009): the calendar grid, the "needs attention" list and
+  // the three mutations that clear an item. Every response is either the
+  // signed-in user's own events or a 401 - the session's `sub` is what becomes
+  // the Query's hash key, and no handler reads a `userId` from the request.
+  const eventsResponse = await routeEventsRequest(path, method, event, { origin, ...routeDeps });
+  if (eventsResponse) {
+    return finalise(eventsResponse);
+  }
+
+  // 404 for everything else — the frontend assets arrive with TASK-010.
   return finalise(jsonResponse(404, { error: "Not found", path }, { origin }));
 }
 
@@ -1430,4 +1771,6 @@ export {
   SCAN_PATH,
   SCAN_STATUS_PATH,
   SCAN_SCHEDULE_PATH,
+  EVENTS_PATH,
+  EVENTS_UPCOMING_PATH,
 };
