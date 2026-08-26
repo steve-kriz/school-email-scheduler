@@ -11,7 +11,7 @@
 # --- Lambda Dependency Install (TASK-038) ---
 # `data.archive_file` below zips ../src/lambda/calendar AS-IS. node_modules is
 # gitignored and never committed, so without this the zip ships
-# `package.json` but none of its dependencies — the Lambda still boots
+# `package.json` but none of its dependencies - the Lambda still boots
 # (TASK-007's Anthropic client is imported lazily for exactly this reason),
 # but every extraction then fails at first use with no error surfaced to the
 # user. See TASK-038.
@@ -19,93 +19,144 @@
 # `npm ci --omit=dev --ignore-scripts` (not `npm install`): exact,
 # reproducible install pinned to the committed package-lock.json, production
 # dependencies only, with dependency lifecycle scripts (preinstall/
-# postinstall/etc.) disabled — this runs on whatever host holds deploy
+# postinstall/etc.) disabled - this runs on whatever host holds deploy
 # credentials, so a compromised/malicious transitive dependency should not get
 # to run arbitrary code there.
 #
 # The verify step is the loud-failure guard the ticket asked for: if a
 # declared dependency did not land in node_modules (network failure, npm
 # install error, or a manifest change without a regenerated lockfile), OR if
-# source imports an @aws-sdk/* package that is neither declared here nor
-# guaranteed bundled by the runtime (see the decision below), this fails
-# `terraform apply` before the archive is built, rather than shipping a zip
-# that boots and silently degrades.
+# source imports an @aws-sdk/* package that is not declared in the manifest,
+# this fails `terraform apply` before the archive is built, rather than
+# shipping a zip that boots and silently degrades.
+
+# Every filesystem path this install step touches, defined ONCE and resolved
+# to an absolute path here by Terraform (TASK-038 rework, review cycle 1).
 #
-# `working_dir` + `abspath(...)` (TASK-038 rework, review cycle 1): the
-# previous version of this command did `cd "${path.module}/../src/lambda/
-# calendar" && ... "${path.module}/../scripts/verify-...mjs" "${path.module}/
-# ../src/lambda/calendar"`. `path.module` is `.` in this (root) module, so
-# after the `cd` the shell's cwd changed but the REMAINING `${path.module}/../`
-# expressions were already-substituted plain relative strings that then
-# resolved against the NEW cwd — the script path resolved to
-# `src/lambda/scripts/verify-lambda-package-deps.mjs` (does not exist) and the
-# directory argument resolved to `src/lambda/src/lambda/calendar` (does not
-# exist). `npm ci` succeeded and `node` then died with `Cannot find module` on
-# every single apply — `terraform validate` cannot catch a bad path inside a
-# command string, and nothing else did either. Using the provisioner's own
-# `working_dir` (so there is no `cd` for later path fragments to be evaluated
-# against) and `abspath(...)` (so every path is fully resolved BEFORE the
-# shell ever changes directory) removes the whole class of bug.
+# The rejected version of this resource ran, in a single `local-exec`:
+#   cd "${path.module}/../src/lambda/calendar" && npm ci ... \
+#     && node "${path.module}/../scripts/verify-...mjs" \
+#             "${path.module}/../src/lambda/calendar"
+# `path.module` is `.` in this (root) module, so Terraform interpolated all
+# three fragments to the same plain relative string `./../...` BEFORE handing
+# one command to the shell. The `cd` then changed the shell's working
+# directory, and the two remaining `./../` fragments were resolved by the
+# shell against that NEW directory: the script path became
+# `src/lambda/scripts/verify-lambda-package-deps.mjs` and the directory
+# argument became `src/lambda/src/lambda/calendar`. Neither exists. `npm ci`
+# succeeded and `node` then died with `Cannot find module` on EVERY apply -
+# and because a path inside a command string is just a string,
+# `terraform validate` could not see it and no test caught it either.
 #
-# `triggers.always_run` (TASK-038 rework, review cycle 1): this resource's
-# state lives in the shared S3 backend, so `package_lock_hash` /
-# `package_json_hash` alone are compared against whatever the LAST host to
-# apply recorded — not against whether THIS host's `node_modules` actually
-# exists. Host A applies once, records the hashes; host B (or a fresh CI
-# runner checking out the same commit) sees matching hashes and Terraform
-# skips this resource's provisioner entirely, on ANY apply after the first,
-# so the install AND the verify guard both silently never run there.
-# `archive_file` would then zip a directory with no `node_modules` at all,
-# with no failure anywhere in the chain — the exact quiet-degradation bug this
-# ticket exists to prevent, just moved one level up. Hashing `timestamp()`
-# forces this resource to be considered changed, and its provisioner to run,
-# on every single apply, on every host, unconditionally.
+# Two changes make that whole class of bug structurally impossible rather
+# than merely fixed:
+#   * `abspath(...)` here, plus the provisioner's own `working_dir` instead of
+#     a `cd`, means there is no relative fragment left for any shell to
+#     re-resolve and no directory change part-way through the command.
+#   * the `fileexists` preconditions below check these exact same values, so a
+#     wrong path fails at PLAN time with a message naming it - which is the
+#     failure mode `terraform validate` cannot reach.
+locals {
+  calendar_lambda_dir          = abspath("${path.module}/../src/lambda/calendar")
+  calendar_lambda_package_json = "${local.calendar_lambda_dir}/package.json"
+  calendar_lambda_package_lock = "${local.calendar_lambda_dir}/package-lock.json"
+  calendar_deps_verifier       = abspath("${path.module}/../scripts/verify-lambda-package-deps.mjs")
+}
+
+# `triggers.always_run` (TASK-038 rework, review cycle 1): the manifest hashes
+# below record WHY an install is needed, but they cannot be the only gate.
+# This resource's state lives in the shared S3 backend, so those hashes are
+# compared against whatever the LAST host to apply recorded - not against
+# whether THIS host's `node_modules` actually exists. Host A applies once and
+# records the hashes; host B, or a fresh CI runner checking out the same
+# commit, sees matching hashes, and Terraform then skips this resource's
+# provisioner entirely - so the install AND the verify guard both silently
+# never run there, on any apply after the first. `archive_file` would go on to
+# zip a directory with no `node_modules` in it at all, with nothing failing
+# anywhere in the chain: the exact quiet degradation this ticket exists to
+# prevent, moved one level up. Hashing `timestamp()` forces this resource to
+# be considered changed on every plan, so the install and - crucially - the
+# guard run unconditionally, on every host, every time.
 resource "null_resource" "calendar_lambda_npm_install" {
   triggers = {
     always_run = timestamp()
     # `can(...)` catches filesha256's own fatal "no file exists" error rather
     # than letting it abort the plan with a generic function-argument error
-    # naming a path, not the fix. The precondition below then reports the
-    # SAME underlying problem with a clear, actionable message instead
-    # (TASK-038 rework, review cycle 1: package-lock.json is committed-pending
-    # as of this ticket, so a fresh checkout without it must fail loudly here,
-    # not with a cryptic "Invalid function argument").
-    package_lock_hash = can(filesha256("${path.module}/../src/lambda/calendar/package-lock.json")) ? filesha256("${path.module}/../src/lambda/calendar/package-lock.json") : "MISSING"
-    package_json_hash = filesha256("${path.module}/../src/lambda/calendar/package.json")
+    # that names a path but not the fix; the precondition below then reports
+    # the same underlying problem actionably.
+    package_lock_hash = can(filesha256(local.calendar_lambda_package_lock)) ? filesha256(local.calendar_lambda_package_lock) : "MISSING"
+    package_json_hash = filesha256(local.calendar_lambda_package_json)
   }
 
   provisioner "local-exec" {
-    working_dir = "${path.module}/../src/lambda/calendar"
-    command     = "npm ci --omit=dev --ignore-scripts && node \"${abspath("${path.module}/../scripts/verify-lambda-package-deps.mjs")}\" \"${abspath("${path.module}/../src/lambda/calendar")}\""
+    working_dir = local.calendar_lambda_dir
+    command     = "npm ci --omit=dev --ignore-scripts && node \"${local.calendar_deps_verifier}\" \"${local.calendar_lambda_dir}\""
   }
 
   lifecycle {
     precondition {
-      condition     = fileexists("${path.module}/../src/lambda/calendar/package-lock.json")
+      condition     = fileexists(local.calendar_lambda_package_lock)
       error_message = "src/lambda/calendar/package-lock.json is missing from this checkout. 'npm ci' requires a committed lockfile - generate it with 'npm install' in src/lambda/calendar and commit the result before applying (TASK-038)."
+    }
+
+    precondition {
+      condition     = fileexists(local.calendar_deps_verifier)
+      error_message = "scripts/verify-lambda-package-deps.mjs is missing from this checkout. It is the packaging guard that stops a dependency-less zip from shipping, so the deploy must not proceed without it (TASK-038)."
     }
   }
 }
 
 # --- Lambda Package ---
-# AWS SDK v3 is provided by the nodejs24.x runtime — but only PARTIALLY:
-# nodejs24.x bundles ONLY @aws-sdk/client-dynamodb, @aws-sdk/lib-dynamodb and
-# @aws-sdk/client-s3, not the whole @aws-sdk/* namespace. TASK-038 decision
-# (revised in review cycle 1, correcting the
-# first pass of this same ticket): @aws-sdk/client-dynamodb and
-# @aws-sdk/lib-dynamodb are REMOVED from src/lambda/calendar/package.json,
-# relying on the runtime's bundled copy. @aws-sdk/client-kms
-# (backend/crypto.mjs — wraps/unwraps every Gmail refresh token, used on
-# every OAuth connect and every scan) and @aws-sdk/client-scheduler
-# (backend/scan-schedule.mjs — TASK-008 recurring scan schedules) are NOT part
-# of the runtime's bundled set, were declared nowhere, and are KEPT/added as
-# explicit dependencies here — the first pass of this ticket removed all
-# three @aws-sdk/* packages uniformly and would have broken every OAuth
-# connect and every scan on the first deploy. `scripts/verify-lambda-package-
-# deps.mjs` additionally scans source for @aws-sdk/* imports and fails if one
-# is neither declared here nor in its own runtime-bundled allowlist, so this
-# class of gap (an import with no matching declaration) fails loudly instead
-# of shipping silently again.
+# @aws-sdk/* DECISION (TASK-038, revised in review cycle 1 of this ticket).
+# The zip SHIPS every @aws-sdk/* package this Lambda's source imports:
+# @aws-sdk/client-dynamodb and @aws-sdk/lib-dynamodb (backend/connections.mjs,
+# backend/events.mjs), @aws-sdk/client-kms (backend/crypto.mjs - wraps and
+# unwraps every Gmail refresh token, so on every OAuth connect and every scan)
+# and @aws-sdk/client-scheduler (backend/scan-schedule.mjs - TASK-008
+# recurring scan schedules). Those four are exactly the four that a grep of
+# src/lambda/calendar finds, and all four are declared in
+# src/lambda/calendar/package.json - so this comment and that manifest now
+# agree: nothing here claims the runtime supplies a package the manifest also
+# declares, and nothing the manifest declares is called redundant here.
+# (@aws-sdk/credential-providers is NOT imported anywhere under src/, despite
+# a review note to the contrary; @aws-sdk/client-secrets-manager is imported
+# by scripts/check-oauth-config.mjs, which is repo tooling and is not in this
+# zip.)
+#
+# This comment used to read "AWS SDK v3 is provided by the nodejs24.x
+# runtime" while the manifest declared three @aws-sdk packages anyway; the two
+# have contradicted each other since TASK-004. Resolved by taking the ticket's
+# second option - keep the declarations, pin them independently of the
+# runtime, and correct this comment - for three reasons:
+#
+#   1. The deploy stops depending on a claim nobody here can check. A managed
+#      runtime bundles only a SUBSET of @aws-sdk/*: for nodejs20.x and later
+#      AWS documents client-dynamodb, lib-dynamodb and client-s3, which would
+#      NOT cover client-kms or client-scheduler, and AWS states the bundled
+#      versions can change without notice. Nothing in this repo can observe
+#      what nodejs24.x actually ships, so resting correctness on that subset
+#      means resting it on something unverifiable from here.
+#   2. This Lambda is 100% ESM and reaches the SDK through dynamic
+#      `import()`. Lambda exposes its bundled copy at
+#      /var/runtime/node_modules through NODE_PATH, and Node's ESM resolver
+#      does not consult NODE_PATH (only `require()` does), so a bare
+#      `import("@aws-sdk/...")` from /var/task is not reliably satisfied by
+#      the runtime's copy the way a `require()` would be.
+#   3. It is nearly free. Measured with a real `npm ci --omit=dev`:
+#      client-kms + client-scheduler alone - which have to ship either way -
+#      already pull 17.7MB into node_modules, because they carry the whole
+#      @smithy/* + @aws-sdk/core stack with them. Adding client-dynamodb and
+#      lib-dynamodb on top of that costs +2.6MB, 20.3MB total against the
+#      250MB unzipped limit, because they reuse that same core. The ticket's
+#      "tens of megabytes for no benefit" concern is about pulling the AWS SDK
+#      core in from nothing; it does not apply to two more clients sharing a
+#      core the zip already contains.
+#
+# scripts/verify-lambda-package-deps.mjs enforces the rule mechanically:
+# every @aws-sdk/* specifier imported under src/lambda/calendar must be
+# declared in that manifest, with NO runtime-bundled exemption list to drift
+# out of date, so the next undeclared import fails the apply instead of
+# shipping quietly and failing at first use.
 data "archive_file" "calendar_lambda_zip" {
   depends_on  = [null_resource.calendar_lambda_npm_install]
   type        = "zip"

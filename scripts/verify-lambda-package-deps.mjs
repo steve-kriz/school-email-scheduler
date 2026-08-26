@@ -14,6 +14,10 @@
  * then failing every extraction at first use, per TASK-038) fails the
  * `terraform apply` loudly instead — before the archive is built.
  *
+ * It also refuses to package when source imports an `@aws-sdk/*` package that
+ * the manifest does not declare, which is the mirror-image gap: a declaration
+ * with no install versus an import with no declaration.
+ *
  * Exits 0 when every declared dependency is present, 1 otherwise (including
  * argument errors and a missing/unreadable package.json).
  */
@@ -23,21 +27,6 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const LOG_PREFIX = '[verify-lambda-package-deps]';
-
-/**
- * @aws-sdk/* packages the nodejs20.x+ Lambda runtime guarantees are present,
- * so importing them needs no matching package.json dependency / node_modules
- * install (TASK-038). Anything else under @aws-sdk/* that source imports MUST
- * be declared, or a manifest change that drops a still-imported package slips
- * through silently — the Lambda still boots (every @aws-sdk import in this
- * codebase is lazy, module-scope-cached), and only fails the first time that
- * specific import is reached at runtime.
- */
-export const RUNTIME_BUNDLED_AWS_SDK_PACKAGES = [
-  '@aws-sdk/client-dynamodb',
-  '@aws-sdk/lib-dynamodb',
-  '@aws-sdk/client-s3'
-];
 
 const AWS_SDK_IMPORT_RE = /(?:from\s+|import\s*\(\s*|require\s*\(\s*)['"](@aws-sdk\/[a-z0-9.-]+)['"]/g;
 const SKIP_DIR_NAMES = new Set(['node_modules', '.git', '__test_shims__']);
@@ -173,19 +162,27 @@ function defaultReadDir(dir) {
 }
 
 /**
- * `@aws-sdk/*` names imported by source that are neither declared in
- * `dependencyNames` nor in the runtime's bundled allowlist — the class of gap
- * that let `@aws-sdk/client-kms` and `@aws-sdk/client-scheduler` go undeclared
- * in TASK-038's first pass (checking the manifest alone is blind to an import
- * with no declaration at all, as opposed to a declaration with no install).
+ * `@aws-sdk/*` names imported by source but not declared in
+ * `dependencyNames`. There is deliberately NO runtime-bundled exemption list
+ * to check against: TASK-038 decided this Lambda ships every `@aws-sdk/*`
+ * package it imports rather than relying on the managed runtime's bundled
+ * subset (the reasons, and the measured cost, are recorded above
+ * `data.archive_file.calendar_lambda_zip` in terraform/lambda_calendar.tf).
+ * The rule is therefore just "imported implies declared", with no allowlist
+ * that can drift out of date against what a runtime actually ships.
+ *
+ * This catches the gap that let `@aws-sdk/client-kms` and
+ * `@aws-sdk/client-scheduler` go undeclared for several tickets: checking the
+ * manifest alone is blind to an import with no declaration at all, as opposed
+ * to a declaration with no install. Either way the Lambda still boots — every
+ * `@aws-sdk` import in this codebase is lazy and module-scope-cached — and
+ * only fails the first time that specific import is reached at runtime.
  * @param {{ importedNames: string[], dependencyNames: string[] }} args
  * @returns {string[]}
  */
 export function findUndeclaredAwsSdkImports({ importedNames, dependencyNames }) {
   const declared = new Set(dependencyNames);
-  return importedNames.filter(
-    (name) => !declared.has(name) && !RUNTIME_BUNDLED_AWS_SDK_PACKAGES.includes(name)
-  );
+  return importedNames.filter((name) => !declared.has(name));
 }
 
 /**
@@ -229,8 +226,8 @@ export async function run({ argv = [], log = console.log, readFile, dirExists, r
   const undeclared = findUndeclaredAwsSdkImports({ importedNames: imported, dependencyNames: names });
 
   if (undeclared.length > 0) {
-    log(`${LOG_PREFIX} FAIL  source imports @aws-sdk package(s) not declared in ${packageJsonPath} and not guaranteed bundled by the Lambda runtime: ${undeclared.join(', ')}`);
-    log(`${LOG_PREFIX} refusing to package - an undeclared import boots fine and fails the first time it is reached at runtime (TASK-038)`);
+    log(`${LOG_PREFIX} FAIL  source imports @aws-sdk package(s) not declared in ${packageJsonPath}: ${undeclared.join(', ')}`);
+    log(`${LOG_PREFIX} refusing to package - this Lambda ships every @aws-sdk package it imports (see terraform/lambda_calendar.tf), and an undeclared import boots fine then fails the first time it is reached at runtime (TASK-038)`);
     return 1;
   }
 
