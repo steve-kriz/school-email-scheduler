@@ -1,9 +1,10 @@
 ---
 id: TASK-010
 title: Web UI — connect Gmail, settings, month calendar and attention list
-status: todo
+status: in-progress
 created: 2026-08-17T11:00:00Z
-updated: 2026-08-17T11:00:00Z
+updated: 2026-08-26T03:30:00.000Z
+activities: [{"activity":"code","model":"claude-opus-5","startedAt":"2026-08-26T02:35:00.000Z","finishedAt":"2026-08-26T03:30:00.000Z","note":"DISPATCH DIED MID-WORK - not a code failure. The org monthly spend limit was reached and the agent was terminated by an API error just as it was about to verify its routes; it never reported. PARTIAL WORK IS PRESERVED AND UNCOMMITTED in the worktree C:/Projects/officehq_git/.orchestrate-wt/school-email-scheduler/TASK-010 on branch ticket/TASK-010 at base 846157d: src/lambda/calendar/index.mjs MODIFIED and src/lambda/calendar/frontend/ UNTRACKED. Nothing was verified, nothing was committed, and NO CLAIM ABOUT CORRECTNESS IS MADE. Claim released so the next run re-dispatches this column; the resuming coder should inspect that worktree first rather than starting over. THE TASK-013 COLLISION IS STILL LIVE: TASK-013 independently created frontend/settings.html and frontend/settings.js on its own branch, so two versions of those two files must be reconciled at merge. No tokens/cost recorded - the run was truncated"}]
 depends-on: TASK-009
 ---
 
