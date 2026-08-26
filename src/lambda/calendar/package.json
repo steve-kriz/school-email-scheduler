@@ -4,13 +4,16 @@
   "description": "School Calendar - scans a parent's Gmail for school emails and renders the extracted events as a calendar",
   "type": "module",
   "main": "index.mjs",
+  "//": "Every @aws-sdk/* package imported under this directory is declared below and SHIPPED in the zip - the nodejs24.x runtime bundles only a subset and this code is ESM, so it does not rely on the runtime copy. Full decision and measurements: terraform/lambda_calendar.tf, the @aws-sdk DECISION comment above data.archive_file.calendar_lambda_zip (TASK-038).",
   "scripts": {
     "test": "echo \"Tests live in the repo-root tests/ tree\""
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",
+    "@aws-sdk/client-dynamodb": "^3.1112.0",
     "@aws-sdk/client-kms": "^3.1112.0",
     "@aws-sdk/client-scheduler": "^3.1112.0",
+    "@aws-sdk/lib-dynamodb": "^3.1112.0",
     "zod": "^4.4.3"
   }
 }

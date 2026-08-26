@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { extractResourceBody, extractBlock } from '../helpers/hcl-blocks.mjs';
+import { findAwsSdkImports } from '../../scripts/verify-lambda-package-deps.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,24 +28,36 @@ describe('Package Dependency Deployment (TASK-038) E2E Tests', () => {
           'zod is not declared as a dependency');
       });
 
-      it('When package.json dependencies are declared, Then the two runtime-bundled @aws-sdk/* packages are NOT declared, and the two NOT bundled by the runtime ARE declared', () => {
-        // TASK-038 rework (review cycle 1): nodejs20.x+ bundles ONLY
-        // @aws-sdk/client-dynamodb, @aws-sdk/lib-dynamodb and @aws-sdk/client-s3.
-        // @aws-sdk/client-kms (backend/crypto.mjs) and @aws-sdk/client-scheduler
-        // (backend/scan-schedule.mjs) are imported by src/ and are NOT part of
-        // that bundled set, so they must be declared or every OAuth connect and
-        // every scan breaks on first use.
+      it('When package.json dependencies are declared, Then every @aws-sdk/* package the source actually imports is declared', () => {
+        // TASK-038 rework (review cycle 1). The decision recorded in
+        // terraform/lambda_calendar.tf is that this Lambda SHIPS every
+        // @aws-sdk/* package it imports rather than leaning on the managed
+        // runtime's bundled subset, so "imported implies declared" with no
+        // exemptions. The expected set is derived from the source tree rather
+        // than hard-coded, so a NEW undeclared @aws-sdk import fails here too -
+        // that is exactly how @aws-sdk/client-kms and @aws-sdk/client-scheduler
+        // stayed undeclared across several tickets.
         const packageJson = JSON.parse(
           fs.readFileSync(path.join(LAMBDA_DIR, 'package.json'), 'utf-8')
         );
-        assert.strictEqual(packageJson.dependencies['@aws-sdk/client-dynamodb'], undefined,
-          '@aws-sdk/client-dynamodb should not be declared (runtime provides it)');
-        assert.strictEqual(packageJson.dependencies['@aws-sdk/lib-dynamodb'], undefined,
-          '@aws-sdk/lib-dynamodb should not be declared (runtime provides it)');
-        assert.ok(packageJson.dependencies['@aws-sdk/client-kms'],
-          '@aws-sdk/client-kms should be declared (not bundled by the runtime, used by backend/crypto.mjs)');
-        assert.ok(packageJson.dependencies['@aws-sdk/client-scheduler'],
-          '@aws-sdk/client-scheduler should be declared (not bundled by the runtime, used by backend/scan-schedule.mjs)');
+        const imported = findAwsSdkImports({ lambdaDir: LAMBDA_DIR });
+
+        // Guard the derivation itself: if the scan silently returned nothing,
+        // the loop below would pass vacuously.
+        for (const expected of [
+          '@aws-sdk/client-dynamodb',
+          '@aws-sdk/lib-dynamodb',
+          '@aws-sdk/client-kms',
+          '@aws-sdk/client-scheduler'
+        ]) {
+          assert.ok(imported.includes(expected),
+            `the source scan did not find the known import ${expected} - the derivation is broken, not the manifest`);
+        }
+
+        for (const name of imported) {
+          assert.ok(packageJson.dependencies[name],
+            `${name} is imported under src/lambda/calendar but not declared in package.json`);
+        }
       });
     });
 
@@ -130,18 +143,110 @@ describe('Package Dependency Deployment (TASK-038) E2E Tests', () => {
       });
     });
 
+    describe('Scenario: The install command runs where it thinks it does', () => {
+      // TASK-038 rework (review cycle 1). The rejected version of the
+      // provisioner did `cd <lambda dir> && node <relative script path>
+      // <relative lambda dir>`. Terraform substituted all three fragments as
+      // plain relative strings BEFORE the shell ran, so the two after the `cd`
+      // resolved against the new working directory and pointed at directories
+      // that do not exist - `node` died with `Cannot find module` on every
+      // apply. `terraform validate` cannot see a path inside a command string,
+      // and no test looked, so it shipped. These are the assertions that look.
+      it('Given the local-exec provisioner, Then it takes its cwd from working_dir and never changes directory mid-command', () => {
+        const tfContent = fs.readFileSync(
+          path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8'
+        );
+        const start = tfContent.indexOf('resource "null_resource" "calendar_lambda_npm_install"');
+        assert.notStrictEqual(start, -1, 'null_resource.calendar_lambda_npm_install not found');
+        const body = tfContent.slice(start);
+
+        assert.match(body, /working_dir\s*=\s*local\.calendar_lambda_dir/,
+          'the provisioner does not take its working directory from local.calendar_lambda_dir');
+
+        const commandMatch = body.match(/command\s*=\s*"(.*)"/);
+        assert.ok(commandMatch, 'no local-exec command found on the null_resource');
+        assert.ok(
+          !/(?:^|[\s&|;])cd\s/.test(commandMatch[1]),
+          'the provisioner command contains a `cd`: any path after it is resolved against the NEW working directory, which is the defect this ticket was rejected for'
+        );
+      });
+
+      it('Given the path locals the provisioner interpolates, Then each one resolves to something that exists on disk', () => {
+        const tfContent = fs.readFileSync(
+          path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8'
+        );
+
+        // path.module is "." for this root module, so Terraform resolves
+        // abspath("${path.module}/X") against the directory it runs in, i.e.
+        // terraform/ - which is what path.resolve(TERRAFORM_DIR, X) does here.
+        const resolved = {};
+        const localRe = /(calendar_lambda_dir|calendar_deps_verifier)\s*=\s*abspath\("\$\{path\.module\}\/(.+?)"\)/g;
+        for (const match of tfContent.matchAll(localRe)) {
+          resolved[match[1]] = path.resolve(TERRAFORM_DIR, match[2]);
+        }
+
+        assert.deepStrictEqual(
+          Object.keys(resolved).sort(),
+          ['calendar_deps_verifier', 'calendar_lambda_dir'],
+          'the provisioner path locals are no longer defined with abspath("${path.module}/...") - this assertion can no longer see them'
+        );
+
+        for (const [name, target] of Object.entries(resolved)) {
+          assert.ok(fs.existsSync(target),
+            `local.${name} resolves to ${target}, which does not exist - terraform apply would fail here`);
+        }
+      });
+
+      it('Given the provisioner command, Then it passes the verifier the lambda directory as an absolute local, not a relative fragment', () => {
+        const tfContent = fs.readFileSync(
+          path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8'
+        );
+        const commandMatch = tfContent.match(/command\s*=\s*"(npm ci.*)"/);
+        assert.ok(commandMatch, 'the npm ci provisioner command was not found');
+        const command = commandMatch[1];
+
+        assert.ok(command.includes('${local.calendar_deps_verifier}'),
+          'the command does not invoke the verifier through local.calendar_deps_verifier');
+        assert.ok(command.includes('${local.calendar_lambda_dir}'),
+          'the command does not pass local.calendar_lambda_dir as the verifier argument');
+        assert.ok(!command.includes('${path.module}'),
+          'the command still interpolates ${path.module} directly, which yields a relative path the shell re-resolves');
+      });
+
+      it('Given the triggers block, Then the install and its guard are forced to run on every apply, not only when a hash changed', () => {
+        const tfContent = fs.readFileSync(
+          path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8'
+        );
+        // Hash-only triggers compare against what the LAST host to apply
+        // recorded in the shared remote state, not against whether THIS host
+        // has a node_modules - so a second machine or a fresh CI runner skips
+        // the install AND the guard, and archive_file happily zips a directory
+        // with no dependencies in it.
+        assert.match(tfContent, /always_run\s*=\s*timestamp\(\)/,
+          'the null_resource has no unconditional trigger, so the guard can be skipped entirely on a host that has never applied');
+      });
+    });
+
     describe('Scenario: The manifest and terraform comment agree on AWS SDK bundling', () => {
-      it('Given terraform/lambda_calendar.tf comment section, Then it says the nodejs24.x runtime provides the AWS SDK', () => {
+      it('Given terraform/lambda_calendar.tf, Then it records the TASK-038 @aws-sdk decision and no longer claims the runtime supplies the SDK', () => {
         const tfContent = fs.readFileSync(
           path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8'
         );
         assert.ok(
-          tfContent.includes('AWS SDK v3 is provided by the nodejs24.x runtime'),
-          'terraform comment does not mention that AWS SDK is provided by runtime'
+          tfContent.includes('@aws-sdk/* DECISION (TASK-038'),
+          'terraform does not record the TASK-038 @aws-sdk decision'
+        );
+        assert.ok(
+          tfContent.includes('The zip SHIPS every @aws-sdk/* package this Lambda'),
+          'terraform decision comment does not state that the zip ships every imported @aws-sdk package'
+        );
+        assert.ok(
+          !tfContent.includes('AWS SDK v3 is provided by the nodejs24.x runtime'),
+          'terraform still claims the runtime provides the AWS SDK, which contradicts a manifest that declares @aws-sdk packages'
         );
       });
 
-      it('When the terraform comment mentions bundled AWS SDK, Then it should NOT contradict the package.json', () => {
+      it('When package.json declares @aws-sdk packages, Then the terraform comment names every one of them as shipped rather than runtime-provided', () => {
         const packageJson = JSON.parse(
           fs.readFileSync(path.join(LAMBDA_DIR, 'package.json'), 'utf-8')
         );
@@ -149,25 +254,25 @@ describe('Package Dependency Deployment (TASK-038) E2E Tests', () => {
           path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8'
         );
 
-        // TASK-038 rework (review cycle 1): the runtime bundles only
-        // @aws-sdk/client-dynamodb and @aws-sdk/lib-dynamodb among the packages
-        // this Lambda's source imports (plus @aws-sdk/client-s3, which is
-        // bundled but never imported here) - those two should not be declared.
-        // @aws-sdk/client-kms and @aws-sdk/client-scheduler are NOT bundled, so
-        // the manifest declaring them does not contradict the comment.
-        if (tfContent.includes('provided by the nodejs24.x runtime')) {
-          assert.strictEqual(packageJson.dependencies['@aws-sdk/client-dynamodb'], undefined,
-            'package.json declares @aws-sdk/client-dynamodb but terraform says runtime provides it');
-          assert.strictEqual(packageJson.dependencies['@aws-sdk/lib-dynamodb'], undefined,
-            'package.json declares @aws-sdk/lib-dynamodb but terraform says runtime provides it');
-          assert.ok(packageJson.dependencies['@aws-sdk/client-kms'],
-            '@aws-sdk/client-kms is not bundled by the runtime and must be declared');
-          assert.ok(packageJson.dependencies['@aws-sdk/client-scheduler'],
-            '@aws-sdk/client-scheduler is not bundled by the runtime and must be declared');
+        // TASK-038 rework (review cycle 1): the recorded decision is that this
+        // Lambda ships every @aws-sdk/* package its source imports instead of
+        // relying on the managed runtime's bundled subset. The manifest and
+        // the terraform therefore agree only if each declared package is named
+        // in the decision comment.
+        const declared = Object.keys(packageJson.dependencies)
+          .filter((name) => name.startsWith('@aws-sdk/'));
+
+        assert.ok(declared.length > 0, 'package.json declares no @aws-sdk packages at all');
+
+        for (const name of declared) {
+          assert.ok(
+            tfContent.includes(name),
+            `package.json declares ${name} but the terraform decision comment never mentions it`
+          );
         }
       });
 
-      it('When TASK-038 decision is recorded, Then the terraform comment explains the @aws-sdk removal', () => {
+      it('When the decision is recorded, Then the terraform states the reason and the measured cost', () => {
         const tfContent = fs.readFileSync(
           path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8'
         );
@@ -176,8 +281,12 @@ describe('Package Dependency Deployment (TASK-038) E2E Tests', () => {
           'TASK-038 decision not referenced in terraform comment'
         );
         assert.ok(
-          tfContent.includes('REMOVED'),
-          'terraform comment does not explain that @aws-sdk packages were removed'
+          /250MB unzipped limit/.test(tfContent),
+          'terraform decision comment does not weigh the zip size against the Lambda unzipped limit'
+        );
+        assert.ok(
+          /ESM/.test(tfContent) && /NODE_PATH/.test(tfContent),
+          'terraform decision comment does not give the ESM/NODE_PATH reason for not relying on the runtime copy'
         );
       });
     });
