@@ -1,4 +1,4 @@
-import { describe, it, beforeEach, afterEach } from 'node:test';
+import { describe, it, after, beforeEach, afterEach } from 'node:test';
 import * as assert from 'node:assert';
 import { createHash } from 'node:crypto';
 
@@ -54,31 +54,61 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
 
   let capturedLogs = [];
 
+  // Captured once, before any `beforeEach` has ever run, so this always refers
+  // to the genuine, un-wrapped console methods - never to a wrapper installed
+  // by a previous test. `beforeEach` below always wraps THESE, not the current
+  // `console.log`/`warn`/`error` (which may already be a wrapper), and
+  // `afterEach` always restores THESE. That is what makes stacking impossible:
+  // there is nothing to stack onto, because every wrap starts from the same
+  // originals and every restore returns to the same originals.
+  const REAL_CONSOLE_LOG = console.log;
+  const REAL_CONSOLE_WARN = console.warn;
+  const REAL_CONSOLE_ERROR = console.error;
+
   beforeEach(() => {
     capturedLogs = [];
     // Capture console output
-    const originalLog = console.log;
-    const originalWarn = console.warn;
-    const originalError = console.error;
-
     console.log = (...args) => {
       capturedLogs.push({ level: 'log', args });
-      originalLog(...args);
+      REAL_CONSOLE_LOG(...args);
     };
     console.warn = (...args) => {
       capturedLogs.push({ level: 'warn', args });
-      originalWarn(...args);
+      REAL_CONSOLE_WARN(...args);
     };
     console.error = (...args) => {
       capturedLogs.push({ level: 'error', args });
-      originalError(...args);
+      REAL_CONSOLE_ERROR(...args);
     };
   });
 
   afterEach(() => {
-    // Restore original console
-    const originalLog = console.log;
-    console.log = originalLog;
+    // Restore the genuine originals captured above - NOT `console.log` itself,
+    // which was the bug here: `const originalLog = console.log; console.log =
+    // originalLog;` reads the ALREADY-WRAPPED function and reassigns it to
+    // itself, so the wrapper never actually comes off and each `beforeEach`
+    // stacks another wrapper on top of the last.
+    //
+    // That stacking bug never produced a false pass: every stacked wrapper
+    // still pushes its own entry into `capturedLogs`, which is reset at the
+    // top of every `beforeEach`, so the log-hygiene assertions below always
+    // scanned MORE captured output than intended, never less. It inflated
+    // captured output rather than suppressing it, so no assertion in this
+    // file was ever weakened by it - the real risk was only cross-file
+    // interference once other suites shared the process, which restoring the
+    // genuine original here now prevents.
+    console.log = REAL_CONSOLE_LOG;
+    console.warn = REAL_CONSOLE_WARN;
+    console.error = REAL_CONSOLE_ERROR;
+  });
+
+  after(() => {
+    // Proves the fix: once every test in this suite has finished, console.*
+    // must be back to the exact function references captured before the
+    // first override, with no wrapper left installed.
+    assert.strictEqual(console.log, REAL_CONSOLE_LOG, 'console.log must be the genuine original after the suite finishes');
+    assert.strictEqual(console.warn, REAL_CONSOLE_WARN, 'console.warn must be the genuine original after the suite finishes');
+    assert.strictEqual(console.error, REAL_CONSOLE_ERROR, 'console.error must be the genuine original after the suite finishes');
   });
 
   describe('GET /calendar/api/auth/google/start', () => {
@@ -190,7 +220,7 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       assert.equal(response.statusCode, 500);
     });
 
-    it('should not leak secrets in logs', () => {
+    it('should not leak secrets in logs', async () => {
       const event = {
         path: '/calendar/api/auth/google/start',
         httpMethod: 'GET',
@@ -198,7 +228,14 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       };
 
       capturedLogs = [];
-      handler(event, undefined, { env: defaultEnv });
+      // Must be awaited: `handleAuthStart` currently logs synchronously before
+      // its first `await`, but that is an implementation detail, not a
+      // contract. An unawaited call here would only happen to observe those
+      // logs today; the moment the handler gains any `await` before its log
+      // line, this assertion would stop observing anything and go vacuously
+      // green instead of red. Awaiting the full response is what keeps this
+      // assertion honest regardless of where the handler suspends.
+      await handler(event, undefined, { env: defaultEnv });
 
       const logContent = JSON.stringify(capturedLogs);
       assert.ok(!logContent.includes(clientSecret), 'client secret must not be logged');

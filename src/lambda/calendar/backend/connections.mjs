@@ -8,9 +8,10 @@
  * (`refreshTokenKeyId`). There is deliberately no `refreshToken` attribute and no
  * `ttl` attribute - this row is the app's only copy of the user's OAuth grant.
  *
- * CONTAINMENT RULE: `refreshTokenEnc` never leaves this module. `getConnection`
- * strips it and reports only the derived boolean `hasRefreshToken`, and the only
- * way to obtain the token itself is `getRefreshToken`, which decrypts and returns
+ * CONTAINMENT RULE: `refreshTokenEnc` and `refreshTokenKeyId` (the KMS CMK ARN
+ * that wrapped it) never leave this module. `getConnection` strips both and
+ * reports only the derived boolean `hasRefreshToken`, and the only way to
+ * obtain the token itself is `getRefreshToken`, which decrypts and returns
  * the plaintext to a caller that has asked for it explicitly. Anything that
  * serialises a connection into an HTTP response must go through `toPublicJson`,
  * which is an allow-list projection rather than a delete-list - a new attribute
@@ -31,8 +32,8 @@ import { encryptSecret, decryptSecret } from "./crypto.mjs";
 /** Every user id is namespaced by its identity provider. */
 export const USER_ID_PREFIX = "google#";
 
-/** Attribute that must never be handed to a caller outside this module. */
-export const SECRET_ATTRIBUTES = ["refreshTokenEnc"];
+/** Attributes that must never be handed to a caller outside this module. */
+export const SECRET_ATTRIBUTES = ["refreshTokenEnc", "refreshTokenKeyId"];
 
 /**
  * Attributes `toPublicJson` is allowed to emit, mapped from the stored row.
@@ -75,6 +76,14 @@ export const PUBLIC_ATTRIBUTES = [
  * module instances, which matters when a test loads this module twice.
  */
 export const REMOVE_ATTRIBUTE = Symbol.for("calendar.connections.REMOVE_ATTRIBUTE");
+
+/**
+ * How old a `scanStartedAt` lock must be before it is treated as abandoned
+ * rather than active (TASK-008). A Lambda invocation that was itself killed by
+ * its own timeout leaves `scanInProgress` set forever unless something else
+ * expires it - this is that expiry.
+ */
+export const SCAN_LOCK_STALE_MS = 15 * 60 * 1000;
 
 /**
  * Whether the caller could determine the connection state at all.
@@ -186,10 +195,17 @@ export async function ddbPutItem({ tableName, item }) {
  * because DynamoDB rejects an empty value map as well - so a removal-only patch
  * built with an empty map would fail for a second, unrelated reason.
  *
- * @param {{ tableName: string, key: object, updates: Record<string, unknown> }} args
+ * A `condition` (TASK-008's scan lock) adds a `ConditionExpression`, merging
+ * its own `names`/`values` into the same maps the SET/REMOVE clause uses -
+ * DynamoDB rejects a request with a `#name`/`:value` placeholder declared but
+ * never referenced, so the merge (not two separate expression-attribute maps)
+ * is what keeps a condition-only call, and a call with both a patch and a
+ * condition, both valid.
+ *
+ * @param {{ tableName: string, key: object, updates: Record<string, unknown>, condition?: { expression: string, names?: object, values?: object } }} args
  * @returns {object} UpdateCommand input.
  */
-export function buildUpdateParams({ tableName, key, updates }) {
+export function buildUpdateParams({ tableName, key, updates, condition = null }) {
   const names = {};
   const values = {};
   const sets = [];
@@ -223,19 +239,26 @@ export function buildUpdateParams({ tableName, key, updates }) {
     ReturnValues: "ALL_NEW",
   };
   if (sets.length > 0) params.ExpressionAttributeValues = values;
+
+  if (condition && typeof condition.expression === "string" && condition.expression) {
+    params.ConditionExpression = condition.expression;
+    if (condition.names) params.ExpressionAttributeNames = { ...params.ExpressionAttributeNames, ...condition.names };
+    if (condition.values) params.ExpressionAttributeValues = { ...(params.ExpressionAttributeValues || {}), ...condition.values };
+  }
+
   return params;
 }
 
 /**
  * Real DynamoDB UpdateItem for a flat patch. Default `updateItem` dependency.
  *
- * @param {{ tableName: string, key: object, updates: Record<string, unknown> }} args
+ * @param {{ tableName: string, key: object, updates: Record<string, unknown>, condition?: object }} args
  * @returns {Promise<object|null>} The updated attributes.
  */
-export async function ddbUpdateItem({ tableName, key, updates }) {
+export async function ddbUpdateItem({ tableName, key, updates, condition = null }) {
   const { UpdateCommand } = await import("@aws-sdk/lib-dynamodb");
   const client = await getDocumentClient();
-  const result = await client.send(new UpdateCommand(buildUpdateParams({ tableName, key, updates })));
+  const result = await client.send(new UpdateCommand(buildUpdateParams({ tableName, key, updates, condition })));
   return result?.Attributes || null;
 }
 
@@ -486,4 +509,87 @@ export async function updateConnection(
   const updates = { ...patch, updatedAt: now() };
   const attributes = await updateItem({ tableName: table, key: { userId }, updates });
   return stripSecrets(attributes);
+}
+
+/**
+ * Attempt to acquire the per-user scan lock (TASK-008).
+ *
+ * A scan is not re-entrant: this sets `scanInProgress: true` and
+ * `scanStartedAt` in ONE atomic UpdateItem, guarded by a ConditionExpression
+ * so two concurrent invocations for the same user cannot both believe they
+ * hold the lock - a plain read-then-write from the caller could not make that
+ * guarantee. The condition passes when there is no lock at all
+ * (`attribute_not_exists`) OR the existing lock is older than `staleAfterMs`:
+ * a lock left behind by an invocation that was itself killed by a Lambda
+ * timeout must not wedge the account forever.
+ *
+ * @param {string} userId
+ * @param {object} [deps]
+ * @param {number} [deps.staleAfterMs]
+ * @param {() => string} [deps.now] ISO-8601 clock.
+ * @param {(args: { tableName: string, key: object, updates: object, condition?: object }) => Promise<object|null>} [deps.updateItem]
+ * @param {string|null} [deps.tableName]
+ * @param {Record<string, string|undefined>} [deps.env]
+ * @returns {Promise<boolean>} true when this call now holds the lock.
+ */
+export async function acquireScanLock(
+  userId,
+  {
+    staleAfterMs = SCAN_LOCK_STALE_MS,
+    now = () => new Date().toISOString(),
+    updateItem = ddbUpdateItem,
+    tableName = null,
+    env = process.env,
+  } = {}
+) {
+  const table = tableName || resolveTableName(env);
+  if (!table) throw new Error("acquireScanLock: CALENDAR_CONNECTIONS_TABLE is not set");
+  if (!userId) throw new Error("acquireScanLock: userId is required");
+
+  const startedAt = now();
+  const cutoff = new Date(Date.parse(startedAt) - staleAfterMs).toISOString();
+
+  try {
+    await updateItem({
+      tableName: table,
+      key: { userId },
+      updates: { scanInProgress: true, scanStartedAt: startedAt },
+      condition: {
+        expression: "attribute_not_exists(#scanStartedAt) OR #scanStartedAt < :staleCutoff",
+        names: { "#scanStartedAt": "scanStartedAt" },
+        values: { ":staleCutoff": cutoff },
+      },
+    });
+    return true;
+  } catch (err) {
+    // Classified by type, not message text, matching gmail.mjs/anthropic.mjs:
+    // this is the SDK's own exception for a failed ConditionExpression.
+    if (err?.name === "ConditionalCheckFailedException") return false;
+    throw err;
+  }
+}
+
+/**
+ * Release the scan lock. Callers run this in a `finally`, so a scan that
+ * throws still clears it - a lock that only ever expired after
+ * `SCAN_LOCK_STALE_MS` would otherwise leave the account unscannable for up to
+ * that long after every crashed run.
+ *
+ * @param {string} userId
+ * @param {object} [deps]
+ * @param {(args: { tableName: string, key: object, updates: object }) => Promise<object|null>} [deps.updateItem]
+ * @param {string|null} [deps.tableName]
+ * @param {Record<string, string|undefined>} [deps.env]
+ * @returns {Promise<void>}
+ */
+export async function releaseScanLock(userId, { updateItem = ddbUpdateItem, tableName = null, env = process.env } = {}) {
+  const table = tableName || resolveTableName(env);
+  if (!table) throw new Error("releaseScanLock: CALENDAR_CONNECTIONS_TABLE is not set");
+  if (!userId) throw new Error("releaseScanLock: userId is required");
+
+  await updateItem({
+    tableName: table,
+    key: { userId },
+    updates: { scanInProgress: REMOVE_ATTRIBUTE, scanStartedAt: REMOVE_ATTRIBUTE },
+  });
 }

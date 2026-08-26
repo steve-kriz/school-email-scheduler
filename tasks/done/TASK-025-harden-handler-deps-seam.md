@@ -1,11 +1,11 @@
 ---
 id: TASK-025
 title: Handler deps seam is reachable in production — make the test-only injection structural
-status: testing
+status: done
 created: 2026-08-18T02:10:00Z
-updated: 2026-08-18T03:39:24Z
+updated: 2026-08-18T05:55:00.000Z
 review-of: TASK-004
-activities: [{"activity":"code","model":"claude-opus-5","note":"asRouteDeps plain-object gate; 9/9 verified by orchestrator; 4 mutations red; tests include controls proving non-vacuity"}]
+activities: [{"activity":"code","model":"claude-opus-5","note":"asRouteDeps plain-object gate; 9/9 verified by orchestrator; 4 mutations red; tests include controls proving non-vacuity"},{"activity":"test","model":"claude-haiku-4-5","startedAt":"2026-08-18T05:00:00.000Z","finishedAt":"2026-08-18T05:12:00.000Z","tokensIn":49828,"note":"GREEN 89/89 (39 e2e + 50 unit); 9/9 AC covered. AC8 mutation-pinning asserted only as would-fail reasoning, not an executed mutate/observe-red/revert sweep — flagged to review"},{"activity":"review","model":"claude-opus-4-8","startedAt":"2026-08-18T05:25:00.000Z","finishedAt":"2026-08-18T05:55:00.000Z","tokensIn":56624,"note":"VERDICT ACCEPT. Reviewer had Read/Grep/Glob only so ran 0 mutations and said so; adjudicated AC8 via executed differential controls (calendar-handler-deps.test.js:106/:202/:130/:164/:182/:333/:351) that empirically prove the pins non-vacuous. Confirmed asRouteDeps is the sole path from arg3 into route deps (index.mjs:928/:931, spread only at :962/:969). 5 non-blocking findings -> TASK-039..043"}]
 ---
 
 ## Description

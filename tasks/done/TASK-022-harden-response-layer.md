@@ -1,9 +1,10 @@
 ---
 id: TASK-022
 title: Harden the response layer — null allowlist, bypassable invariant, test placement
-status: todo
+status: done
 created: 2026-08-18T01:15:00Z
-updated: 2026-08-18T01:15:00Z
+updated: 2026-08-18T08:05:00.000Z
+activities: [{"activity":"code","model":"claude-sonnet-5","startedAt":"2026-08-18T06:10:00.000Z","finishedAt":"2026-08-18T06:45:00.000Z","tokensIn":93360,"note":"index.mjs only (+129/-20). coerceAllowlist falls back to module ALLOWED_ORIGINS not [] (fail-safe not fail-open); finalise() router-level choke point strips Allow-Credentials on wildcard origin for ALL returns incl. hand-rolled responses; both exported for unit test. Mutation-tested for real with md5sum before/after and marker grep to prove clean restore. 52/52 + 51/51 existing e2e green. AC3/AC4 (test-file surgery) deliberately left to Testing"},{"activity":"test","model":"claude-haiku-4-5","startedAt":"2026-08-18T06:45:00.000Z","finishedAt":"2026-08-18T07:20:00.000Z","tokensIn":80238,"note":"GREEN 68/68 (52 unit + 16 e2e), 172ms clean exit - orchestrator re-ran independently. Origin-gate tests moved to tests/unit/calendar-cors.test.js with counts reconciled (42 moved + 16 new = 58 unit assertions, 37 handler-level retained in e2e). Mutations EXECUTED: coerceAllowlist neutered -> 9 red; finalise strip neutered -> 2 red; both restored and verified by marker grep"},{"activity":"review","model":"claude-opus-4-8","startedAt":"2026-08-18T07:30:00.000Z","finishedAt":"2026-08-18T08:05:00.000Z","tokensIn":63993,"note":"VERDICT ACCEPT (read-only reviewer, disclosed; findings reasoned not executed). Confirmed all 5 handler returns wrapped in finalise, every duplicate credentials header stripped, header-name-only logging, npm test:unit picks up the new file. 6 findings -> TASK-060..065. Both orchestrator-flagged risks confirmed real: finalise reads only multiValueHeaders so a headers-shaped response bypasses it (F1), and the fail-safe fallback is untested because ALLOWED_ORIGINS is [] when unset so fail-safe and fail-open coincide in every test (F3). Also: coercion in isOriginAllowed/buildResponse never exercised with a malformed value (F2)"}]
 review-of: TASK-020
 ---
 

@@ -23,14 +23,29 @@ const TEST_EXTENSIONS = ['.test.js', '.test.mjs', '.test.cjs'];
 const SPAWN_TARGET = 'tests/helpers/exit-zero-fixture.mjs';
 
 /**
- * Spawns a command (non-test) and returns the result
+ * Spawns a command and returns the result.
+ *
+ * This file runs under `node --test`, which sets NODE_TEST_CONTEXT in its own
+ * process env. If a spawned command is itself `node --test ...` (several
+ * assertions below spawn a scoped test:e2e/test:unit command), inheriting
+ * that variable makes the child believe it is a recursive re-entrant call: it
+ * prints "run() is being called recursively within a test file. skipping
+ * running files." and exits 0 without running anything. That would make
+ * every `result.code === 0` assertion below pass whether or not the spawned
+ * tests actually ran -- exactly the fail-open shape this ticket exists to
+ * remove. Stripping it ensures a spawned `node --test` child always runs for
+ * real and its exit code reflects its own tests.
  */
 function runCommand(cwd, command, args = []) {
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+
   const result = spawnSync(command, args, {
     cwd,
     shell: true,
     encoding: 'utf-8',
-    timeout: 60000  // Generous timeout for full suite runs
+    timeout: 60000,  // Generous timeout for full suite runs
+    env
   });
 
   return {
@@ -304,11 +319,14 @@ describe('Feature: The test suite that CI runs includes the e2e scenarios', () =
         `test:unit should NOT cover tests/e2e. Got: "${testUnitScript}"`);
     });
 
-    it('And the node --test tests/unit command executes successfully', () => {
-      const result = runCommand(PROJECT_ROOT, 'node', ['--test', 'tests/unit/terraform-scaffold.test.js']);
-      // Should not error, though exit code may vary
-      const output = result.stdout + result.stderr;
-      assert.ok(output.length > 0, 'node --test should produce output');
+    it('And the node --test command executes successfully', () => {
+      // Uses the dependency-free spawn target rather than
+      // tests/unit/terraform-scaffold.test.js: that file shells out to
+      // `terraform validate -json`, an external binary this assertion has no
+      // need of. SPAWN_TARGET's only failure mode is the `node --test`
+      // plumbing itself.
+      const result = runCommand(PROJECT_ROOT, 'node', ['--test', SPAWN_TARGET]);
+      assert.equal(result.code, 0, `node --test should exit 0. stderr: ${result.stderr}`);
     });
   });
 
@@ -613,10 +631,14 @@ describe('Feature: The test suite that CI runs includes the e2e scenarios', () =
       console.log('No recursion detected: test:e2e exits cleanly (AC 11)');
     });
 
-    it('And the test suite itself (npm test) completes without hanging or excessive forking', () => {
-      // Run a small subset to confirm: the existence of a fixture file and the
-      // scoping logic prove no re-entrance occurs. A full run would timeout if
-      // recursion were happening.
+    it('And the scoped test:e2e command excludes tests/e2e, so directory discovery cannot re-enter it', () => {
+      // This does not run `npm test` itself -- the real exit-0 proof above
+      // (AC 11) already spawns the scoped command and asserts exit 0, and
+      // that is what rules out a hang or a fork bomb. This test checks only
+      // the two static pre-conditions that make that real spawn safe to run
+      // at all: the dependency-free fixture exists, and the scoped command
+      // does not still reference the tests/e2e directory (which would cause
+      // this very file to re-enter itself via directory discovery).
       const fixtureExists = fs.existsSync(
         path.join(PROJECT_ROOT, SPAWN_TARGET)
       );

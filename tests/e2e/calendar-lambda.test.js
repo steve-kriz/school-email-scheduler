@@ -305,221 +305,18 @@ describe('Calendar Lambda E2E Tests', () => {
 });
 
 // ---------------------------------------------------------------------------
-// The origin gate is the app's only cross-origin control and every later route
-// inherits it, so these tests assert on RETURN VALUES rather than on the fact
-// that the functions are exported.
-//
-// ALLOWED_ORIGINS is parsed once at module scope, so a test cannot reconfigure
-// it by writing process.env after import (and this is ESM, so there is no
-// require.cache to bust). Instead getCorsOrigin/isOriginAllowed/buildResponse
-// take an optional allowlist argument that defaults to the module-scope
-// constant, and parseAllowedOrigins is exported so tests parse a raw string
-// exactly as the module does at import time.
+// Handler-level tests only: these call handler() directly and test the
+// integration of routes with the response layer. Function-level tests for
+// parseAllowedOrigins/isOriginAllowed/getCorsOrigin/buildResponse live in
+// tests/unit/calendar-cors.test.js and run under 'npm run test:unit'.
 // ---------------------------------------------------------------------------
-describe('Feature: The origin gate behaves as configured', () => {
-  const OPEN = parseAllowedOrigins('');
-  const OFFICEHQ = parseAllowedOrigins('officehq.com.au');
-  const MIXED_CASE = parseAllowedOrigins('OfficeHQ.com.au');
-
-  describe('Scenario: A mixed-case allowlist entry still matches', () => {
-    it('Given ALLOWED_ORIGINS is "OfficeHQ.com.au", Then entries are lower-cased at parse time', () => {
-      assert.deepEqual(MIXED_CASE, ['officehq.com.au'],
-        'ALLOWED_ORIGINS entries are not lower-cased at parse time');
-    });
-
-    it('When a request arrives from "https://officehq.com.au", Then the origin is allowed', () => {
-      // Fails before the fix: URL always lower-cases hostname, so a raw
-      // "OfficeHQ.com.au" entry could never match any hostname.
-      assert.equal(isOriginAllowed('https://officehq.com.au', MIXED_CASE), true,
-        'A mixed-case allowlist entry did not match a lowercase origin');
-    });
-
-    it('And a subdomain of the mixed-case entry is allowed', () => {
-      assert.equal(isOriginAllowed('https://sub.officehq.com.au', MIXED_CASE), true,
-        'A mixed-case allowlist entry did not match a subdomain');
-    });
-
-    it('And a mixed-case origin matches a lowercase entry', () => {
-      assert.equal(isOriginAllowed('https://OfficeHQ.com.au', OFFICEHQ), true,
-        'A mixed-case origin did not match a lowercase allowlist entry');
-    });
-
-    it('And ALLOWED_ORIGINS entries are trimmed and blanks dropped', () => {
-      assert.deepEqual(parseAllowedOrigins(' A.com , ,B.com '), ['a.com', 'b.com'],
-        'ALLOWED_ORIGINS parsing does not trim entries and drop blanks');
-    });
-  });
-
-  describe('Scenario: Open mode echoes a wildcard', () => {
-    it('Given ALLOWED_ORIGINS is unset, When the cors origin is resolved, Then it is "*"', () => {
-      assert.equal(parseAllowedOrigins(undefined).length, 0, 'Unset ALLOWED_ORIGINS did not parse to an empty allowlist');
-      assert.equal(getCorsOrigin(null, OPEN), '*', 'Open mode did not resolve to "*" for a missing origin');
-      assert.equal(getCorsOrigin('https://anything.example.com', OPEN), '*',
-        'Open mode did not resolve to "*" for an arbitrary origin');
-    });
-
-    it('And no origin is "allowed" by name in open mode - the wildcard is the only opener', () => {
-      // isOriginAllowed is the membership test; open mode is handled by
-      // getCorsOrigin. Keeping them distinct is what lets a future route
-      // require a real allowlist entry even while CORS is open.
-      assert.equal(isOriginAllowed('https://anything.example.com', OPEN), false,
-        'An empty allowlist reported an origin as an explicit member');
-    });
-  });
-
-  describe('Scenario: An allowed origin is echoed back', () => {
-    it('Given ALLOWED_ORIGINS is "officehq.com.au", When a request arrives from "https://officehq.com.au", Then it is echoed', () => {
-      assert.equal(getCorsOrigin('https://officehq.com.au', OFFICEHQ), 'https://officehq.com.au',
-        'An allowed origin was not echoed back');
-    });
-
-    it('And the echoed value is the full origin, not just the hostname', () => {
-      assert.equal(getCorsOrigin('https://sub.officehq.com.au:8443', OFFICEHQ),
-        'https://sub.officehq.com.au:8443',
-        'The echoed CORS origin was not the request origin verbatim');
-    });
-  });
-
-  describe('Scenario: A disallowed origin is not echoed', () => {
-    it('Given ALLOWED_ORIGINS is "officehq.com.au", When a request arrives from "https://example.com", Then the origin is not allowed', () => {
-      assert.equal(isOriginAllowed('https://example.com', OFFICEHQ), false,
-        'A disallowed origin was reported as allowed');
-    });
-
-    it('And getCorsOrigin returns null for it', () => {
-      assert.equal(getCorsOrigin('https://example.com', OFFICEHQ), null,
-        'A disallowed origin did not resolve to null');
-    });
-
-    it('And no Access-Control-Allow-Origin header is emitted for it', () => {
-      const response = buildResponse(200, '{}', 'application/json', {
-        origin: 'https://example.com',
-        allowlist: OFFICEHQ
-      });
-      assert.equal(response.multiValueHeaders['Access-Control-Allow-Origin'], undefined,
-        'A disallowed origin was echoed in Access-Control-Allow-Origin');
-    });
-
-    it('And a missing or malformed origin is not allowed', () => {
-      assert.equal(isOriginAllowed(null, OFFICEHQ), false, 'A null origin was allowed');
-      assert.equal(isOriginAllowed('', OFFICEHQ), false, 'An empty origin was allowed');
-      assert.equal(isOriginAllowed('not-a-url', OFFICEHQ), false, 'A malformed origin was allowed');
-      assert.equal(getCorsOrigin(null, OFFICEHQ), null, 'A null origin did not resolve to null');
-    });
-  });
-
-  describe('Scenario: A subdomain of an allowed domain is allowed', () => {
-    it('Given ALLOWED_ORIGINS is "officehq.com.au", When a request arrives from "https://sub.officehq.com.au", Then the origin is allowed', () => {
-      assert.equal(isOriginAllowed('https://sub.officehq.com.au', OFFICEHQ), true,
-        'A subdomain of an allowed domain was rejected');
-    });
-
-    it('And a deeper subdomain is allowed', () => {
-      assert.equal(isOriginAllowed('https://a.b.officehq.com.au', OFFICEHQ), true,
-        'A nested subdomain of an allowed domain was rejected');
-    });
-
-    it('And the exact domain is allowed', () => {
-      assert.equal(isOriginAllowed('https://officehq.com.au', OFFICEHQ), true,
-        'The exact allowed domain was rejected');
-    });
-  });
-
-  describe('Scenario Outline: A lookalike domain is refused', () => {
-    // The suffix match must require a dot boundary. A naive
-    // `hostname.endsWith(entry)` would accept "evil-officehq.com.au", which
-    // genuinely ends with "officehq.com.au".
-    const lookalikes = [
-      'https://evil-officehq.com.au',
-      'https://officehq.com.au.attacker.com',
-      'https://notofficehq.com.au',
-      'https://evil-officehq.com.au/path',
-      'https://xofficehq.com.au'
-    ];
-
-    for (const origin of lookalikes) {
-      it(`Given ALLOWED_ORIGINS is "officehq.com.au", When a request arrives from "${origin}", Then the origin is not allowed`, () => {
-        assert.equal(isOriginAllowed(origin, OFFICEHQ), false,
-          `Lookalike origin ${origin} was allowed by an "officehq.com.au" allowlist`);
-        assert.equal(getCorsOrigin(origin, OFFICEHQ), null,
-          `Lookalike origin ${origin} resolved to a CORS origin instead of null`);
-      });
-    }
-
-    it('And a lookalike is not echoed in a built response', () => {
-      const response = buildResponse(200, '{}', 'application/json', {
-        origin: 'https://evil-officehq.com.au',
-        allowlist: OFFICEHQ
-      });
-      assert.equal(response.multiValueHeaders['Access-Control-Allow-Origin'], undefined,
-        'A lookalike origin was echoed in Access-Control-Allow-Origin');
-    });
-  });
-
-  describe('Scenario: Credentials are never paired with a wildcard origin', () => {
+describe('Feature: Handler response layer guards are applied', () => {
+  describe('Scenario: No live handler response carries credentials with a wildcard origin', () => {
     const credentialsHeaderOf = (response) =>
       Object.keys(response.multiValueHeaders)
         .filter((name) => name.toLowerCase() === 'access-control-allow-credentials');
 
-    it('Given ALLOWED_ORIGINS is unset, When any response is built, Then it does not carry Access-Control-Allow-Credentials', () => {
-      const response = buildResponse(200, '{}', 'application/json', { origin: 'https://anything.example.com', allowlist: OPEN });
-      assert.equal(response.multiValueHeaders['Access-Control-Allow-Origin'][0], '*',
-        'Open mode did not emit a wildcard Access-Control-Allow-Origin');
-      assert.deepEqual(credentialsHeaderOf(response), [],
-        'A wildcard-origin response carried Access-Control-Allow-Credentials');
-    });
-
-    // This is the regression guard: buildResponse must structurally refuse to
-    // emit the header alongside "*", not merely refrain from adding it. Fails
-    // if a later ticket adds Allow-Credentials next to the open "*" branch, or
-    // removes the invariant from buildResponse.
-    it('And a caller that explicitly asks for Allow-Credentials alongside "*" does not get it', () => {
-      const response = buildResponse(200, '{}', 'application/json', {
-        origin: 'https://anything.example.com',
-        allowlist: OPEN,
-        headers: { 'Access-Control-Allow-Credentials': ['true'] }
-      });
-      assert.equal(response.multiValueHeaders['Access-Control-Allow-Origin'][0], '*',
-        'Open mode did not emit a wildcard Access-Control-Allow-Origin');
-      assert.deepEqual(credentialsHeaderOf(response), [],
-        'buildResponse emitted Access-Control-Allow-Credentials while the resolved origin was "*"');
-    });
-
-    it('And the invariant is case-insensitive, as HTTP header names are', () => {
-      const response = buildResponse(200, '{}', 'application/json', {
-        origin: 'https://anything.example.com',
-        allowlist: OPEN,
-        headers: { 'access-control-allow-credentials': ['true'] }
-      });
-      assert.deepEqual(credentialsHeaderOf(response), [],
-        'A lowercase Access-Control-Allow-Credentials survived alongside a wildcard origin');
-    });
-
-    it('And jsonResponse inherits the same invariant', () => {
-      const response = jsonResponse(200, { ok: true }, {
-        origin: 'https://anything.example.com',
-        allowlist: OPEN,
-        headers: { 'Access-Control-Allow-Credentials': ['true'] }
-      });
-      assert.deepEqual(credentialsHeaderOf(response), [],
-        'jsonResponse emitted Access-Control-Allow-Credentials alongside a wildcard origin');
-    });
-
-    it('But with an explicit allowlist and an allowed origin, credentials are permitted', () => {
-      // Proves the invariant is scoped to the wildcard rather than a blanket
-      // ban, so TASK-004 can use credentialed CORS by setting ALLOWED_ORIGINS.
-      const response = buildResponse(200, '{}', 'application/json', {
-        origin: 'https://officehq.com.au',
-        allowlist: OFFICEHQ,
-        headers: { 'Access-Control-Allow-Credentials': ['true'] }
-      });
-      assert.equal(response.multiValueHeaders['Access-Control-Allow-Origin'][0], 'https://officehq.com.au',
-        'An allowed origin was not echoed back');
-      assert.deepEqual(response.multiValueHeaders['Access-Control-Allow-Credentials'], ['true'],
-        'Credentials were stripped for a specifically allowed (non-wildcard) origin');
-    });
-
-    it('And no live handler response carries Access-Control-Allow-Credentials', async () => {
+    it('And no live handler response carries Access-Control-Allow-Credentials with a wildcard origin', async () => {
       const paths = ['/calendar/api/health', '/calendar/api/nope'];
       for (const p of paths) {
         const response = await handler({
@@ -529,8 +326,11 @@ describe('Feature: The origin gate behaves as configured', () => {
           body: null,
           isBase64Encoded: false
         });
+        // Assert both the wildcard origin AND the absence of credentials
+        assert.equal(response.multiValueHeaders['Access-Control-Allow-Origin']?.[0], '*',
+          `Response for ${p} did not have a wildcard Access-Control-Allow-Origin`);
         assert.deepEqual(credentialsHeaderOf(response), [],
-          `Response for ${p} carried Access-Control-Allow-Credentials`);
+          `Response for ${p} carried Access-Control-Allow-Credentials with a wildcard origin`);
       }
     });
   });
@@ -547,19 +347,6 @@ describe('Feature: The origin gate behaves as configured', () => {
       });
       assert.equal(response.statusCode, 200, `Expected status 200, got ${response.statusCode}`);
       assert.equal(JSON.parse(response.body).status, 'ok', 'Health check status is not "ok"');
-    });
-  });
-
-  describe('Scenario: An echoed origin is accompanied by Vary: Origin', () => {
-    it('When an allowed subdomain origin is echoed, Then Vary: Origin is set so caches do not cross-serve it', () => {
-      const response = buildResponse(200, '{}', 'application/json', {
-        origin: 'https://sub.officehq.com.au',
-        allowlist: OFFICEHQ
-      });
-      assert.equal(response.multiValueHeaders['Access-Control-Allow-Origin'][0], 'https://sub.officehq.com.au',
-        'An allowed subdomain origin was not echoed back');
-      assert.deepEqual(response.multiValueHeaders['Vary'], ['Origin'],
-        'Vary: Origin was not set alongside an echoed origin');
     });
   });
 });

@@ -1,11 +1,11 @@
 ---
 id: TASK-032
 title: The public-mail blocklist misses ten consumer hosts, including the Australian ones
-status: testing
+status: done
 created: 2026-08-18T03:00:00Z
-updated: 2026-08-18T03:39:24Z
+updated: 2026-08-18T06:35:00.000Z
 review-of: TASK-005
-activities: [{"activity":"code","model":"claude-opus-5","note":"6->38 hosts + 20-brand check + registrableName; 58/58 entries swept and pinned; orchestrator spot-checked 7 on the live tree, counts match"}]
+activities: [{"activity":"code","model":"claude-opus-5","tokens":71092,"note":"6->38 hosts + 20-brand check; 58/58 swept"},{"activity":"test","model":"claude-haiku-4-5","tokens":56850,"note":"attempt 1/3 RED: docblock claims a school domain is never refused, but 6 brand-named domains under any TLD are refused (me/mac/mail/live/proton/aol .edu.au). Tester pinned it with a tautological if/else assertion that cannot fail. Returned to coder"},{"activity":"code","model":"claude-sonnet-5","startedAt":"2026-08-18T05:00:00.000Z","finishedAt":"2026-08-18T05:05:00.000Z","tokensIn":61882,"note":"fix 2/3: brand check split into 13 unambiguous any-suffix brands; 7 dictionary-word brands (me/mac/mail/live/proton/aol/zoho) demoted to exact-match only, so live.edu.au etc now accepted; 3 false docblocks rewritten"},{"activity":"test","model":"claude-haiku-4-5","startedAt":"2026-08-18T05:05:00.000Z","finishedAt":"2026-08-18T05:25:00.000Z","tokensIn":63329,"note":"attempt 2/3 GREEN 131/131; fixture retired to 13 brands, tautological if/else at :522 rewritten as single-branch assert, 7 dictionary-word .edu.au acceptance tests added. Tester reported pin counts not an executed sweep (and its component figures summed to 64 vs the 51 stated); orchestrator ran 4 real mutations (yahoo.com.au, outlook.com.au, me.com, brand qq) - each applied and reddened 3-7 tests, file restored green"},{"activity":"review","model":"claude-opus-4-8","startedAt":"2026-08-18T06:10:00.000Z","finishedAt":"2026-08-18T06:35:00.000Z","tokensIn":54711,"note":"VERDICT ACCEPT, all 10 AC met. Reviewer had Read/Grep/Glob only, disclosed it, adjudicated by tracing. Confirmed per-entry pinning is structural (test loops a hardcoded literal list, not the export, so deleting any of 38 entries reddens) and registrableName handles com.au/co.uk/edu.au correctly. 8 findings -> TASK-044..050 (nit folded into 049): aol/zoho demoted on a false rationale, mail.ru and live.<cc> family missing, no AU ISP hosts (bigpond/optusnet/y7mail), 2 wrong docblock claims, 3 weak assertions incl. another near-tautology at :472"}]
 ---
 
 ## Description

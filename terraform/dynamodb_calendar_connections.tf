@@ -25,12 +25,26 @@
 #                         decrypt.
 #   lastHistoryId       : Gmail history ID watermark from the last successful
 #                         scan; lets the next scan fetch only new messages.
-#   lastScanAt          : ISO-8601 timestamp of the last scan attempt
-#   lastScanStatus      : "success" | "error" | "running"
-#   lastScanError       : last error message, surfaced in the UI
+#   lastScanAt          : ISO-8601 timestamp the incremental watermark is
+#                         pinned to (see scan.mjs) - NOT necessarily "when the
+#                         last scan ran": a truncated or time-stopped scan pins
+#                         this at the query floor it used rather than advancing
+#                         it, so a later scan still re-covers whatever this one
+#                         dropped.
+#   lastScanStatus      : "ok" | "partial" | "reauth_required" | "error"
+#   lastScanError       : last error message (short, never a token/body/subject)
+#   lastScanMessagesScanned, lastScanEventsCreated, lastScanEventsUpdated,
+#   lastScanSkipped, lastScanTruncated (BOOL) : counts/flags from the last scan
+#                         (scan.mjs), surfaced by GET /calendar/api/scan/status.
+#   scanInProgress (BOOL), scanStartedAt : the per-user scan lock (scan.mjs /
+#                         connections.mjs's acquireScanLock+releaseScanLock).
+#                         A lock older than SCAN_LOCK_STALE_MS is treated as
+#                         abandoned rather than active.
 #   scheduleEnabled (BOOL) : master switch for the automated scan
 #   scheduleFrequency   : "daily" | "weekly"
 #   scheduleHour        : hour-of-day (0-23) in `timezone` to run the scan
+#   scheduleDayOfWeek   : 0 (Sunday) - 6 (Saturday); set only when
+#                         scheduleFrequency is "weekly"
 #   timezone            : IANA zone, e.g. "Australia/Sydney"
 #   createdAt           : ISO-8601, when the account was first connected
 #   updatedAt           : ISO-8601, last mutation

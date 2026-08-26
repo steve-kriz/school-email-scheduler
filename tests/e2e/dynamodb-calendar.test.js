@@ -6,6 +6,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { extractResourceBody, extractBlock, bodyDeclaresTtlBlock } from '../helpers/hcl-blocks.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,37 +14,12 @@ const PROJECT_ROOT = path.join(__dirname, '..', '..');
 const TERRAFORM_DIR = path.join(PROJECT_ROOT, 'terraform');
 
 // -----------------------------------------------------------------------------
-// TTL guard helpers (TASK-016)
+// TTL guard helpers (TASK-016, superseded by tests/helpers/hcl-blocks.mjs)
 // -----------------------------------------------------------------------------
-// Scoped to one resource body by brace counting so the guard fires only on the
-// connections table and never on the events table's legitimate ttl block.
-
-/** Return the body text of `resource "<type>" "<name>" { ... }`, or null. */
-function extractResourceBody(content, resourceType, resourceName) {
-  const header = new RegExp(`resource\\s+"${resourceType}"\\s+"${resourceName}"\\s*\\{`);
-  const match = header.exec(content);
-  if (!match) return null;
-
-  const open = match.index + match[0].length - 1; // index of the opening brace
-  let depth = 0;
-  for (let i = open; i < content.length; i++) {
-    if (content[i] === '{') depth++;
-    else if (content[i] === '}') {
-      depth--;
-      if (depth === 0) return content.slice(open + 1, i);
-    }
-  }
-  return null;
-}
-
-/** True if the given resource body declares a `ttl { ... }` block. */
-function bodyDeclaresTtlBlock(body) {
-  const withoutComments = body
-    .split('\n')
-    .filter(line => !line.trim().startsWith('#') && !line.trim().startsWith('//'))
-    .join('\n');
-  return /(^|\n)\s*ttl\s*\{/.test(withoutComments);
-}
+// Scoped to one resource body via the shared extractor so the guard fires only
+// on the connections table and never on the events table's legitimate ttl
+// block. The shared extractor (TASK-017) skips braces inside strings,
+// comments, and heredocs rather than counting them naively.
 
 /**
  * The guard assertion under test. Throws if the connections table in `content`
@@ -75,14 +51,67 @@ describe('DynamoDB Calendar E2E Tests', () => {
       });
 
       it('And it does not document any plaintext "refreshToken" attribute', () => {
-        // Check that there is no "refreshToken" (without Enc suffix) in the schema documentation
-        const lines = connectionsContent.split('\n');
+        // Real check (replaces a dead assertion). The old check compared
+        // against a JS string literal containing an escaped backslash and the
+        // letter that follows it, which is not the same thing as a regex
+        // whitespace class - so it tested for text that could never appear in
+        // the file, and doubled up on the adjacent `.match()` check rather
+        // than adding coverage.
+        //
+        // Strip the leading "#"/"//" comment markers from the schema section
+        // and test each line against the documented pattern for a plaintext
+        // attribute name: an optional bullet, then "refreshToken" followed
+        // directly by ":" or "(" (not by more identifier characters, which is
+        // what excludes "refreshTokenEnc" and "refreshTokenKeyId").
         const schemaSection = connectionsContent.substring(0, connectionsContent.indexOf('resource'));
+        const uncommented = schemaSection
+          .split('\n')
+          .map(line => line.replace(/^\s*#\s?/, '').replace(/^\s*\/\/\s?/, ''))
+          .join('\n');
 
-        // Should NOT have a "refreshToken" attribute (without Enc)
-        assert.ok(!schemaSection.includes('refreshToken\s') &&
-                 !schemaSection.match(/refreshToken\s*:/),
-          'plaintext refreshToken attribute should not be documented');
+        assert.ok(!/^\s*[-*]?\s*refreshToken\s*[:(]/m.test(uncommented),
+          'plaintext refreshToken attribute should not be documented (refreshTokenEnc/refreshTokenKeyId are fine)');
+      });
+
+      it('And the schema does document refreshTokenKeyId without tripping the plaintext-token check', () => {
+        const schemaSection = connectionsContent.substring(0, connectionsContent.indexOf('resource'));
+        assert.ok(schemaSection.includes('refreshTokenKeyId'),
+          'refreshTokenKeyId should be documented in schema');
+      });
+    });
+
+    describe('Scenario: A plaintext refresh token entry is caught (mutated fixture)', () => {
+      it('Given a mutated copy whose schema comment documents a "refreshToken" attribute, When the plaintext-token assertion runs, Then it fails', () => {
+        const connectionsPath = path.join(TERRAFORM_DIR, 'dynamodb_calendar_connections.tf');
+        const original = fs.readFileSync(connectionsPath, 'utf-8');
+
+        const mutated = original.replace(
+          '#   refreshTokenEnc     :',
+          '#   refreshToken        : the plaintext Gmail refresh token (should never appear)\n#   refreshTokenEnc     :'
+        );
+        assert.notEqual(mutated, original, 'fixture mutation did not apply');
+
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'task017-plaintext-token-'));
+        try {
+          const tmpFile = path.join(tmpDir, 'dynamodb_calendar_connections.tf');
+          fs.writeFileSync(tmpFile, mutated, 'utf-8');
+          const content = fs.readFileSync(tmpFile, 'utf-8');
+
+          const schemaSection = content.substring(0, content.indexOf('resource'));
+          const uncommented = schemaSection
+            .split('\n')
+            .map(line => line.replace(/^\s*#\s?/, '').replace(/^\s*\/\/\s?/, ''))
+            .join('\n');
+
+          assert.throws(
+            () => assert.ok(!/^\s*[-*]?\s*refreshToken\s*[:(]/m.test(uncommented),
+              'plaintext refreshToken attribute should not be documented'),
+            assert.AssertionError,
+            'the plaintext-token assertion must fail once a genuine "refreshToken :" entry is documented'
+          );
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
       });
     });
 
@@ -245,16 +274,21 @@ describe('DynamoDB Calendar E2E Tests', () => {
       });
 
       it('Then the connections table and the events table both set server_side_encryption to the calendar KMS key', () => {
-        // Check connections table
-        assert.ok(connectionsContent.includes('server_side_encryption'),
-          'connections table missing server_side_encryption block');
-        assert.ok(connectionsContent.includes('kms_key_arn = aws_kms_key.calendar.arn'),
+        // Check connections table - scoped to its own resource body and its
+        // own server_side_encryption block, not a whole-file substring.
+        const connectionsBody = extractResourceBody(connectionsContent, 'aws_dynamodb_table', 'calendar_connections');
+        assert.ok(connectionsBody, 'aws_dynamodb_table.calendar_connections resource body not found');
+        const connectionsSse = extractBlock(connectionsBody, 'server_side_encryption');
+        assert.ok(connectionsSse, 'connections table missing server_side_encryption block');
+        assert.ok(/kms_key_arn\s*=\s*aws_kms_key\.calendar\.arn/.test(connectionsSse),
           'connections table server_side_encryption not using calendar KMS key');
 
         // Check events table
-        assert.ok(eventsContent.includes('server_side_encryption'),
-          'events table missing server_side_encryption block');
-        assert.ok(eventsContent.includes('kms_key_arn = aws_kms_key.calendar.arn'),
+        const eventsBody = extractResourceBody(eventsContent, 'aws_dynamodb_table', 'calendar_events');
+        assert.ok(eventsBody, 'aws_dynamodb_table.calendar_events resource body not found');
+        const eventsSse = extractBlock(eventsBody, 'server_side_encryption');
+        assert.ok(eventsSse, 'events table missing server_side_encryption block');
+        assert.ok(/kms_key_arn\s*=\s*aws_kms_key\.calendar\.arn/.test(eventsSse),
           'events table server_side_encryption not using calendar KMS key');
 
         // Verify the KMS key exists
@@ -272,9 +306,11 @@ describe('DynamoDB Calendar E2E Tests', () => {
       });
 
       it('Then point_in_time_recovery is enabled', () => {
-        assert.ok(connectionsContent.includes('point_in_time_recovery'),
-          'point_in_time_recovery block not found');
-        assert.ok(connectionsContent.includes('enabled = true'),
+        const body = extractResourceBody(connectionsContent, 'aws_dynamodb_table', 'calendar_connections');
+        assert.ok(body, 'aws_dynamodb_table.calendar_connections resource body not found');
+        const pitrBlock = extractBlock(body, 'point_in_time_recovery');
+        assert.ok(pitrBlock, 'point_in_time_recovery block not found');
+        assert.ok(/enabled\s*=\s*true/.test(pitrBlock),
           'point_in_time_recovery not enabled');
       });
     });
@@ -298,7 +334,9 @@ describe('DynamoDB Calendar E2E Tests', () => {
         assert.ok(body, 'aws_dynamodb_table.calendar_events resource body not found');
         assert.equal(bodyDeclaresTtlBlock(body), true,
           'events table should still declare a ttl block');
-        assert.ok(/ttl\s*\{[^}]*attribute_name\s*=\s*"ttl"[^}]*enabled\s*=\s*true/.test(body),
+        const ttlBlock = extractBlock(body, 'ttl');
+        assert.ok(ttlBlock, 'ttl block not found in the calendar_events resource body');
+        assert.ok(/attribute_name\s*=\s*"ttl"/.test(ttlBlock) && /enabled\s*=\s*true/.test(ttlBlock),
           'events table ttl should be enabled on attribute "ttl"');
       });
     });
@@ -347,9 +385,16 @@ describe('DynamoDB Calendar E2E Tests', () => {
       it('Then point_in_time_recovery is enabled and server_side_encryption references the calendar KMS key', () => {
         const content = fs.readFileSync(connectionsPath, 'utf-8');
         const body = extractResourceBody(content, 'aws_dynamodb_table', 'calendar_connections');
-        assert.ok(/point_in_time_recovery\s*\{[^}]*enabled\s*=\s*true/.test(body),
+        assert.ok(body, 'aws_dynamodb_table.calendar_connections resource body not found');
+
+        const pitrBlock = extractBlock(body, 'point_in_time_recovery');
+        assert.ok(pitrBlock, 'point_in_time_recovery block not found');
+        assert.ok(/enabled\s*=\s*true/.test(pitrBlock),
           'point_in_time_recovery should still be enabled');
-        assert.ok(/server_side_encryption\s*\{[^}]*kms_key_arn\s*=\s*aws_kms_key\.calendar\.arn/.test(body),
+
+        const sseBlock = extractBlock(body, 'server_side_encryption');
+        assert.ok(sseBlock, 'server_side_encryption block not found');
+        assert.ok(/kms_key_arn\s*=\s*aws_kms_key\.calendar\.arn/.test(sseBlock),
           'server_side_encryption should still reference the calendar CMK');
       });
     });
@@ -357,78 +402,81 @@ describe('DynamoDB Calendar E2E Tests', () => {
 
   describe('Feature: Terraform validation', () => {
     describe('Scenario: The DynamoDB and KMS configuration validates', () => {
-      it('When "terraform validate" is run after "terraform init -backend=false", Then error_count equals 0', () => {
+      it('When "terraform validate" is run after "terraform init -backend=false", Then error_count equals 0', (t) => {
+        // First init. A missing terraform binary is reported as a genuine
+        // skip (visible in the test-runner output) rather than a pass -
+        // there is nothing to validate without terraform, so the test must
+        // not claim success.
         try {
-          // First init
           execSync('terraform init -backend=false', {
             cwd: TERRAFORM_DIR,
             encoding: 'utf-8',
             stdio: 'pipe',
             timeout: 60000
           });
+        } catch (error) {
+          if (error.code === 'ENOENT') {
+            t.skip('terraform binary not found - cannot run terraform init/validate');
+            return;
+          }
+          assert.fail(`terraform init failed: ${(error.stderr || error.message || '').toString()}`);
+        }
 
-          // Then validate
-          const result = execSync('terraform validate -json', {
+        // Then validate.
+        let result;
+        try {
+          result = execSync('terraform validate -json', {
             cwd: TERRAFORM_DIR,
             encoding: 'utf-8',
             stdio: 'pipe',
             timeout: 60000
           });
-
-          let output;
-          try {
-            output = JSON.parse(result);
-          } catch (e) {
-            // If JSON parsing fails, just check for success
-            assert.ok(true, 'terraform validate output parsed as plain text');
+        } catch (error) {
+          if (error.code === 'ENOENT') {
+            t.skip('terraform binary not found - cannot run terraform validate');
             return;
           }
-
-          // Check for errors (not warnings) - error_count should be 0
-          if (output.error_count !== undefined) {
-            assert.equal(output.error_count, 0,
-              `error_count should be 0, got ${output.error_count}`);
-          } else if (output.diagnostics) {
-            const errors = output.diagnostics.filter(d => d.severity === 'error');
-            assert.equal(errors.length, 0,
-              `terraform validate returned ${errors.length} errors: ${errors.map(e => e.summary).join(', ')}`);
-          } else if (output.valid === false) {
-            assert.fail('terraform validation failed');
-          } else {
-            assert.ok(true, 'terraform validation passed');
-          }
-        } catch (error) {
-          // If terraform is not available, report it plainly
-          if (error.code === 'ENOENT') {
-            console.warn('terraform binary not found - skipping validation test');
-            assert.ok(true, 'terraform binary not available');
-          } else {
-            const output = error.stdout || '';
-            const stderr = error.stderr || '';
-
-            // Try to parse JSON output to check error_count
-            let errorCount = null;
-            try {
-              const parsed = JSON.parse(output);
-              if (parsed.valid !== undefined) {
-                if (parsed.valid === false && parsed.error_count !== undefined) {
-                  errorCount = parsed.error_count;
-                }
-              }
-            } catch (e) {
-              // Not JSON, will check stderr
-            }
-
-            if (errorCount !== null && errorCount > 0) {
-              assert.fail(`terraform validate failed with ${errorCount} errors`);
-            } else if (output.includes('Error') || stderr.includes('Error')) {
-              assert.fail(`terraform validate failed: ${stderr || output}`);
-            } else {
-              // Could be warnings only, which is acceptable
-              assert.ok(true, 'terraform validate succeeded (warnings only)');
-            }
-          }
+          const output = (error.stdout || '').toString();
+          const stderr = (error.stderr || '').toString();
+          assert.fail(`terraform validate failed: ${stderr || output}`);
+          return;
         }
+
+        // A -json output that fails to parse means nothing was actually
+        // verified - that must fail loudly, not report success.
+        let parsed;
+        try {
+          parsed = JSON.parse(result);
+        } catch (e) {
+          assert.fail(
+            `terraform validate -json output could not be parsed as JSON (${e.message}): ${result}`
+          );
+          return;
+        }
+
+        // `terraform validate` exits 0 on warnings alone, so the exit code by
+        // itself tolerates them implicitly. Assert error_count === 0
+        // explicitly rather than trusting control flow - never warning-free.
+        assert.equal(
+          parsed.error_count,
+          0,
+          `terraform validate reported ${parsed.error_count} error(s): ${JSON.stringify(parsed.diagnostics)}`
+        );
+      });
+    });
+  });
+
+  describe('Feature: The dead assertion is gone', () => {
+    describe('Scenario: This test file itself contains no dead literal-string check', () => {
+      it('Given tests/e2e/dynamodb-calendar.test.js, Then it contains no assertion on the literal string "refreshToken\\s"', () => {
+        const selfContent = fs.readFileSync(__filename, 'utf-8');
+        // Build the dead call shape (an `.includes(...)` call on a JS string
+        // literal holding a backslash and the letter that follows it, not a
+        // regex) from parts, so this test's own source does not itself
+        // contain a copy of the pattern it is searching for.
+        const deadCallShape = ['.includes(', "'", 'refreshToken', String.fromCharCode(92), 's', "'", ')'].join('');
+        assert.ok(!selfContent.includes(deadCallShape),
+          'the dead refreshToken-backslash-s includes() check should have been removed, not left alongside the real one');
       });
     });
   });

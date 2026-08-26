@@ -1,9 +1,10 @@
 ---
 id: TASK-008
 title: Scan orchestration — manual trigger and EventBridge schedule
-status: todo
+status: done
 created: 2026-08-17T11:00:00Z
-updated: 2026-08-17T11:00:00Z
+updated: 2026-08-26T00:00:00.000Z
+activities: [{"activity":"code","model":"claude-sonnet-5","startedAt":"2026-08-18T08:45:00.000Z","finishedAt":"2026-08-18T10:50:00.000Z","tokensIn":312222,"note":"New scan.mjs + scan-schedule.mjs + terraform/scheduler_calendar.tf; scan lock via ConditionExpression with 15min stale override; 5 new routes all through finalise; Lambda timeout 60->900 plus a deadline-aware loop from getRemainingTimeInMillis. TASK-035 hazard handled well: on a truncated or time-stopped run lastScanAt is pinned at the query floor this run used, not newestReceivedAt - only a clean run advances. TASK-070 hazard: storeEvents throw caught, written reported as 0 never guessed, run marked partial. Predicted 2 pre-existing failures; ORCHESTRATOR CONFIRMED 2 fail (timeout=60 literal, and the routeDeps exact-count assertion going 2->4 - TASK-041 coming true) and verified no raw deps spread, so the security invariant holds. Introduced a NEW undeclared dep: client-scheduler"},{"activity":"test","model":"claude-haiku-4-5","startedAt":"2026-08-18T10:50:00.000Z","finishedAt":"2026-08-18T11:25:00.000Z","tokensIn":104517,"note":"GREEN 165/165 across 4 files (28 e2e scan-orchestration + 41 unit scan + 56 terraform + 40 handler-deps). WATERMARK MUTATION EXECUTED: scan.mjs:448 changed so a truncated run advances to newestReceivedAt - the pin-at-floor test FAILED as required, then restored. Lock-release-on-throw proven by tracking the acquire/release sequence with a throwing extractFromMessage. Both stale assertions fixed: timeout 60->900, and the routeDeps exact count relaxed to >=2 while KEEPING assert.ok(!/\\.\\.\\.deps\\b/.test(source)) as the real security invariant. ORCHESTRATOR re-ran the FULL suite: 1562/1562 green, 0 skipped, up from 1391"}]
 depends-on: TASK-007
 ---
 

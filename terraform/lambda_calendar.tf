@@ -8,10 +8,106 @@
 # =============================================================================
 
 
+# --- Lambda Dependency Install (TASK-038) ---
+# `data.archive_file` below zips ../src/lambda/calendar AS-IS. node_modules is
+# gitignored and never committed, so without this the zip ships
+# `package.json` but none of its dependencies — the Lambda still boots
+# (TASK-007's Anthropic client is imported lazily for exactly this reason),
+# but every extraction then fails at first use with no error surfaced to the
+# user. See TASK-038.
+#
+# `npm ci --omit=dev --ignore-scripts` (not `npm install`): exact,
+# reproducible install pinned to the committed package-lock.json, production
+# dependencies only, with dependency lifecycle scripts (preinstall/
+# postinstall/etc.) disabled — this runs on whatever host holds deploy
+# credentials, so a compromised/malicious transitive dependency should not get
+# to run arbitrary code there.
+#
+# The verify step is the loud-failure guard the ticket asked for: if a
+# declared dependency did not land in node_modules (network failure, npm
+# install error, or a manifest change without a regenerated lockfile), OR if
+# source imports an @aws-sdk/* package that is neither declared here nor
+# guaranteed bundled by the runtime (see the decision below), this fails
+# `terraform apply` before the archive is built, rather than shipping a zip
+# that boots and silently degrades.
+#
+# `working_dir` + `abspath(...)` (TASK-038 rework, review cycle 1): the
+# previous version of this command did `cd "${path.module}/../src/lambda/
+# calendar" && ... "${path.module}/../scripts/verify-...mjs" "${path.module}/
+# ../src/lambda/calendar"`. `path.module` is `.` in this (root) module, so
+# after the `cd` the shell's cwd changed but the REMAINING `${path.module}/../`
+# expressions were already-substituted plain relative strings that then
+# resolved against the NEW cwd — the script path resolved to
+# `src/lambda/scripts/verify-lambda-package-deps.mjs` (does not exist) and the
+# directory argument resolved to `src/lambda/src/lambda/calendar` (does not
+# exist). `npm ci` succeeded and `node` then died with `Cannot find module` on
+# every single apply — `terraform validate` cannot catch a bad path inside a
+# command string, and nothing else did either. Using the provisioner's own
+# `working_dir` (so there is no `cd` for later path fragments to be evaluated
+# against) and `abspath(...)` (so every path is fully resolved BEFORE the
+# shell ever changes directory) removes the whole class of bug.
+#
+# `triggers.always_run` (TASK-038 rework, review cycle 1): this resource's
+# state lives in the shared S3 backend, so `package_lock_hash` /
+# `package_json_hash` alone are compared against whatever the LAST host to
+# apply recorded — not against whether THIS host's `node_modules` actually
+# exists. Host A applies once, records the hashes; host B (or a fresh CI
+# runner checking out the same commit) sees matching hashes and Terraform
+# skips this resource's provisioner entirely, on ANY apply after the first,
+# so the install AND the verify guard both silently never run there.
+# `archive_file` would then zip a directory with no `node_modules` at all,
+# with no failure anywhere in the chain — the exact quiet-degradation bug this
+# ticket exists to prevent, just moved one level up. Hashing `timestamp()`
+# forces this resource to be considered changed, and its provisioner to run,
+# on every single apply, on every host, unconditionally.
+resource "null_resource" "calendar_lambda_npm_install" {
+  triggers = {
+    always_run = timestamp()
+    # `can(...)` catches filesha256's own fatal "no file exists" error rather
+    # than letting it abort the plan with a generic function-argument error
+    # naming a path, not the fix. The precondition below then reports the
+    # SAME underlying problem with a clear, actionable message instead
+    # (TASK-038 rework, review cycle 1: package-lock.json is committed-pending
+    # as of this ticket, so a fresh checkout without it must fail loudly here,
+    # not with a cryptic "Invalid function argument").
+    package_lock_hash = can(filesha256("${path.module}/../src/lambda/calendar/package-lock.json")) ? filesha256("${path.module}/../src/lambda/calendar/package-lock.json") : "MISSING"
+    package_json_hash = filesha256("${path.module}/../src/lambda/calendar/package.json")
+  }
+
+  provisioner "local-exec" {
+    working_dir = "${path.module}/../src/lambda/calendar"
+    command     = "npm ci --omit=dev --ignore-scripts && node \"${abspath("${path.module}/../scripts/verify-lambda-package-deps.mjs")}\" \"${abspath("${path.module}/../src/lambda/calendar")}\""
+  }
+
+  lifecycle {
+    precondition {
+      condition     = fileexists("${path.module}/../src/lambda/calendar/package-lock.json")
+      error_message = "src/lambda/calendar/package-lock.json is missing from this checkout. 'npm ci' requires a committed lockfile - generate it with 'npm install' in src/lambda/calendar and commit the result before applying (TASK-038)."
+    }
+  }
+}
+
 # --- Lambda Package ---
-# The AWS SDK v3 is provided by the nodejs24.x runtime, so node_modules only
-# ever carries the handful of third-party deps declared in package.json.
+# AWS SDK v3 is provided by the nodejs24.x runtime — but only PARTIALLY:
+# nodejs24.x bundles ONLY @aws-sdk/client-dynamodb, @aws-sdk/lib-dynamodb and
+# @aws-sdk/client-s3, not the whole @aws-sdk/* namespace. TASK-038 decision
+# (revised in review cycle 1, correcting the
+# first pass of this same ticket): @aws-sdk/client-dynamodb and
+# @aws-sdk/lib-dynamodb are REMOVED from src/lambda/calendar/package.json,
+# relying on the runtime's bundled copy. @aws-sdk/client-kms
+# (backend/crypto.mjs — wraps/unwraps every Gmail refresh token, used on
+# every OAuth connect and every scan) and @aws-sdk/client-scheduler
+# (backend/scan-schedule.mjs — TASK-008 recurring scan schedules) are NOT part
+# of the runtime's bundled set, were declared nowhere, and are KEPT/added as
+# explicit dependencies here — the first pass of this ticket removed all
+# three @aws-sdk/* packages uniformly and would have broken every OAuth
+# connect and every scan on the first deploy. `scripts/verify-lambda-package-
+# deps.mjs` additionally scans source for @aws-sdk/* imports and fails if one
+# is neither declared here nor in its own runtime-bundled allowlist, so this
+# class of gap (an import with no matching declaration) fails loudly instead
+# of shipping silently again.
 data "archive_file" "calendar_lambda_zip" {
+  depends_on  = [null_resource.calendar_lambda_npm_install]
   type        = "zip"
   source_dir  = "../src/lambda/calendar"
   output_path = "packages/lambda_function_calendar.zip"
@@ -79,13 +175,21 @@ resource "aws_lambda_function" "calendar" {
   # managed resource above. No-op when the flag is off (count = 0).
   depends_on = [aws_cloudwatch_log_group.calendar_lambda_logs]
 
+  # `timeout` is 900s (15 minutes, the Lambda ceiling) rather than the original
+  # 60s (TASK-008): a full scan makes one sequential Anthropic call per email
+  # (TASK-007) and cannot bound that worst case mathematically (a single retry
+  # sequence can itself wait tens of seconds). scan.mjs's extraction loop is
+  # additionally deadline-aware via getRemainingTimeInMillis, so a scan that is
+  # about to run out of THIS budget stops early - loudly and resumably -
+  # rather than being killed by the platform with nothing recorded; raising
+  # the ceiling here is what gives that loop enough runway to be useful.
   filename         = data.archive_file.calendar_lambda_zip.output_path
   function_name    = "${local.name_prefix}-school-calendar"
   description      = "School Calendar - Gmail scan, Anthropic event extraction and calendar UI"
   role             = aws_iam_role.calendar_lambda_exec_role.arn
   handler          = "index.handler"
   runtime          = "nodejs24.x"
-  timeout          = 60
+  timeout          = 900
   memory_size      = 512
   source_code_hash = data.archive_file.calendar_lambda_zip.output_base64sha256
 
@@ -139,6 +243,15 @@ resource "aws_lambda_function" "calendar" {
       # Anthropic API — event extraction from email bodies.
       ANTHROPIC_API_KEY = lookup(local.secrets, "ANTHROPIC_API_KEY", "")
       ANTHROPIC_MODEL   = var.anthropic_model
+
+      # EventBridge Scheduler — one recurring scan schedule per user
+      # (TASK-008). SCAN_SCHEDULER_ROLE_ARN and CALENDAR_FUNCTION_ARN are both
+      # required for scan-schedule.mjs's isScheduleEnabled() to report the
+      # feature available; either being empty degrades to "scheduling is not
+      # configured" rather than a failure (see scheduler_calendar.tf).
+      SCAN_SCHEDULE_PREFIX    = "${local.name_prefix}-calendar-scan"
+      SCAN_SCHEDULE_GROUP     = "default"
+      SCAN_SCHEDULER_ROLE_ARN = aws_iam_role.calendar_scheduler_role.arn
     }
   }
 }

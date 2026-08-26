@@ -30,9 +30,24 @@ function resolveTerraformBin() {
       return candidate;
     }
   }
-  // Fall back to whatever is on PATH. If terraform is not installed at all the
-  // exec calls below throw, and every caller turns that into a hard failure -
-  // this helper must never let a missing terraform become a silent skip.
+  // Neither absolute candidate exists. Fall back to whatever `terraform` on
+  // PATH resolves to, but never trust that silently: prove it actually runs
+  // before handing it back, and if it does not, fail loudly naming every
+  // location that was tried so a missing/broken terraform is diagnosable
+  // rather than surfacing later as a mysterious ENOENT deep in some test.
+  try {
+    execSync('terraform version', {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 30000
+    });
+  } catch (error) {
+    throw new Error(
+      'Could not resolve a terraform binary. Tried absolute paths: ' +
+      `${candidates.join(', ')} (none exist on disk). Fell back to "terraform" on PATH, ` +
+      `but running "terraform version" failed: ${describeExecError(error)}`
+    );
+  }
   return 'terraform';
 }
 
@@ -139,6 +154,141 @@ function reorderNamePrefixInterpolation(variablesTfContents) {
   return mutated;
 }
 
+// A locals-only stand-in for the real secrets pattern in main.tf. It cannot
+// reuse the aws_secretsmanager_secret_version data source (that needs AWS
+// credentials), so a `variable` plays the part of the decoded secret payload.
+// The lookup() reads below are copied verbatim from main.tf so the same
+// convention is what actually gets evaluated.
+const SECRET_LOOKUP_MAIN_TF = `
+variable "secret_json" {
+  type = string
+}
+
+locals {
+  secrets = jsondecode(var.secret_json)
+}
+
+locals {
+  google_client_id     = lookup(local.secrets, "GOOGLE_CLIENT_ID", "")
+  google_client_secret = lookup(local.secrets, "GOOGLE_CLIENT_SECRET", "")
+  anthropic_api_key    = lookup(local.secrets, "ANTHROPIC_API_KEY", "")
+  session_secret       = lookup(local.secrets, "SESSION_SECRET", "")
+  allowed_origins      = lookup(local.secrets, "ALLOWED_ORIGINS", "")
+}
+`;
+
+/**
+ * Build a throwaway workspace holding only SECRET_LOOKUP_MAIN_TF and run
+ * `terraform init -backend=false` in it once. No provider is declared, so
+ * init needs no plugins and no AWS credentials.
+ */
+function createSecretLookupWorkspace() {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'tf-secret-lookup-'));
+  try {
+    fs.writeFileSync(path.join(workspace, 'main.tf'), SECRET_LOOKUP_MAIN_TF, 'utf-8');
+    execSync(`"${TERRAFORM_BIN}" init -backend=false -input=false -no-color`, {
+      cwd: workspace,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 180000
+    });
+  } catch (error) {
+    removeWorkspace(workspace);
+    throw new Error(`Failed to prepare secret lookup workspace: ${describeExecError(error)}`);
+  }
+  return workspace;
+}
+
+/**
+ * Evaluate `expression` in `workspace` with `secretJson` supplied to
+ * `variable "secret_json"` via a TF_VAR_ environment variable (avoids
+ * shell-quoting a JSON string full of quotes through `-var` on the command
+ * line). Unlike evaluateTerraformExpression, this never throws when
+ * evaluation itself fails - it returns { ok: false, error } so callers can
+ * assert on a failure, not just on success.
+ */
+function tryEvaluateSecretExpression(workspace, expression, secretJson) {
+  try {
+    const stdout = execSync(`"${TERRAFORM_BIN}" console -no-color`, {
+      cwd: workspace,
+      input: `${expression}\n`,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 120000,
+      env: { ...process.env, TF_VAR_secret_json: secretJson }
+    });
+    const clean = stdout.replace(/\[[0-9;]*m/g, '');
+    const match = clean.match(/"((?:[^"\\]|\\.)*)"/);
+    if (!match) {
+      throw new Error(
+        `Could not parse a string value for "${expression}" from terraform console output: ${JSON.stringify(clean)}`
+      );
+    }
+    return { ok: true, value: match[1] };
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('Could not parse')) {
+      throw error;
+    }
+    return { ok: false, error: describeExecError(error) };
+  }
+}
+
+/**
+ * Parse `content` for every textual `local.secrets` access and classify each
+ * one as either a guarded `lookup(local.secrets, "KEY", "default")` read or a
+ * direct-index/attribute read that bypasses the default. This walks the
+ * source rather than checking for the presence of the `lookup(` literal
+ * alone, so a direct index elsewhere in the file cannot hide behind an
+ * unrelated lookup() call.
+ */
+function parseSecretsAccesses(content) {
+  const guardedKeys = [];
+  const violations = [];
+  const OCCURRENCE = /local\.secrets/g;
+  let match;
+  while ((match = OCCURRENCE.exec(content)) !== null) {
+    const rest = content.slice(match.index + match[0].length);
+    const shape = rest.match(/^\s*(\[\s*(["'])([^"']+)\2\s*\]|\.[A-Za-z_][A-Za-z0-9_]*|,)/);
+    if (!shape) {
+      violations.push({ key: '(unrecognised)', context: rest.slice(0, 40).trim() });
+      continue;
+    }
+    if (shape[1].startsWith('[')) {
+      violations.push({ key: shape[3], context: 'direct index' });
+    } else if (shape[1].startsWith('.')) {
+      violations.push({ key: shape[1].slice(1), context: 'direct attribute access' });
+    } else {
+      // A comma right after `local.secrets` is only a guarded read if it is
+      // genuinely the first argument of a lookup(...) call.
+      const precedingText = content.slice(0, match.index);
+      if (!/lookup\(\s*$/.test(precedingText)) {
+        violations.push({ key: '(unknown)', context: 'local.secrets used outside a lookup() call' });
+        continue;
+      }
+      const callRest = rest.match(/^\s*,\s*"([^"]+)"\s*,\s*"[^"]*"\s*\)/);
+      if (!callRest) {
+        violations.push({ key: '(unknown)', context: `lookup(local.secrets, ...) missing a quoted key/default: ${rest.slice(0, 60).trim()}` });
+        continue;
+      }
+      guardedKeys.push(callRest[1]);
+    }
+  }
+  return { guardedKeys, violations };
+}
+
+/**
+ * Assert every local.secrets access in `content` is a guarded lookup() read,
+ * and return the keys found guarded. Throws (naming the offending keys) on
+ * any direct-index or other unguarded access.
+ */
+function assertAllSecretReadsAreGuarded(content, sourceLabel) {
+  const { guardedKeys, violations } = parseSecretsAccesses(content);
+  assert.equal(violations.length, 0,
+    `${sourceLabel} contains ${violations.length} local.secrets access(es) that bypass lookup()'s default: ` +
+    violations.map(v => `${v.key} (${v.context})`).join(', '));
+  return guardedKeys;
+}
+
 describe('Terraform Scaffold E2E Tests', () => {
   describe('Feature: Terraform scaffold', () => {
     describe('Scenario: The shared layer validates on its own', () => {
@@ -150,10 +300,11 @@ describe('Terraform Scaffold E2E Tests', () => {
         assert.ok(tfFiles.includes('main.tf'), 'main.tf not found');
       });
 
-      it('When "terraform validate" is run in the terraform directory, Then it exits with status 0', () => {
+      it('When "terraform validate" is run in the terraform directory, Then error_count is 0', () => {
+        let result;
         try {
-          const result = execSync(
-            'terraform validate -json',
+          result = execSync(
+            `"${TERRAFORM_BIN}" validate -json`,
             {
               cwd: TERRAFORM_DIR,
               encoding: 'utf-8',
@@ -161,8 +312,6 @@ describe('Terraform Scaffold E2E Tests', () => {
               timeout: 30000
             }
           );
-          // If we get here, validation succeeded
-          assert.ok(true, 'terraform validate succeeded');
         } catch (error) {
           const output = error.stdout || '';
           const stderr = error.stderr || '';
@@ -170,6 +319,19 @@ describe('Terraform Scaffold E2E Tests', () => {
           console.error('Terraform validate stderr:', stderr);
           assert.fail(`terraform validate failed with status ${error.status}: ${stderr}`);
         }
+
+        // `terraform validate` exits 0 on warnings alone, so the exit code by
+        // itself tolerates them implicitly. Parse the -json output and assert
+        // error_count === 0 explicitly -- never warning-free, since there are
+        // 4 expected provider deprecation warnings that this intentionally
+        // does not gate on.
+        const parsed = JSON.parse(result);
+        assert.equal(
+          parsed.error_count,
+          0,
+          `terraform validate reported ${parsed.error_count} error(s): ` +
+            JSON.stringify(parsed.diagnostics)
+        );
       });
     });
 
@@ -275,23 +437,93 @@ describe('Terraform Scaffold E2E Tests', () => {
     });
 
     describe('Scenario: A missing optional secret key does not break planning', () => {
-      it('Given the app-config secret JSON omits "ANTHROPIC_API_KEY", When the secrets local is evaluated with lookup and an empty default, Then evaluation succeeds and yields an empty string', () => {
-        const mainTfPath = path.join(TERRAFORM_DIR, 'main.tf');
-        const mainTfContent = fs.readFileSync(mainTfPath, 'utf-8');
+      // These evaluate the real secrets = jsondecode(...) / lookup(...)
+      // pattern for real via `terraform console`, against a throwaway
+      // locals-only config with no AWS provider and no backend - no AWS
+      // credentials are needed and no AWS API call is made.
+      const PAYLOAD_MISSING_ANTHROPIC_KEY = JSON.stringify({
+        GOOGLE_CLIENT_ID: 'test-google-client-id',
+        GOOGLE_CLIENT_SECRET: 'test-google-client-secret',
+        SESSION_SECRET: 'test-session-secret',
+        ALLOWED_ORIGINS: 'https://example.com'
+      });
 
-        // Verify that lookup() with a default is used for secret keys
-        assert.ok(mainTfContent.includes('lookup(local.secrets'),
-          'lookup() not used for secret access in main.tf');
-        assert.ok(mainTfContent.includes('ANTHROPIC_API_KEY'),
-          'ANTHROPIC_API_KEY reference not found in main.tf');
+      let workspace;
 
-        // Check that lookup() has a default value
-        const anthropicMatch = mainTfContent.match(/anthropic_api_key\s*=\s*lookup\(local\.secrets,\s*"ANTHROPIC_API_KEY",\s*"([^"]*)"\)/);
-        assert.ok(anthropicMatch, 'ANTHROPIC_API_KEY lookup not found or missing default');
-        assert.equal(anthropicMatch[1], '',
-          'Default value for ANTHROPIC_API_KEY should be empty string');
+      before(() => {
+        workspace = createSecretLookupWorkspace();
+      });
 
-        assert.ok(true, 'lookup() with empty default allows missing keys to be handled gracefully');
+      after(() => {
+        removeWorkspace(workspace);
+        workspace = undefined;
+      });
+
+      it('Given a secret payload that omits "ANTHROPIC_API_KEY", When the lookup with an empty default is evaluated, Then the result is an empty string and evaluation does not error', () => {
+        const result = tryEvaluateSecretExpression(
+          workspace,
+          'lookup(local.secrets, "ANTHROPIC_API_KEY", "")',
+          PAYLOAD_MISSING_ANTHROPIC_KEY
+        );
+        assert.ok(result.ok,
+          `Expected lookup() with a default to evaluate cleanly against a payload missing the key, but it errored: ${result.error}`);
+        assert.equal(result.value, '',
+          `Expected lookup(local.secrets, "ANTHROPIC_API_KEY", "") to yield "" for a missing key, got "${result.value}"`);
+      });
+
+      it('Given the same payload, When local.secrets["ANTHROPIC_API_KEY"] is evaluated directly (no lookup), Then evaluation errors', () => {
+        // This is what makes the scenario above discriminating: the same
+        // missing key, read without lookup()'s default, must fail. If this
+        // ever passes instead of erroring, the test above would not be
+        // proving lookup() does anything.
+        const result = tryEvaluateSecretExpression(
+          workspace,
+          'local.secrets["ANTHROPIC_API_KEY"]',
+          PAYLOAD_MISSING_ANTHROPIC_KEY
+        );
+        assert.equal(result.ok, false,
+          `Expected a direct index on a missing key to error, but it evaluated to "${result.value}". ` +
+          'If a direct index no longer errors, this test stops being discriminating.');
+        assert.match(result.error, /Invalid index/,
+          `Expected the direct-index failure to be a terraform "Invalid index" error, got: ${result.error}`);
+      });
+    });
+
+    describe('Scenario Outline: Every secret read is guarded', () => {
+      const REQUIRED_SECRET_KEYS = [
+        'GOOGLE_CLIENT_ID',
+        'GOOGLE_CLIENT_SECRET',
+        'ANTHROPIC_API_KEY',
+        'SESSION_SECRET',
+        'ALLOWED_ORIGINS'
+      ];
+
+      it('Given terraform/main.tf, Then every local.secrets access uses lookup() with a default, covering all five secret keys', () => {
+        const mainTfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'main.tf'), 'utf-8');
+        const guardedKeys = assertAllSecretReadsAreGuarded(mainTfContent, 'terraform/main.tf');
+
+        for (const key of REQUIRED_SECRET_KEYS) {
+          assert.ok(guardedKeys.includes(key),
+            `Expected terraform/main.tf to read "${key}" via lookup(local.secrets, "${key}", ...), but no guarded read was found`);
+        }
+      });
+    });
+
+    describe('Scenario: A direct index introduced later is caught', () => {
+      it('Given a copy of main.tf containing local.secrets["SESSION_SECRET"], When the guard assertion runs, Then it fails and names "SESSION_SECRET"', () => {
+        const mainTfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'main.tf'), 'utf-8');
+        const mutated = mainTfContent.replace(
+          'lookup(local.secrets, "SESSION_SECRET", "")',
+          'local.secrets["SESSION_SECRET"]'
+        );
+        assert.notEqual(mutated, mainTfContent,
+          'Could not find the SESSION_SECRET lookup line in terraform/main.tf to mutate - fix this test rather than letting the mutation silently no-op.');
+
+        assert.throws(
+          () => assertAllSecretReadsAreGuarded(mutated, 'mutated main.tf'),
+          /SESSION_SECRET/,
+          'Expected the guard assertion to fail and name SESSION_SECRET when a direct index is introduced'
+        );
       });
     });
 

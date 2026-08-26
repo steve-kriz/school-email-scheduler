@@ -161,6 +161,34 @@ function documentsCreateStepIn(documentText) {
   return /aws\s+secretsmanager\s+create-secret/.test(documentText);
 }
 
+/** Asserts the create-before-put ordering invariant: create-secret must be
+ *  documented before put-secret-value, so no step depends on a secret an
+ *  earlier step has not created. Locates both commands with the same
+ *  \s+-tolerant pattern the sibling presence guards use (documentsCreateStepIn
+ *  et al.), so a whitespace reformat of the runbook cannot make this guard go
+ *  quiet. Throws -- rather than returning silently -- when either marker
+ *  cannot be found at all: a guard that cannot find what it is guarding must
+ *  be loud. */
+function assertCreateBeforePutOrdering(documentText) {
+  const createMatch = documentText.match(/aws\s+secretsmanager\s+create-secret/);
+  if (!createMatch) {
+    throw new Error(
+      'Ordering guard could not locate "aws secretsmanager create-secret"; cannot verify ordering.'
+    );
+  }
+  const putMatch = documentText.match(/aws\s+secretsmanager\s+put-secret-value/);
+  if (!putMatch) {
+    throw new Error(
+      'Ordering guard could not locate "aws secretsmanager put-secret-value"; cannot verify ordering.'
+    );
+  }
+  assert.ok(
+    createMatch.index < putMatch.index,
+    'create-secret must be documented before put-secret-value, so no step ' +
+      'depends on a secret an earlier step has not created'
+  );
+}
+
 /** Sentences that name a secret owner *and* affirm that it owns the secret. */
 function affirmativeOwnerStatementsIn(documentText) {
   return sentencesOf(documentText).filter(
@@ -919,18 +947,26 @@ describe('Google OAuth Configuration Preflight E2E Tests', () => {
         });
       });
 
-      // NEGATED_OBJECT is only checked on the carried path. Test whether a
-      // non-carried claim whose object is negated is properly caught.
-      it('Then a non-carried claim with negated object is still caught', () => {
+      // NEGATED_OBJECT is only checked on the carried path (line 119). On the
+      // non-carried path there is no equivalent object-negation check, so a
+      // denial phrased as a negated object ("creates nothing") is still
+      // reported as a claim. That is the intended, safe direction: this
+      // asserts the guard over-fires on this denial rather than silently
+      // treating it as a legitimate exclusion. If non-carried negation
+      // handling is ever added and swallows this sentence, or the guard is
+      // otherwise broken so it stops reporting real claims, this must go red.
+      it('Then a non-carried claim with negated object is still reported (over-fire is the safe direction)', () => {
         const negatedObjectClaim = 'Terraform creates nothing for the secret.';
         const mutated = `${runbookText()}\n\n${negatedObjectClaim}\n`;
         const claims = terraformCreatesSecretClaimsIn(mutated);
 
         assert.ok(
-          claims.length > 0 || /nothing|no/.test(negatedObjectClaim),
-          `A claim with a negated object like "${negatedObjectClaim}" should be ` +
-            'caught by NEGATION_BEFORE_VERB on the non-carried path, or this ' +
-            'asymmetry is exploitable.'
+          claims.length > 0,
+          `Expected "${negatedObjectClaim}" to still be reported as a claim: ` +
+            'NEGATED_OBJECT only suppresses the carried path, so this ' +
+            'non-carried denial is (intentionally) over-inclusively caught. ' +
+            'If this is empty, the non-carried path has grown negation ' +
+            'handling that could also swallow a genuine claim.'
         );
       });
     });
@@ -1018,19 +1054,54 @@ describe('Google OAuth Configuration Preflight E2E Tests', () => {
       });
 
       it('Then the create-secret step precedes the put-secret-value step', () => {
-        const content = fs.readFileSync(RUNBOOK_PATH, 'utf-8');
-        const createIndex = content.indexOf('aws secretsmanager create-secret');
-        const putIndex = content.indexOf('aws secretsmanager put-secret-value');
+        assertCreateBeforePutOrdering(runbookText());
+      });
 
-        if (createIndex === -1) {
-          return; // no create-secret step documented; ordering does not apply
-        }
-
-        assert.ok(putIndex !== -1, 'Runbook should still document put-secret-value');
+      it('Then the ordering guard still catches a reversed order after every ' +
+        'create-secret occurrence is double-spaced', () => {
+        // The runbook mentions create-secret twice (prose and code block);
+        // both must be reformatted before a literal-indexOf guard would go
+        // quiet. Reformat both, then reverse the order by putting a
+        // put-secret-value command ahead of everything else, faking a
+        // document where put-secret-value is documented first.
+        const reformatted = runbookText().replace(
+          /aws +secretsmanager +create-secret/g,
+          'aws  secretsmanager  create-secret'
+        );
         assert.ok(
-          createIndex < putIndex,
-          'create-secret must be documented before put-secret-value, so no step ' +
-            'depends on a secret an earlier step has not created'
+          !/aws secretsmanager create-secret/.test(reformatted),
+          'Fixture must reformat every occurrence of the single-spaced command, ' +
+            'or this proves nothing about the reformatted case'
+        );
+
+        const reversed =
+          'aws secretsmanager put-secret-value --secret-id "reordered-before-create"\n\n' +
+          reformatted;
+
+        assert.throws(
+          () => assertCreateBeforePutOrdering(reversed),
+          /create-secret must be documented before put-secret-value/,
+          'A reversed ordering must still be caught after every create-secret ' +
+            'occurrence is double-spaced, proving the guard is \\s+-tolerant'
+        );
+      });
+
+      it('Then the ordering guard throws rather than returns silently when ' +
+        'create-secret is missing entirely', () => {
+        const missing = runbookText().replace(
+          /aws\s+secretsmanager\s+create-secret[^\n]*\n?/g,
+          ''
+        );
+        assert.ok(
+          !/aws\s+secretsmanager\s+create-secret/.test(missing),
+          'Fixture must remove every create-secret occurrence, or this proves ' +
+            'nothing about the missing-marker case'
+        );
+
+        assert.throws(
+          () => assertCreateBeforePutOrdering(missing),
+          /could not locate "aws secretsmanager create-secret"/,
+          'A missing create-secret marker must fail loudly, not return silently'
         );
       });
     });

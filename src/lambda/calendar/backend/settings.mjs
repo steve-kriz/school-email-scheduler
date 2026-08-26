@@ -96,8 +96,33 @@ export const MAX_DOMAIN_LABEL_LENGTH = 63;
  * REGIONAL VARIANTS ARE NOT OPTIONAL. This is an Australian deployment, so
  * "outlook.com.au" and "yahoo.com.au" are exactly what a local user types; a list
  * that only knows the .com forms lets the most likely mistake straight through.
- * The list is still only the fast path - `PUBLIC_MAIL_BRANDS` is what catches the
- * suffix nobody thought of.
+ * The list is still only the fast path - `PUBLIC_MAIL_BRANDS` catches the suffix
+ * nobody thought of, but ONLY for brands that are never a plausible school name
+ * (see the note on `PUBLIC_MAIL_BRANDS` itself). Dictionary-word brands like
+ * "me", "mac", "mail", "live", "proton", "aol" and "zoho" rely on THIS exact-match
+ * list alone - a genuine school could register "live.edu.au" or "mail.edu.au", so
+ * those words are deliberately not refused under an arbitrary suffix. Their known
+ * hosts ("me.com", "mac.com", "mail.com", "live.com"/".com.au"/".co.uk",
+ * "proton.me", "aol.com", "zoho.com") are listed here instead, which is why this
+ * list carries more than just the six original providers.
+ *
+ * AUSTRALIAN ISPS AND PORTALS (TASK-046) are the highest-probability miss for
+ * this tenant specifically: an Australian parent is more likely to own a Bigpond
+ * or Optusnet mailbox than an "outlook.com.au" one, because those ISP-issued
+ * addresses predate webmail and are still the primary personal inbox for a large,
+ * older share of the population this deployment serves. They are listed here,
+ * exact-match only, rather than promoted to `PUBLIC_MAIL_BRANDS`: not because
+ * their names are ambiguous (they are not - "bigpond", "optusnet" and "y7mail" are
+ * unambiguous provider brands, unlike "mail" or "live"), but because this ticket's
+ * acceptance criteria scopes the fix to the named exact hosts and leaves the
+ * any-suffix promotion to a follow-on (TASK-044 promotes "aol"/"zoho" the same
+ * way, for the same reason - these are good candidates for the same treatment).
+ * "internode.on.net" needs no `CCTLD_SECOND_LEVEL_LABELS` change to match: it is
+ * refused by direct string equality against THIS list, before `registrableName`
+ * is ever consulted (see `isPublicMailDomain`), so the unusual "on.net" shape
+ * (which `registrableName` would in any case read as the registrable domain
+ * "on.net" with "internode" as a subdomain label - correctly, since "on.net" is
+ * itself a registered domain, not a public suffix) is irrelevant to this entry.
  */
 export const PUBLIC_MAIL_DOMAINS = Object.freeze([
   // Google
@@ -146,6 +171,16 @@ export const PUBLIC_MAIL_DOMAINS = Object.freeze([
   "126.com",
   "fastmail.com",
   "tutanota.com",
+  // Australian ISPs and portals (TASK-046) - see the docblock above for why
+  // these are exact-match only rather than promoted to PUBLIC_MAIL_BRANDS.
+  "bigpond.com",
+  "bigpond.net.au",
+  "optusnet.com.au",
+  "y7mail.com",
+  "iinet.net.au",
+  "tpg.com.au",
+  "internode.on.net",
+  "dodo.com.au",
 ]);
 
 /**
@@ -158,35 +193,42 @@ export const PUBLIC_MAIL_DOMAINS = Object.freeze([
  * Matching the brand instead of the host closes that class of gap without another
  * edit.
  *
- * Brands only. This list is refusal-by-name, so every entry is a domain a school
- * can no longer register with us under ANY suffix, and a false positive blocks a
- * real customer at the settings form. The short, word-like entries ("me", "mac",
- * "mail", "live", "qq") are the ones to weigh before adding more: they are here
- * because each is a live consumer mail brand whose regional forms are exactly what
- * an AU user mistypes, and a school registered at "mail.<tld>" or "me.<tld>" is
- * implausible enough to trade for that. A school that puts one of these words in
- * FRONT of its own name ("mail.stmarys.edu.au") is unaffected - see
- * `registrableName`. Do not add generic English words on this reasoning.
+ * UNAMBIGUOUS BRANDS ONLY. Every entry here is a name that is never a plausible
+ * genuine registration for a school ("gmail", "hotmail", "protonmail") - nobody
+ * mistakes "gmail.edu.au" for a real school. That is a deliberately narrower list
+ * than a first pass might reach for: dictionary-word brands such as "me", "mac",
+ * "mail", "live", "proton", "aol" and "zoho" are NOT here, because each is also an
+ * ordinary word or short name a real school could legitimately register as its
+ * OWN domain (a school directly registered at "live.edu.au" or "mail.edu.au" is
+ * unlikely, but not implausible the way "gmail.edu.au" is), and matching them under
+ * every suffix would refuse a real customer with no way around it. Those brands
+ * are instead covered ONLY by their known exact hosts in PUBLIC_MAIL_DOMAINS
+ * ("me.com", "mac.com", "mail.com", "live.com"/".com.au"/".co.uk", "proton.me",
+ * "aol.com", "zoho.com") - real, but bounded, coverage in exchange for never
+ * refusing a genuine school. This is a deliberate trade: the brand check below
+ * trades completeness for zero false positives on real school domains, which is
+ * the promise this module makes and the exact-match list cannot make on its own.
+ *
+ * A false positive here blocks a real customer at the settings form, so the bar
+ * for adding an entry is "this word is unambiguously a mail brand and never a
+ * plausible school name" - not merely "this is a mail brand". Do not add a
+ * dictionary-word brand to this array on the reasoning that it improves coverage;
+ * add its known hosts to PUBLIC_MAIL_DOMAINS instead. A school that puts one of
+ * these brands in FRONT of its own name ("mail.stmarys.edu.au") is unaffected
+ * either way - see `registrableName`.
  */
 export const PUBLIC_MAIL_BRANDS = Object.freeze([
   "gmail",
   "googlemail",
   "outlook",
   "hotmail",
-  "live",
   "msn",
   "yahoo",
   "ymail",
   "rocketmail",
-  "aol",
   "icloud",
-  "me",
-  "mac",
-  "proton",
   "protonmail",
   "gmx",
-  "mail",
-  "zoho",
   "yandex",
   "qq",
 ]);
@@ -276,12 +318,18 @@ export function registrableName(value) {
  * Is this host a public mail provider the scanner must refuse?
  *
  * Two checks, in this order:
- *  1. Exact match against PUBLIC_MAIL_DOMAINS - the fast, unambiguous path.
- *  2. Brand match: the REGISTRABLE NAME is a known provider brand, under any
- *     public suffix. Only when the brand is the registered name itself, never when
- *     it is a subdomain label - so "hotmail.com.br" is refused while
- *     "mail.gmail.com" and "mail.stmarys.edu.au" are both allowed, matching the
- *     exact-match rule's own subdomain stance (see PUBLIC_MAIL_DOMAINS).
+ *  1. Exact match against PUBLIC_MAIL_DOMAINS - the fast, unambiguous path, and
+ *     the ONLY path for the dictionary-word brands ("me", "mac", "mail", "live",
+ *     "proton", "aol", "zoho" - see PUBLIC_MAIL_BRANDS for why).
+ *  2. Brand match: the REGISTRABLE NAME is one of the UNAMBIGUOUS provider brands
+ *     in PUBLIC_MAIL_BRANDS, under any public suffix. Only when the brand is the
+ *     registered name itself, never when it is a subdomain label - so
+ *     "hotmail.com.br" is refused while "mail.gmail.com" and "mail.stmarys.edu.au"
+ *     are both allowed, matching the exact-match rule's own subdomain stance (see
+ *     PUBLIC_MAIL_DOMAINS). Because step 2 only ever consults the unambiguous
+ *     list, a genuine school domain is never refused by the brand check alone -
+ *     "live.edu.au" and "mail.edu.au" pass, even though "live" and "mail" are
+ *     provider-adjacent words, because neither is in PUBLIC_MAIL_BRANDS.
  *
  * @param {string} domain Already normalised and shape-checked.
  * @returns {boolean}

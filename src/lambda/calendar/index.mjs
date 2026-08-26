@@ -41,6 +41,15 @@ import {
   SettingsValidationError,
   toSettingsJson,
 } from "./backend/settings.mjs";
+import { runScan, SCAN_STATUS } from "./backend/scan.mjs";
+import {
+  deleteScanSchedule,
+  getScanSchedule,
+  isScheduledScanEvent,
+  putScanSchedule,
+  runScheduledScan,
+  ScheduleValidationError,
+} from "./backend/scan-schedule.mjs";
 
 // ESM has no __dirname/__filename. Derive them from import.meta.url, exactly as
 // the chatbot Lambda does, so frontend assets can be read relative to the
@@ -109,12 +118,40 @@ function logVerbose(...args) {
 }
 
 /**
+ * Coerce a possibly-malformed allowlist into an array (TASK-022).
+ *
+ * `allowlist = ALLOWED_ORIGINS` default parameters only fire for `undefined`;
+ * an explicit `null` or a non-array value (e.g. a string from a config path)
+ * sails straight past the default and on into `.length`/`.some`, which throws.
+ * The handler has no try/catch, so that throw becomes an unhandled 5xx for the
+ * whole request.
+ *
+ * Chosen fallback: the module-scope `ALLOWED_ORIGINS` constant, NOT `[]`.
+ * Falling back to `[]` would mean open mode - echo any origin - for exactly
+ * the call that received a malformed value, which is the wrong direction to
+ * fail on a security gate. Falling back to the module default instead keeps
+ * whatever restriction is actually configured (or reproduces today's
+ * behaviour unchanged when ALLOWED_ORIGINS is unset, since that is `[]`
+ * already). This is a fail-safe default, not a fail-open one.
+ *
+ * @param {unknown} allowlist
+ * @returns {string[]}
+ */
+function coerceAllowlist(allowlist) {
+  return Array.isArray(allowlist) ? allowlist : ALLOWED_ORIGINS;
+}
+
+/**
  * Is this origin covered by the allowlist (exact host or domain suffix)?
  *
  * The suffix match requires a dot boundary: an entry of "officehq.com.au"
  * matches "officehq.com.au" and "sub.officehq.com.au" but NOT the lookalike
  * "evil-officehq.com.au" (a bare `host.endsWith(allowed)` would accept it) and
  * not "officehq.com.au.attacker.com" (which the suffix test rules out).
+ *
+ * `allowlist` is coerced via `coerceAllowlist` before use, so `null` or a
+ * non-array value falls back to the module default instead of throwing
+ * (TASK-022).
  *
  * @param {string|null|undefined} origin  full origin, e.g. "https://x.example.com"
  * @param {string[]} [allowlist]          defaults to the module-scope allowlist
@@ -127,7 +164,8 @@ function isOriginAllowed(origin, allowlist = ALLOWED_ORIGINS) {
   } catch {
     return false;
   }
-  return allowlist.some(
+  const list = coerceAllowlist(allowlist);
+  return list.some(
     (allowed) => host === allowed || host.endsWith(`.${allowed}`)
   );
 }
@@ -138,12 +176,19 @@ function isOriginAllowed(origin, allowlist = ALLOWED_ORIGINS) {
  * - origin in allowlist         -> echo it back
  * - otherwise                   -> null (no CORS header, browser blocks it)
  *
+ * `allowlist` is coerced via `coerceAllowlist` before use, so `null` or a
+ * non-array value falls back to the module default instead of throwing on
+ * `.length` (TASK-022). `[]` still means open mode and `undefined` still
+ * resolves to the module constant - the coercion only changes behaviour for
+ * `null` and non-array values, which previously threw.
+ *
  * @param {string|null|undefined} origin
  * @param {string[]} [allowlist]  defaults to the module-scope allowlist
  */
 function getCorsOrigin(origin, allowlist = ALLOWED_ORIGINS) {
-  if (allowlist.length === 0) return "*";
-  if (origin && isOriginAllowed(origin, allowlist)) return origin;
+  const list = coerceAllowlist(allowlist);
+  if (list.length === 0) return "*";
+  if (origin && isOriginAllowed(origin, list)) return origin;
   return null;
 }
 
@@ -198,6 +243,11 @@ const CREDENTIALS_HEADER = "access-control-allow-credentials";
  * left to convention, so a later route that adds the header (session cookies,
  * authenticated APIs) is stripped instead of shipping the combination. Set
  * ALLOWED_ORIGINS to an explicit list to use credentialed CORS.
+ *
+ * `allowlist` is passed straight to `getCorsOrigin`, which coerces `null` and
+ * any non-array value to the module default rather than throwing on
+ * `.length` - so a caller passing a malformed allowlist here fails safe
+ * (no CORS header, not a 5xx) rather than throwing (TASK-022).
  *
  * @param {number} statusCode
  * @param {string} body           already-serialised body
@@ -256,6 +306,62 @@ function jsonResponse(statusCode, payload, options = {}) {
   return buildResponse(statusCode, JSON.stringify(payload), "application/json", options);
 }
 
+/**
+ * Router-level choke point (TASK-022): strip
+ * `Access-Control-Allow-Credentials` from ANY response carrying a wildcard
+ * `Access-Control-Allow-Origin`, no matter how that response was built.
+ *
+ * `buildResponse` already enforces this invariant for every response built
+ * through it, and every route in this file does route through it - so there
+ * is no live bug today. But that guarantee is structural only for
+ * `buildResponse`'s own callers: nothing stops a future route from returning
+ * a hand-rolled `{ statusCode, multiValueHeaders, ... }` object instead of
+ * calling `buildResponse`, which would bypass the strip entirely and could
+ * re-introduce exactly the `*` + Allow-Credentials pairing TASK-020 exists to
+ * prevent.
+ *
+ * `handler` runs every value it returns - whatever `routeAuthRequest` /
+ * `routeSettingsRequest` / a future route produces, `buildResponse`-built or
+ * not - through this function before it leaves the router. It inspects the
+ * RESPONSE'S OWN headers rather than recomputing the origin decision, so the
+ * guarantee holds even for a response built by code that never called
+ * `getCorsOrigin` at all. This is deliberately in addition to, not instead
+ * of, the guard inside `buildResponse`: that guard still protects any direct
+ * caller of `buildResponse`/`jsonResponse` (including route handlers under
+ * test in isolation), while this one protects the router's output as a
+ * whole.
+ *
+ * @param {object} response  An ALB-shaped response (multiValueHeaders keyed).
+ * @returns {object} The same response object, mutated in place if a strip was
+ *   necessary.
+ */
+function finalise(response) {
+  if (!response || typeof response !== "object") return response;
+  const headers = response.multiValueHeaders;
+  if (!headers || typeof headers !== "object") return response;
+
+  let originIsWildcard = false;
+  for (const [name, value] of Object.entries(headers)) {
+    if (name.toLowerCase() !== "access-control-allow-origin") continue;
+    const first = Array.isArray(value) ? value[0] : value;
+    if (first === "*") originIsWildcard = true;
+  }
+  if (!originIsWildcard) return response;
+
+  for (const name of Object.keys(headers)) {
+    if (name.toLowerCase() === CREDENTIALS_HEADER) {
+      delete headers[name];
+      // Name only - never the value, which may be a credential elsewhere.
+      logBasic(
+        "[Calendar] Dropped",
+        name,
+        "- credentials cannot be paired with a wildcard CORS origin; set ALLOWED_ORIGINS"
+      );
+    }
+  }
+  return response;
+}
+
 // --- Google sign-in routes ---
 // The Google grant is both the site login and the Gmail read authorisation, so
 // these four routes are the whole of authentication. The flow itself lives in
@@ -264,10 +370,12 @@ function jsonResponse(statusCode, payload, options = {}) {
 //
 // Every response below goes through buildResponse/jsonResponse. Nothing here
 // hand-rolls a `{ statusCode ... }` object, because the "no credentials with a
-// wildcard origin" invariant lives inside buildResponse and a hand-rolled
-// response would bypass it. `allowlist` is likewise only ever passed through as
-// undefined or an array - never null, which buildResponse cannot handle yet
-// (TASK-022).
+// wildcard origin" invariant lives inside buildResponse; `handler` additionally
+// runs every value it returns through `finalise` (TASK-022), so the invariant
+// would still hold even if a future route did hand-roll one. `allowlist` here
+// is only ever passed through as undefined or an array, but a `null` or
+// non-array value reaching buildResponse/getCorsOrigin/isOriginAllowed now
+// fails safe instead of throwing (TASK-022; see coerceAllowlist).
 
 /** Route prefix for the auth endpoints. */
 const AUTH_START_PATH = "/calendar/api/auth/google/start";
@@ -867,6 +975,286 @@ export async function routeSettingsRequest(path, method, event, options = {}) {
   return null;
 }
 
+// --- Scan and schedule routes (TASK-008) ---
+// The manual "Scan now" button, its last-result readback, and the recurring
+// EventBridge schedule the settings page manages. The scan itself lives in
+// backend/scan.mjs, the schedule CRUD in backend/scan-schedule.mjs; this file
+// only maps them onto HTTP, exactly as the auth and settings routes above do.
+
+/** Route paths for the scan endpoints. */
+const SCAN_PATH = "/calendar/api/scan";
+const SCAN_STATUS_PATH = "/calendar/api/scan/status";
+const SCAN_SCHEDULE_PATH = "/calendar/api/scan/schedule";
+
+/**
+ * POST /calendar/api/scan - run a scan for the signed-in user right now.
+ *
+ * Authenticated (401 without a session, matching every other route). A scan
+ * already in progress for this user is reported as `409`, and Gmail is never
+ * called in that case - `runScan` itself never even attempts the fetch when
+ * its lock is held (see scan.mjs's concurrency note).
+ *
+ * @param {object} event
+ * @param {object} [options]
+ * @param {string|null} [options.origin]
+ * @param {string[]} [options.allowlist]
+ * @param {Record<string, string|undefined>} [options.env]
+ * @param {number} [options.nowSeconds]
+ * @param {typeof runScan} [options.runScan] Injectable scan runner.
+ * @param {(() => number)|null} [options.getRemainingTimeInMillis] Real Lambda
+ *   context method (wired by `handler`), for the deadline-aware extraction
+ *   loop inside `runScan`.
+ * @returns {Promise<object>} ALB response.
+ */
+export async function handleScanNow(event, options = {}) {
+  const {
+    origin = null,
+    allowlist,
+    env = process.env,
+    nowSeconds = Math.floor(Date.now() / 1000),
+    runScan: doScan = runScan,
+    // Everything else (getConnection, updateConnection, acquireScanLock,
+    // releaseScanLock, fetchCandidateMessages, extractFromMessage,
+    // storeEvents, getRemainingTimeInMillis, now, log, ...) is forwarded
+    // straight through to `runScan`, which documents its own dependencies -
+    // this route does not need to know their names to pass them on.
+    ...scanDeps
+  } = options;
+
+  const session = resolveSession(event, { env, nowSeconds });
+  if (!session.ok) {
+    return jsonResponse(session.statusCode, session.payload, { origin, allowlist });
+  }
+
+  const userId = connectionUserId(session.claims.sub);
+
+  let result;
+  try {
+    result = await doScan({ userId, mode: "manual" }, { ...scanDeps, env });
+  } catch (err) {
+    logBasic("[Calendar] Scan failed unexpectedly:", { errorName: err?.name || "Error", errorMessage: err?.message || "" });
+    return jsonResponse(500, { error: "Could not run the scan" }, { origin, allowlist });
+  }
+
+  if (result.status === SCAN_STATUS.LOCKED) {
+    return jsonResponse(409, { error: "A scan is already running" }, { origin, allowlist });
+  }
+
+  return jsonResponse(200, result, { origin, allowlist });
+}
+
+/**
+ * GET /calendar/api/scan/status - the last scan's status and counts.
+ *
+ * @param {object} event
+ * @param {object} [options]
+ * @param {string|null} [options.origin]
+ * @param {string[]} [options.allowlist]
+ * @param {Record<string, string|undefined>} [options.env]
+ * @param {number} [options.nowSeconds]
+ * @param {typeof getConnection} [options.getConnection] Injectable storage read.
+ * @returns {Promise<object>} ALB response.
+ */
+export async function handleScanStatus(event, options = {}) {
+  const {
+    origin = null,
+    allowlist,
+    env = process.env,
+    nowSeconds = Math.floor(Date.now() / 1000),
+    getConnection: loadConnection = getConnection,
+  } = options;
+
+  const session = resolveSession(event, { env, nowSeconds });
+  if (!session.ok) {
+    return jsonResponse(session.statusCode, session.payload, { origin, allowlist });
+  }
+
+  const userId = connectionUserId(session.claims.sub);
+
+  let connection;
+  try {
+    connection = await loadConnection(userId, { env });
+  } catch (err) {
+    logBasic("[Calendar] Could not read scan status:", { errorName: err?.name || "Error", errorMessage: err?.message || "" });
+    return jsonResponse(500, { error: "Could not read your scan status" }, { origin, allowlist });
+  }
+
+  return jsonResponse(
+    200,
+    {
+      lastScanAt: connection?.lastScanAt ?? null,
+      lastScanStatus: connection?.lastScanStatus ?? null,
+      lastScanError: connection?.lastScanError ?? null,
+      messagesScanned: connection?.lastScanMessagesScanned ?? null,
+      eventsCreated: connection?.lastScanEventsCreated ?? null,
+      eventsUpdated: connection?.lastScanEventsUpdated ?? null,
+      skipped: connection?.lastScanSkipped ?? null,
+      truncated: connection?.lastScanTruncated ?? null,
+    },
+    { origin, allowlist }
+  );
+}
+
+/**
+ * GET /calendar/api/scan/schedule - the signed-in user's saved schedule.
+ *
+ * `getScanSchedule` itself reports `{ available: false }` when the scheduling
+ * feature is not provisioned in this environment (TASK-008); that is a normal
+ * 200, not an error.
+ *
+ * @param {object} event
+ * @param {object} [options]
+ * @param {string|null} [options.origin]
+ * @param {string[]} [options.allowlist]
+ * @param {Record<string, string|undefined>} [options.env]
+ * @param {number} [options.nowSeconds]
+ * @param {typeof getScanSchedule} [options.getScanSchedule]
+ * @returns {Promise<object>} ALB response.
+ */
+export async function handleGetSchedule(event, options = {}) {
+  const {
+    origin = null,
+    allowlist,
+    env = process.env,
+    nowSeconds = Math.floor(Date.now() / 1000),
+    getScanSchedule: loadSchedule = getScanSchedule,
+  } = options;
+
+  const session = resolveSession(event, { env, nowSeconds });
+  if (!session.ok) {
+    return jsonResponse(session.statusCode, session.payload, { origin, allowlist });
+  }
+
+  const userId = connectionUserId(session.claims.sub);
+
+  let schedule;
+  try {
+    schedule = await loadSchedule(userId, { env });
+  } catch (err) {
+    logBasic("[Calendar] Could not read scan schedule:", { errorName: err?.name || "Error", errorMessage: err?.message || "" });
+    return jsonResponse(500, { error: "Could not read your scan schedule" }, { origin, allowlist });
+  }
+
+  return jsonResponse(200, schedule, { origin, allowlist });
+}
+
+/**
+ * PUT /calendar/api/scan/schedule - create or update the user's schedule.
+ *
+ * Order of checks mirrors `handlePutSettings`: session first, then body
+ * validation (400, naming the field), then the write.
+ *
+ * @param {object} event
+ * @param {object} [options]
+ * @param {string|null} [options.origin]
+ * @param {string[]} [options.allowlist]
+ * @param {Record<string, string|undefined>} [options.env]
+ * @param {number} [options.nowSeconds]
+ * @param {typeof putScanSchedule} [options.putScanSchedule]
+ * @returns {Promise<object>} ALB response.
+ */
+export async function handlePutSchedule(event, options = {}) {
+  const {
+    origin = null,
+    allowlist,
+    env = process.env,
+    nowSeconds = Math.floor(Date.now() / 1000),
+    putScanSchedule: saveSchedule = putScanSchedule,
+  } = options;
+
+  const session = resolveSession(event, { env, nowSeconds });
+  if (!session.ok) {
+    return jsonResponse(session.statusCode, session.payload, { origin, allowlist });
+  }
+
+  const userId = connectionUserId(session.claims.sub);
+
+  let payload;
+  try {
+    payload = parseJsonBody(event);
+  } catch (err) {
+    if (err instanceof SettingsValidationError) {
+      return jsonResponse(400, { error: err.message, field: err.field ?? null }, { origin, allowlist });
+    }
+    logBasic("[Calendar] Scan schedule body could not be parsed:", { errorName: err?.name || "Error", errorMessage: err?.message || "" });
+    return jsonResponse(500, { error: "Could not save your scan schedule" }, { origin, allowlist });
+  }
+
+  let result;
+  try {
+    result = await saveSchedule(userId, payload, { env });
+  } catch (err) {
+    if (err instanceof ScheduleValidationError || err?.name === "ScheduleValidationError") {
+      logBasic("[Calendar] Scan schedule rejected:", { field: err.field ?? "body" });
+      return jsonResponse(400, { error: err.message, field: err.field ?? null }, { origin, allowlist });
+    }
+    logBasic("[Calendar] Could not save scan schedule:", { errorName: err?.name || "Error", errorMessage: err?.message || "" });
+    return jsonResponse(500, { error: "Could not save your scan schedule" }, { origin, allowlist });
+  }
+
+  return jsonResponse(200, result, { origin, allowlist });
+}
+
+/**
+ * DELETE /calendar/api/scan/schedule - stop future scheduled scans.
+ *
+ * @param {object} event
+ * @param {object} [options]
+ * @param {string|null} [options.origin]
+ * @param {string[]} [options.allowlist]
+ * @param {Record<string, string|undefined>} [options.env]
+ * @param {number} [options.nowSeconds]
+ * @param {typeof deleteScanSchedule} [options.deleteScanSchedule]
+ * @returns {Promise<object>} ALB response.
+ */
+export async function handleDeleteSchedule(event, options = {}) {
+  const {
+    origin = null,
+    allowlist,
+    env = process.env,
+    nowSeconds = Math.floor(Date.now() / 1000),
+    deleteScanSchedule: removeSchedule = deleteScanSchedule,
+  } = options;
+
+  const session = resolveSession(event, { env, nowSeconds });
+  if (!session.ok) {
+    return jsonResponse(session.statusCode, session.payload, { origin, allowlist });
+  }
+
+  const userId = connectionUserId(session.claims.sub);
+
+  let result;
+  try {
+    result = await removeSchedule(userId, { env });
+  } catch (err) {
+    logBasic("[Calendar] Could not delete scan schedule:", { errorName: err?.name || "Error", errorMessage: err?.message || "" });
+    return jsonResponse(500, { error: "Could not delete your scan schedule" }, { origin, allowlist });
+  }
+
+  return jsonResponse(200, result, { origin, allowlist });
+}
+
+/**
+ * Dispatch the scan/schedule routes. Returns null when the request is not one
+ * of them, so the handler can carry on to the frontend/404 paths.
+ *
+ * @param {string} path
+ * @param {string} method
+ * @param {object} event
+ * @param {object} [options] Passed straight through to the route handlers.
+ * @returns {Promise<object|null>}
+ */
+export async function routeScanRequest(path, method, event, options = {}) {
+  if (path === SCAN_PATH && method === "POST") return handleScanNow(event, options);
+  if (path === SCAN_STATUS_PATH && method === "GET") return handleScanStatus(event, options);
+  if (path === SCAN_SCHEDULE_PATH) {
+    if (method === "GET") return handleGetSchedule(event, options);
+    if (method === "PUT") return handlePutSchedule(event, options);
+    if (method === "DELETE") return handleDeleteSchedule(event, options);
+  }
+  return null;
+}
+
 /**
  * Narrow the handler's third argument down to route dependency overrides.
  *
@@ -930,6 +1318,25 @@ export async function handler(event, context = undefined, deps = {}) {
   // honoured as dependency overrides (see asRouteDeps for why this is enforced).
   const routeDeps = asRouteDeps(deps);
 
+  // EventBridge Scheduler firing a recurring scan (TASK-008). Checked BEFORE
+  // any ALB routing below: this event shape carries no `path`/`httpMethod` at
+  // all, and the caller is EventBridge, not a browser, so the return value
+  // must be a plain result object, never the ALB response shape the rest of
+  // this handler builds. `getRemainingTimeInMillis` is threaded from the real
+  // Lambda `context` (absent in a test, which then falls back to
+  // scan.mjs's own DEFAULT_MAX_SCAN_DURATION_MS) so the extraction loop can
+  // stay inside this invocation's actual remaining time.
+  if (isScheduledScanEvent(event)) {
+    const scheduledDeps = { env: process.env, ...routeDeps };
+    if (
+      typeof scheduledDeps.getRemainingTimeInMillis !== "function" &&
+      typeof context?.getRemainingTimeInMillis === "function"
+    ) {
+      scheduledDeps.getRemainingTimeInMillis = () => context.getRemainingTimeInMillis();
+    }
+    return runScheduledScan(event, scheduledDeps);
+  }
+
   const path = event?.path || "/";
   const method = (event?.httpMethod || "GET").toUpperCase();
   const headers = event?.multiValueHeaders || event?.headers || {};
@@ -937,48 +1344,76 @@ export async function handler(event, context = undefined, deps = {}) {
 
   logBasic("[Calendar] Request:", { method, path, origin: origin || "none" });
 
+  // Every value this function returns goes through `finalise` immediately
+  // before it leaves the router (TASK-022), so the credentials-vs-wildcard
+  // invariant holds even for a future route that hand-rolls a raw response
+  // and bypasses buildResponse entirely - see finalise's docblock.
+
   // CORS preflight for all routes.
   if (method === "OPTIONS") {
-    return buildResponse(200, "", "application/json", { origin });
+    return finalise(buildResponse(200, "", "application/json", { origin }));
   }
 
   // Health check — deliberately open: ALB health checks send no Origin header
   // and no credentials, and the body carries nothing sensitive.
   if (path === "/calendar/api/health" && method === "GET") {
-    return jsonResponse(
-      200,
-      {
-        status: "ok",
-        service: "school-calendar",
-        timestamp: new Date().toISOString(),
-      },
-      { origin }
+    return finalise(
+      jsonResponse(
+        200,
+        {
+          status: "ok",
+          service: "school-calendar",
+          timestamp: new Date().toISOString(),
+        },
+        { origin }
+      )
     );
   }
 
   // Google sign-in, session and connection status. `origin` is resolved once
   // above; `allowlist` is left to buildResponse's default unless a caller
-  // overrides it (never pass null - see TASK-022).
+  // overrides it. A `null` or non-array allowlist now fails safe rather than
+  // throwing (TASK-022; see coerceAllowlist).
   const authResponse = await routeAuthRequest(path, method, event, { origin, ...routeDeps });
   if (authResponse) {
-    return authResponse;
+    return finalise(authResponse);
   }
 
   // School name and search domains. Authenticated: every response is either the
   // signed-in user's own settings or a 401.
   const settingsResponse = await routeSettingsRequest(path, method, event, { origin, ...routeDeps });
   if (settingsResponse) {
-    return settingsResponse;
+    return finalise(settingsResponse);
+  }
+
+  // Manual "Scan now", its last-result readback, and the recurring schedule
+  // (TASK-008). Every response is either the signed-in user's own scan/
+  // schedule state or a 401. `getRemainingTimeInMillis` is threaded from the
+  // real Lambda `context` for the same reason as the scheduled-invocation
+  // branch above - a manual scan's extraction loop must also stay inside this
+  // invocation's actual remaining time, not just its own message cap.
+  const scanRouteOptions = { origin, ...routeDeps };
+  if (
+    typeof scanRouteOptions.getRemainingTimeInMillis !== "function" &&
+    typeof context?.getRemainingTimeInMillis === "function"
+  ) {
+    scanRouteOptions.getRemainingTimeInMillis = () => context.getRemainingTimeInMillis();
+  }
+  const scanResponse = await routeScanRequest(path, method, event, scanRouteOptions);
+  if (scanResponse) {
+    return finalise(scanResponse);
   }
 
   // 404 for everything else — later tickets add the real routes.
-  return jsonResponse(404, { error: "Not found", path }, { origin });
+  return finalise(jsonResponse(404, { error: "Not found", path }, { origin }));
 }
 
 // Exported for unit tests and for the route modules added by later tickets.
 export {
   asRouteDeps,
   buildResponse,
+  finalise,
+  coerceAllowlist,
   jsonResponse,
   getCorsOrigin,
   isOriginAllowed,
@@ -992,4 +1427,7 @@ export {
   AUTH_LOGOUT_PATH,
   AUTH_ME_PATH,
   SETTINGS_PATH,
+  SCAN_PATH,
+  SCAN_STATUS_PATH,
+  SCAN_SCHEDULE_PATH,
 };

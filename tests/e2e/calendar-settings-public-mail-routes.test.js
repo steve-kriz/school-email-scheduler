@@ -100,6 +100,26 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
     }
   });
 
+  it('should return 400 naming the domain for each Australian ISP/portal host (TASK-046)', async () => {
+    const hosts = [
+      'bigpond.com',
+      'bigpond.net.au',
+      'optusnet.com.au',
+      'y7mail.com',
+      'iinet.net.au',
+      'tpg.com.au',
+      'internode.on.net',
+      'dodo.com.au',
+    ];
+
+    for (const host of hosts) {
+      const { response, body } = await putDomain(host);
+      assert.equal(response.statusCode, 400, `${host} should be refused`);
+      assert.equal(body.field, 'searchDomains');
+      assert.ok(body.error.includes(host), `body should name ${host}, got "${body.error}"`);
+    }
+  });
+
   it('should still return 400 naming the domain for the six originally-blocked hosts', async () => {
     for (const host of ['gmail.com', 'googlemail.com', 'outlook.com', 'hotmail.com', 'yahoo.com', 'icloud.com']) {
       const { response, body } = await putDomain(host);
@@ -146,5 +166,161 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
     const body = JSON.parse(response.body);
     assert.deepEqual(body.searchDomains, ['mail.stmarys.edu.au']);
     assert.equal(captured.length, 1);
+  });
+
+  it('should accept an Australian school domain unaffected by the ISP/portal entries (TASK-046)', async () => {
+    const captured = [];
+    const response = await handler(
+      makeEvent(
+        { schoolName: 'St Bedes College', searchDomains: ['stbedes.vic.edu.au'] },
+        makeSessionCookie()
+      ),
+      {},
+      {
+        env: defaultEnv,
+        updateItem: async (params) => {
+          captured.push(params);
+          return {
+            Attributes: {
+              userId: `google:${testGoogleSub}`,
+              email: testEmail,
+              schoolName: 'St Bedes College',
+              searchDomains: new Set(['stbedes.vic.edu.au']),
+            },
+          };
+        },
+      }
+    );
+
+    assert.equal(response.statusCode, 200);
+    const body = JSON.parse(response.body);
+    assert.deepEqual(body.searchDomains, ['stbedes.vic.edu.au']);
+    assert.equal(captured.length, 1);
+  });
+
+  it('should accept a qld.edu.au school domain (TASK-046: AC scope)', async () => {
+    const captured = [];
+    const response = await handler(
+      makeEvent(
+        { schoolName: 'Sunshine State School', searchDomains: ['example.qld.edu.au'] },
+        makeSessionCookie()
+      ),
+      {},
+      {
+        env: defaultEnv,
+        updateItem: async (params) => {
+          captured.push(params);
+          return {
+            Attributes: {
+              userId: `google:${testGoogleSub}`,
+              email: testEmail,
+              schoolName: 'Sunshine State School',
+              searchDomains: new Set(['example.qld.edu.au']),
+            },
+          };
+        },
+      }
+    );
+
+    assert.equal(response.statusCode, 200);
+    const body = JSON.parse(response.body);
+    assert.deepEqual(body.searchDomains, ['example.qld.edu.au']);
+    assert.equal(captured.length, 1);
+  });
+
+  it('internode.on.net must be refused by exact-match check before registrableName is consulted (TASK-046)', async () => {
+    // Verifies the coder's claim: registrableName("internode.on.net") would return
+    // { name: "on", subdomain: true }, but the exact-match check catches it first.
+    // This test ensures that if someone ever reorders the checks, internode.on.net
+    // would silently fail to be refused. By making this explicit, we pin that ordering.
+    const { response, body } = await putDomain('internode.on.net');
+    assert.equal(response.statusCode, 400, 'internode.on.net must be refused');
+    assert.ok(body.error.includes('internode.on.net'), 'error must name internode.on.net');
+  });
+
+  it('should refuse mixed-case blocked domains and report the normalised form', async () => {
+    const { response, body } = await putDomain('OUTLOOK.COM.AU');
+    assert.equal(response.statusCode, 400);
+    assert.equal(body.field, 'searchDomains');
+    assert.ok(body.error.includes('outlook.com.au'), 'should name normalised form, not the input');
+  });
+
+  it('should refuse email address form and report normalised domain', async () => {
+    const { response, body } = await putDomain('user@yahoo.com.au');
+    assert.equal(response.statusCode, 400);
+    assert.equal(body.field, 'searchDomains');
+    assert.ok(body.error.includes('yahoo.com.au'), 'should name the domain extracted from address');
+  });
+
+  it('should refuse URL form and report normalised domain', async () => {
+    const { response, body } = await putDomain('https://gmail.com/login');
+    assert.equal(response.statusCode, 400);
+    assert.equal(body.field, 'searchDomains');
+    assert.ok(body.error.includes('gmail.com'), 'should name the domain extracted from URL');
+  });
+
+  it('should accept school domains with brand-like names in subdomain', async () => {
+    const captured = [];
+    const response = await handler(
+      makeEvent(
+        {
+          schoolName: 'School Districts',
+          searchDomains: ['livewire.edu.au', 'mailroom.vic.edu.au', 'live.qld.edu.au'],
+        },
+        makeSessionCookie()
+      ),
+      {},
+      {
+        env: defaultEnv,
+        updateItem: async (params) => {
+          captured.push(params);
+          return {
+            Attributes: {
+              userId: `google:${testGoogleSub}`,
+              email: testEmail,
+              schoolName: 'School Districts',
+              searchDomains: new Set(['livewire.edu.au', 'mailroom.vic.edu.au', 'live.qld.edu.au']),
+            },
+          };
+        },
+      }
+    );
+
+    assert.equal(response.statusCode, 200, 'should accept school domains with brand-like words');
+    const body = JSON.parse(response.body);
+    assert.equal(body.searchDomains.length, 3);
+    assert.ok(body.searchDomains.includes('livewire.edu.au'));
+    assert.ok(body.searchDomains.includes('mailroom.vic.edu.au'));
+    assert.ok(body.searchDomains.includes('live.qld.edu.au'));
+  });
+
+  it('should refuse brand-only domains under uncommon suffixes', async () => {
+    const hosts = [
+      'gmail.co.uk',
+      'hotmail.xyz',
+      'yahoo.io',
+      'outlook.net',
+    ];
+
+    for (const host of hosts) {
+      const { response, body } = await putDomain(host);
+      assert.equal(response.statusCode, 400, `${host} should be refused by brand check`);
+      assert.equal(body.field, 'searchDomains');
+      assert.ok(body.error.includes(host), `should name ${host} in error message`);
+    }
+  });
+
+  it('should refuse wildcard patterns after normalisation', async () => {
+    const { response, body } = await putDomain('*.hotmail.com');
+    assert.equal(response.statusCode, 400);
+    assert.equal(body.field, 'searchDomains');
+    assert.ok(body.error.includes('hotmail.com'), 'should name the normalised domain');
+  });
+
+  it('should normalise whitespace around domains', async () => {
+    const { response, body } = await putDomain('  gmail.com  ');
+    assert.equal(response.statusCode, 400);
+    assert.equal(body.field, 'searchDomains');
+    assert.ok(body.error.includes('gmail.com'));
   });
 });

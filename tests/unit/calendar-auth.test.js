@@ -66,6 +66,8 @@ import {
   USER_ID_PREFIX,
   putConnection,
   updateConnection,
+  getConnection,
+  getRefreshToken,
 } from '../../src/lambda/calendar/backend/connections.mjs';
 
 describe('Google OAuth Pure Functions', () => {
@@ -1147,6 +1149,24 @@ describe('Connections Functions', () => {
       assert.ok(!('refreshTokenEnc' in stripped));
     });
 
+    it('should remove refreshTokenKeyId (KMS key ARN) from item', () => {
+      // Containment gap fix: the ARN of the KMS key that wrapped the refresh
+      // token is itself sensitive (crypto.mjs treats it as material that must
+      // never be logged - a ciphertext plus a key ARN is still material an
+      // attacker can work with), so it must be stripped alongside the
+      // ciphertext, not just the ciphertext alone.
+      const item = {
+        userId: 'google#123',
+        email: 'test@example.com',
+        refreshTokenEnc: 'sensitive-ciphertext',
+        refreshTokenKeyId: 'arn:aws:kms:ap-southeast-2:123456789:key/12345678-1234-1234-1234-123456789012',
+      };
+
+      const stripped = stripSecrets(item);
+      assert.ok(!('refreshTokenEnc' in stripped));
+      assert.ok(!('refreshTokenKeyId' in stripped), 'KMS key ARN must not survive stripSecrets');
+    });
+
     it('should add hasRefreshToken flag', () => {
       const item = {
         userId: 'google#123',
@@ -1275,6 +1295,17 @@ describe('Connections Functions', () => {
     it('should define secret attributes', () => {
       assert.ok(Array.isArray(SECRET_ATTRIBUTES));
       assert.ok(SECRET_ATTRIBUTES.includes('refreshTokenEnc'));
+    });
+
+    it('should include the KMS key ARN attribute as secret', () => {
+      // Direct guard on the fix: removing this entry from SECRET_ATTRIBUTES
+      // is the mutation this ticket asks to be caught red. This assertion
+      // catches it immediately; the stripSecrets/getConnection/putConnection/
+      // updateConnection tests below catch it structurally too.
+      assert.ok(
+        SECRET_ATTRIBUTES.includes('refreshTokenKeyId'),
+        'refreshTokenKeyId (the KMS CMK ARN) must be a secret attribute'
+      );
     });
 
     it('should have no overlap between public and secret', () => {
@@ -1530,6 +1561,88 @@ describe('Connections Functions', () => {
           'must reject key ID in patch (use putConnection for token updates)'
         );
       }
+    });
+  });
+
+  describe('containment: KMS key ARN never survives stripSecrets', () => {
+    // TASK-026: `refreshTokenKeyId` (the KMS CMK ARN wrapping the refresh
+    // token) is itself sensitive per crypto.mjs, but was not in
+    // SECRET_ATTRIBUTES, so every accessor built on stripSecrets() returned
+    // it. These three cover every accessor named in the ticket's scenario
+    // outline. Removing refreshTokenKeyId from SECRET_ATTRIBUTES turns all
+    // three red (verified by mutation during implementation).
+    const rawRow = {
+      userId: 'google#containment-user',
+      email: 'containment@example.com',
+      refreshTokenEnc: 'ciphertext-value',
+      refreshTokenKeyId: 'arn:aws:kms:ap-southeast-2:123456789:key/12345678-1234-1234-1234-123456789012',
+    };
+
+    it('getConnection returns neither refreshTokenEnc nor refreshTokenKeyId', async () => {
+      const result = await getConnection('google#containment-user', {
+        getItem: async () => ({ ...rawRow }),
+        tableName: 'test-table',
+      });
+
+      assert.ok(!('refreshTokenEnc' in result));
+      assert.ok(!('refreshTokenKeyId' in result), 'KMS key ARN must not survive getConnection');
+    });
+
+    it('putConnection returns neither refreshTokenEnc nor refreshTokenKeyId', async () => {
+      const result = await putConnection(
+        {
+          sub: 'containment-user',
+          email: 'containment@example.com',
+          refreshToken: 'plaintext-token',
+        },
+        {
+          getItem: async () => null,
+          putItem: async () => {},
+          encrypt: async () => ({ ciphertext: 'ciphertext-value', keyId: rawRow.refreshTokenKeyId }),
+          tableName: 'test-table',
+          env: { CALENDAR_KMS_KEY_ID: rawRow.refreshTokenKeyId },
+        }
+      );
+
+      assert.ok(!('refreshTokenEnc' in result));
+      assert.ok(!('refreshTokenKeyId' in result), 'KMS key ARN must not survive putConnection');
+    });
+
+    it('updateConnection returns neither refreshTokenEnc nor refreshTokenKeyId', async () => {
+      const result = await updateConnection(
+        'google#containment-user',
+        { email: 'new@example.com' },
+        {
+          updateItem: async () => ({ ...rawRow, email: 'new@example.com' }),
+          tableName: 'test-table',
+        }
+      );
+
+      assert.ok(!('refreshTokenEnc' in result));
+      assert.ok(!('refreshTokenKeyId' in result), 'KMS key ARN must not survive updateConnection');
+    });
+
+    it('getRefreshToken still decrypts correctly (raw-item read path is unaffected)', async () => {
+      // getRefreshToken reads the raw DynamoDB item directly rather than
+      // going through stripSecrets, so adding refreshTokenKeyId to
+      // SECRET_ATTRIBUTES must not touch this path. Confirmed here by
+      // asserting both the returned plaintext AND that the real key ARN was
+      // forwarded to decrypt() unmodified.
+      let receivedKeyId = null;
+      const plaintext = 'decrypted-refresh-token-value';
+
+      const result = await getRefreshToken('google#containment-user', {
+        getItem: async () => ({ ...rawRow }),
+        decrypt: async (ciphertext, { keyId }) => {
+          receivedKeyId = keyId;
+          assert.equal(ciphertext, rawRow.refreshTokenEnc);
+          return plaintext;
+        },
+        tableName: 'test-table',
+      });
+
+      assert.equal(result, plaintext);
+      assert.equal(receivedKeyId, rawRow.refreshTokenKeyId);
     });
   });
 });

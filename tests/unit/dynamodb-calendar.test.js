@@ -1,8 +1,10 @@
 import { describe, it } from 'node:test';
 import * as assert from 'node:assert';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { extractResourceBody, extractBlock, bodyDeclaresTtlBlock } from '../helpers/hcl-blocks.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -10,40 +12,14 @@ const PROJECT_ROOT = path.join(__dirname, '..', '..');
 const TERRAFORM_DIR = path.join(PROJECT_ROOT, 'terraform');
 
 // -----------------------------------------------------------------------------
-// TTL guard helpers (TASK-016)
+// TTL guard helpers (TASK-016, superseded by tests/helpers/hcl-blocks.mjs)
 // -----------------------------------------------------------------------------
 // The connections table must declare NO ttl block: it holds the only copy of
 // each user's encrypted OAuth grant, and an enabled reaper would silently and
 // permanently expire it if any writer ever stamped a `ttl` attribute. The events
 // table's ttl block is legitimate, so the guard is scoped to a single resource
-// body by brace counting rather than searching the whole file.
-
-/** Return the body text of `resource "<type>" "<name>" { ... }`, or null. */
-function extractResourceBody(content, resourceType, resourceName) {
-  const header = new RegExp(`resource\\s+"${resourceType}"\\s+"${resourceName}"\\s*\\{`);
-  const match = header.exec(content);
-  if (!match) return null;
-
-  const open = match.index + match[0].length - 1; // index of the opening brace
-  let depth = 0;
-  for (let i = open; i < content.length; i++) {
-    if (content[i] === '{') depth++;
-    else if (content[i] === '}') {
-      depth--;
-      if (depth === 0) return content.slice(open + 1, i);
-    }
-  }
-  return null;
-}
-
-/** True if the given resource body declares a `ttl { ... }` block. */
-function bodyDeclaresTtlBlock(body) {
-  const withoutComments = body
-    .split('\n')
-    .filter(line => !line.trim().startsWith('#') && !line.trim().startsWith('//'))
-    .join('\n');
-  return /(^|\n)\s*ttl\s*\{/.test(withoutComments);
-}
+// body via the shared extractor (TASK-017), which skips braces inside strings,
+// comments, and heredocs rather than counting them naively.
 
 describe('DynamoDB Calendar Unit Tests', () => {
 
@@ -188,18 +164,22 @@ describe('DynamoDB Calendar Unit Tests', () => {
     });
 
     it('should enable point_in_time_recovery', () => {
-      assert.ok(connectionsContent.includes('point_in_time_recovery'),
-        'point_in_time_recovery block not found');
-      assert.ok(connectionsContent.includes('enabled = true'),
+      const body = extractResourceBody(connectionsContent, 'aws_dynamodb_table', 'calendar_connections');
+      assert.ok(body, 'aws_dynamodb_table.calendar_connections resource body not found');
+      const pitrBlock = extractBlock(body, 'point_in_time_recovery');
+      assert.ok(pitrBlock, 'point_in_time_recovery block not found in the calendar_connections resource body');
+      assert.ok(/enabled\s*=\s*true/.test(pitrBlock),
         'point_in_time_recovery should be enabled');
     });
 
     it('should enable server_side_encryption with the CMK', () => {
-      assert.ok(connectionsContent.includes('server_side_encryption'),
-        'server_side_encryption block not found');
-      assert.ok(connectionsContent.includes('enabled     = true'),
+      const body = extractResourceBody(connectionsContent, 'aws_dynamodb_table', 'calendar_connections');
+      assert.ok(body, 'aws_dynamodb_table.calendar_connections resource body not found');
+      const sseBlock = extractBlock(body, 'server_side_encryption');
+      assert.ok(sseBlock, 'server_side_encryption block not found in the calendar_connections resource body');
+      assert.ok(/enabled\s*=\s*true/.test(sseBlock),
         'server_side_encryption should be enabled');
-      assert.ok(connectionsContent.includes('kms_key_arn = aws_kms_key.calendar.arn'),
+      assert.ok(/kms_key_arn\s*=\s*aws_kms_key\.calendar\.arn/.test(sseBlock),
         'server_side_encryption should use the calendar CMK');
     });
 
@@ -370,18 +350,22 @@ describe('DynamoDB Calendar Unit Tests', () => {
     });
 
     it('should enable TTL on the ttl attribute', () => {
-      assert.ok(eventsContent.includes('ttl'),
-        'ttl block not found');
-      assert.ok(eventsContent.includes('attribute_name = "ttl"'),
+      const body = extractResourceBody(eventsContent, 'aws_dynamodb_table', 'calendar_events');
+      assert.ok(body, 'aws_dynamodb_table.calendar_events resource body not found');
+      const ttlBlock = extractBlock(body, 'ttl');
+      assert.ok(ttlBlock, 'ttl block not found in the calendar_events resource body');
+      assert.ok(/attribute_name\s*=\s*"ttl"/.test(ttlBlock),
         'ttl attribute_name should be "ttl"');
-      assert.ok(eventsContent.includes('enabled        = true'),
+      assert.ok(/enabled\s*=\s*true/.test(ttlBlock),
         'ttl should be enabled');
     });
 
     it('should enable point_in_time_recovery', () => {
-      assert.ok(eventsContent.includes('point_in_time_recovery'),
-        'point_in_time_recovery block not found');
-      assert.ok(eventsContent.includes('enabled = true'),
+      const body = extractResourceBody(eventsContent, 'aws_dynamodb_table', 'calendar_events');
+      assert.ok(body, 'aws_dynamodb_table.calendar_events resource body not found');
+      const pitrBlock = extractBlock(body, 'point_in_time_recovery');
+      assert.ok(pitrBlock, 'point_in_time_recovery block not found in the calendar_events resource body');
+      assert.ok(/enabled\s*=\s*true/.test(pitrBlock),
         'point_in_time_recovery should be enabled');
     });
 
@@ -391,11 +375,13 @@ describe('DynamoDB Calendar Unit Tests', () => {
     });
 
     it('should enable server_side_encryption with the CMK', () => {
-      assert.ok(eventsContent.includes('server_side_encryption'),
-        'server_side_encryption block not found');
-      assert.ok(eventsContent.includes('enabled     = true'),
+      const body = extractResourceBody(eventsContent, 'aws_dynamodb_table', 'calendar_events');
+      assert.ok(body, 'aws_dynamodb_table.calendar_events resource body not found');
+      const sseBlock = extractBlock(body, 'server_side_encryption');
+      assert.ok(sseBlock, 'server_side_encryption block not found in the calendar_events resource body');
+      assert.ok(/enabled\s*=\s*true/.test(sseBlock),
         'server_side_encryption should be enabled');
-      assert.ok(eventsContent.includes('kms_key_arn = aws_kms_key.calendar.arn'),
+      assert.ok(/kms_key_arn\s*=\s*aws_kms_key\.calendar\.arn/.test(sseBlock),
         'server_side_encryption should use the calendar CMK');
     });
 
@@ -529,6 +515,221 @@ describe('DynamoDB Calendar Unit Tests', () => {
       // Should start with comment block
       assert.ok(eventsContent.trim().startsWith('#'),
         'events file should start with comment block');
+    });
+  });
+
+  describe('Shared HCL block extractor (tests/helpers/hcl-blocks.mjs)', () => {
+    // The extractor must never truncate a resource body because of a brace
+    // it misreads as structural. Each fixture below embeds an unbalanced
+    // brace inside a construct that must be skipped, with a real `ttl` block
+    // placed AFTER that construct: if the extractor mishandles the construct
+    // and returns a truncated body, the ttl block goes missing and the guard
+    // silently passes when it should fail (TASK-016 review, folded into
+    // TASK-017).
+
+    it('ignores an unbalanced brace inside a double-quoted string', () => {
+      const fixture = [
+        'resource "aws_dynamodb_table" "fixture_table" {',
+        '  description = "use { here"',
+        '  ttl {',
+        '    attribute_name = "ttl"',
+        '    enabled        = true',
+        '  }',
+        '}',
+        ''
+      ].join('\n');
+
+      const body = extractResourceBody(fixture, 'aws_dynamodb_table', 'fixture_table');
+      assert.ok(body, 'resource body should be found despite the unbalanced brace in the string');
+      assert.equal(bodyDeclaresTtlBlock(body), true,
+        'ttl block placed after the unbalanced-brace string must still be detected');
+    });
+
+    it('ignores an unbalanced brace inside a "#" line comment', () => {
+      const fixture = [
+        'resource "aws_dynamodb_table" "fixture_table" {',
+        '  # note: unbalanced brace in a comment {',
+        '  ttl {',
+        '    attribute_name = "ttl"',
+        '    enabled        = true',
+        '  }',
+        '}',
+        ''
+      ].join('\n');
+
+      const body = extractResourceBody(fixture, 'aws_dynamodb_table', 'fixture_table');
+      assert.ok(body, 'resource body should be found despite the unbalanced brace in the comment');
+      assert.equal(bodyDeclaresTtlBlock(body), true,
+        'ttl block placed after the unbalanced-brace comment must still be detected');
+    });
+
+    it('ignores an unbalanced brace inside a "//" line comment', () => {
+      const fixture = [
+        'resource "aws_dynamodb_table" "fixture_table" {',
+        '  // note: unbalanced brace in a comment {',
+        '  ttl {',
+        '    attribute_name = "ttl"',
+        '    enabled        = true',
+        '  }',
+        '}',
+        ''
+      ].join('\n');
+
+      const body = extractResourceBody(fixture, 'aws_dynamodb_table', 'fixture_table');
+      assert.ok(body, 'resource body should be found despite the unbalanced brace in the "//" comment');
+      assert.equal(bodyDeclaresTtlBlock(body), true,
+        'ttl block placed after the unbalanced-brace "//" comment must still be detected');
+    });
+
+    it('ignores an unbalanced brace inside a <<EOT heredoc', () => {
+      const fixture = [
+        'resource "aws_dynamodb_table" "fixture_table" {',
+        '  description = <<EOT',
+        'unbalanced brace in a heredoc {',
+        'EOT',
+        '  ttl {',
+        '    attribute_name = "ttl"',
+        '    enabled        = true',
+        '  }',
+        '}',
+        ''
+      ].join('\n');
+
+      const body = extractResourceBody(fixture, 'aws_dynamodb_table', 'fixture_table');
+      assert.ok(body, 'resource body should be found despite the unbalanced brace in the heredoc');
+      assert.equal(bodyDeclaresTtlBlock(body), true,
+        'ttl block placed after the unbalanced-brace heredoc must still be detected');
+    });
+
+    it('ignores an unbalanced brace inside a <<-EOT indented heredoc', () => {
+      const fixture = [
+        'resource "aws_dynamodb_table" "fixture_table" {',
+        '  description = <<-EOT',
+        '    unbalanced brace in an indented heredoc }',
+        '    EOT',
+        '  ttl {',
+        '    attribute_name = "ttl"',
+        '    enabled        = true',
+        '  }',
+        '}',
+        ''
+      ].join('\n');
+
+      const body = extractResourceBody(fixture, 'aws_dynamodb_table', 'fixture_table');
+      assert.ok(body, 'resource body should be found despite the unbalanced brace in the indented heredoc');
+      assert.equal(bodyDeclaresTtlBlock(body), true,
+        'ttl block placed after the unbalanced-brace indented heredoc must still be detected');
+    });
+
+    it('extracts a real resource body containing inline IAM policy JSON (terraform/lambda_calendar.tf)', () => {
+      // TASK-003's lambda_calendar.tf is the file the TASK-016 review named as
+      // the concrete future risk: an inline IAM policy with its own quoted
+      // strings, arrays and nested jsonencode({...}) braces. Verifying the
+      // extractor here (not only against the two dynamodb files) proves it
+      // generalises to real, brace-heavy terraform.
+      const lambdaTfPath = path.join(TERRAFORM_DIR, 'lambda_calendar.tf');
+      const content = fs.readFileSync(lambdaTfPath, 'utf-8');
+
+      const policyBody = extractResourceBody(content, 'aws_iam_policy', 'calendar_lambda_policy');
+      assert.ok(policyBody, 'aws_iam_policy.calendar_lambda_policy resource body not found');
+      assert.ok(policyBody.includes('jsonencode('),
+        'policy body should contain the jsonencode( call');
+      assert.ok(policyBody.includes('Statement ='),
+        'policy body should contain the Statement key of the policy document');
+      assert.ok(policyBody.includes('DynamoDBCalendarTables'),
+        'policy body should contain the DynamoDB statement Sid');
+
+      const lambdaBody = extractResourceBody(content, 'aws_lambda_function', 'calendar');
+      assert.ok(lambdaBody, 'aws_lambda_function.calendar resource body not found');
+      const envBlock = extractBlock(lambdaBody, 'environment');
+      assert.ok(envBlock, 'environment block not found in aws_lambda_function.calendar');
+      assert.ok(envBlock.includes('CALENDAR_KMS_KEY_ID'),
+        'environment block should declare CALENDAR_KMS_KEY_ID');
+    });
+
+    it('returns null when the named resource does not exist', () => {
+      const content = 'resource "aws_dynamodb_table" "some_other_table" {\n  ttl {\n    enabled = true\n  }\n}\n';
+      assert.equal(extractResourceBody(content, 'aws_dynamodb_table', 'calendar_connections'), null);
+    });
+
+    it('returns null when the named nested block does not exist', () => {
+      const body = '\n  billing_mode = "PAY_PER_REQUEST"\n';
+      assert.equal(extractBlock(body, 'point_in_time_recovery'), null);
+    });
+  });
+
+  describe('Block-scoped assertions catch a flag in the wrong block (mutated fixtures)', () => {
+    // These prove the refactor actually closes the gap the review identified:
+    // `enabled = true` present in the file but attached to the WRONG block
+    // must now fail, where the old whole-file `.includes('enabled = true')`
+    // could not tell the difference.
+
+    it('fails when point_in_time_recovery.enabled is false but a different block says enabled = true', () => {
+      const connectionsPath = path.join(TERRAFORM_DIR, 'dynamodb_calendar_connections.tf');
+      const original = fs.readFileSync(connectionsPath, 'utf-8');
+
+      // Flip PITR off, and add a decoy block elsewhere in the same resource
+      // that legitimately says `enabled = true` (a plausible future block,
+      // e.g. a stream config) so a whole-file substring check would still
+      // find "enabled = true" somewhere and pass.
+      const mutated = original
+        .replace('point_in_time_recovery {\n    enabled = true\n  }',
+          'point_in_time_recovery {\n    enabled = false\n  }\n\n  decoy_block {\n    enabled = true\n  }');
+      assert.notEqual(mutated, original, 'fixture mutation did not apply');
+      assert.ok(mutated.includes('enabled = true'),
+        'fixture must still contain the literal text "enabled = true" somewhere in the file');
+
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'task017-pitr-wrong-block-'));
+      try {
+        const tmpFile = path.join(tmpDir, 'dynamodb_calendar_connections.tf');
+        fs.writeFileSync(tmpFile, mutated, 'utf-8');
+        const content = fs.readFileSync(tmpFile, 'utf-8');
+
+        const body = extractResourceBody(content, 'aws_dynamodb_table', 'calendar_connections');
+        assert.ok(body, 'resource body should still be found');
+        const pitrBlock = extractBlock(body, 'point_in_time_recovery');
+        assert.ok(pitrBlock, 'point_in_time_recovery block should still be found');
+
+        assert.throws(
+          () => assert.ok(/enabled\s*=\s*true/.test(pitrBlock), 'point_in_time_recovery should be enabled'),
+          assert.AssertionError,
+          'the block-scoped assertion must fail when PITR itself is disabled, even though "enabled = true" appears elsewhere in the file'
+        );
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('fails when server_side_encryption references a different KMS key', () => {
+      const connectionsPath = path.join(TERRAFORM_DIR, 'dynamodb_calendar_connections.tf');
+      const original = fs.readFileSync(connectionsPath, 'utf-8');
+
+      const mutated = original.replace(
+        'kms_key_arn = aws_kms_key.calendar.arn',
+        'kms_key_arn = aws_kms_key.some_other_key.arn'
+      );
+      assert.notEqual(mutated, original, 'fixture mutation did not apply');
+
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'task017-sse-wrong-key-'));
+      try {
+        const tmpFile = path.join(tmpDir, 'dynamodb_calendar_connections.tf');
+        fs.writeFileSync(tmpFile, mutated, 'utf-8');
+        const content = fs.readFileSync(tmpFile, 'utf-8');
+
+        const body = extractResourceBody(content, 'aws_dynamodb_table', 'calendar_connections');
+        assert.ok(body, 'resource body should still be found');
+        const sseBlock = extractBlock(body, 'server_side_encryption');
+        assert.ok(sseBlock, 'server_side_encryption block should still be found');
+
+        assert.throws(
+          () => assert.ok(/kms_key_arn\s*=\s*aws_kms_key\.calendar\.arn/.test(sseBlock),
+            'server_side_encryption should use the calendar CMK'),
+          assert.AssertionError,
+          'the block-scoped assertion must fail when server_side_encryption references a different key'
+        );
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
   });
 });

@@ -1,9 +1,10 @@
 ---
 id: TASK-026
 title: Containment gap (KMS key ARN survives stripSecrets) plus two e2e test-hygiene defects
-status: todo
+status: done
 created: 2026-08-18T02:10:00Z
-updated: 2026-08-18T02:10:00Z
+updated: 2026-08-18T09:40:00.000Z
+activities: [{"activity":"test","model":"claude-haiku-4-5","startedAt":"2026-08-18T08:30:00.000Z","finishedAt":"2026-08-18T08:55:00.000Z","tokensIn":62556,"note":"GREEN 214/214 (140 unit + 41 + 33 e2e), 825ms. Exhaustive containment sweep: only 3 return paths in connections.mjs (:344/:446/:489) all via stripSecrets, no list/query, no error path echoes a raw item, HTTP responses go through toPublicJson allow-list. SECRET_ATTRIBUTES mutation -> 5 red. Tester reported HONESTLY that the leak assertion is structurally sound but currently VACUOUS - it passes because logs are empty, not because nothing leaks (TASK-077); says do not count it toward security guarantees until fixed"},{"activity":"review","model":"claude-opus-4-8","startedAt":"2026-08-18T09:25:00.000Z","finishedAt":"2026-08-18T09:40:00.000Z","tokensIn":82005,"note":"VERDICT ACCEPT (read-only reviewer, disclosed). Containment sweep independently confirmed exhaustive: 3 return paths all via stripSecrets, error paths carry only err.name/message, settings.mjs spreads the projection not the connection, ddbGetItem has no external caller. CORRECTION IN THE TICKETS FAVOUR: capturedLogs is NOT empty - LOG_LEVEL defaults to basic so logBasic at index.mjs:1037 does fire and is captured, so the leak assertion is PARTIALLY vacuous, not wholly. Also judged the ARN only modestly sensitive (same value sits in the Lambda env as CALENDAR_KMS_KEY_ID) but found the docblock does not overclaim. 5 findings -> TASK-089..093; most serious is A: putConnection rejects a caller-supplied refreshTokenEnc but NOT refreshTokenKeyId"}]
 review-of: TASK-004
 ---
 
