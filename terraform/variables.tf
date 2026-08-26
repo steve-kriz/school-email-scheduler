@@ -161,3 +161,47 @@ variable "tags" {
     Project = "School_Calendar"
   }
 }
+
+variable "calendar_waf_rate_limit" {
+  description = <<-EOT
+    Maximum requests per 5-minute period per IP for the /calendar* paths.
+
+    300 matches the chatbot's own var.chatbot_waf_rate_limit. Applied by
+    aws_wafv2_rule_group.calendar_protection in waf_calendar.tf, and NOT
+    applied to the Google OAuth callback, which is explicitly allowed first -
+    see the callback rule's comment for why (schools NAT their whole staff
+    behind one egress IP, so sign-in arrives as a single-IP burst).
+
+    AWS WAF rejects a rate-based limit below 10.
+  EOT
+  type        = number
+  default     = 300
+
+  validation {
+    condition     = var.calendar_waf_rate_limit >= 10
+    error_message = "calendar_waf_rate_limit must be at least 10 (the AWS WAF rate-based rule minimum)."
+  }
+}
+
+variable "calendar_scan_rate_limit" {
+  description = <<-EOT
+    Maximum requests per 5-minute period per IP for /calendar/api/scan.
+
+    Deliberately much tighter than calendar_waf_rate_limit: one scan fans out
+    into Gmail API calls and one Anthropic completion PER EMAIL, so its cost is
+    measured in model tokens rather than CPU. Keep this BELOW
+    calendar_waf_rate_limit - Terraform 1.8 cannot express that as a variable
+    validation (cross-variable references need 1.9+), so it is an invariant the
+    defaults satisfy (10 < 300) and an override must preserve.
+
+    10 is also the AWS WAF floor for a rate-based rule limit; lower values are
+    rejected by the API.
+  EOT
+  type        = number
+  default     = 10
+
+  validation {
+    condition     = var.calendar_scan_rate_limit >= 10
+    error_message = "calendar_scan_rate_limit must be at least 10 (the AWS WAF rate-based rule minimum)."
+  }
+}
