@@ -1,9 +1,10 @@
 ---
 id: TASK-030
 title: The ownership guard misses a false claim that paraphrases "the secret"
-status: todo
+status: in-progress
 created: 2026-08-18T02:52:00Z
-updated: 2026-08-18T07:41:31.186Z
+updated: 2026-08-26T01:58:00.000Z
+agent: build-030
 review-of: TASK-027
 ---
 

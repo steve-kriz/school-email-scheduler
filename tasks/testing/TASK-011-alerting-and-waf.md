@@ -1,9 +1,11 @@
 ---
 id: TASK-011
 title: CloudWatch alerting and WAF rules for the calendar endpoints
-status: todo
+status: testing
 created: 2026-08-17T11:00:00Z
-updated: 2026-08-17T11:00:00Z
+updated: 2026-08-26T01:05:00.000Z
+agent: build-011
+activities: [{"activity":"code","model":"claude-opus-5","startedAt":"2026-08-26T00:05:00.000Z","finishedAt":"2026-08-26T01:05:00.000Z","note":"New terraform/alerting.tf (5 alarms + 2 log metric filters, every alarm carrying count = var.Alert_SNS_ARN == \"\" ? 0 : 1), terraform/waf_calendar.tf (REGIONAL rule group, scan rate limit / terminating allow for the OAuth callback / baseline path limit), new backend/alarms.mjs, plus emit points in scan.mjs and google-token.mjs. lambda_calendar.tf deliberately NOT touched, so no conflict with TASK-038; only shared file is variables.tf, append-only. FOUND AND REPORTED A GAP RATHER THAN FAKING IT: the alarm tokens the ticket defines had NO emitter anywhere in the codebase, so they would have matched nothing - coder built alarms.mjs to close that. DEVIATION NEEDING JUDGEMENT (AC 11): a managed rule group statement cannot live inside an aws_wafv2_rule_group, only in a Web ACL, and the shared ALB already has one owned by the basestack - so the managed-rule selection is captured as a local + output mirroring waf_chatbot.tf rather than as managed_rule_group_statement blocks. Deliberate security choice: sampled_requests_enabled=false on all four visibility_config blocks (departing from the chatbot true) because sampled requests retain cookies, Authorization and the live OAuth code. terraform validate error_count 0 / warning_count 4; fmt clean; console-verified the guard evaluates to 0 and scan<waf. NOT VERIFIED: terraform plan/apply (no AWS creds), so AC 3 is confirmed only at the count-expression level - honestly reported. Reported unit 1140/1141 and e2e 448/449 with both failures claimed pre-existing; ORCHESTRATOR NOTE: its stated reason for the test:bdd failure is wrong (see TASK-098), and the dynamodb-calendar failure did NOT reproduce in the orchestrator isolated run (68/68) - three agents have now hit it under a concurrent full-suite run, pointing at a race, under investigation. Token/cost telemetry not correlated; 122518 total subagent tokens reported, direction unsplit, so tokensIn/tokensOut omitted rather than guessed"}]
 depends-on: TASK-008
 ---
 
