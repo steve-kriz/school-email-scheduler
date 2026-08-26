@@ -593,3 +593,71 @@ export async function releaseScanLock(userId, { updateItem = ddbUpdateItem, tabl
     updates: { scanInProgress: REMOVE_ATTRIBUTE, scanStartedAt: REMOVE_ATTRIBUTE },
   });
 }
+
+/**
+ * Real DynamoDB DeleteItem. Default `deleteItem` dependency.
+ *
+ * `ReturnValues: "ALL_OLD"` is NOT decoration. DynamoDB's DeleteItem succeeds
+ * against a key that was never there, so without the old image a caller cannot
+ * tell "row removed" from "nothing to remove" - and a disconnect that reports
+ * `connectionDeleted: true` for a row it never saw is a success message about a
+ * deletion that may not have happened. ALL_OLD makes the outcome OBSERVED.
+ *
+ * The returned attributes carry `refreshTokenEnc`/`refreshTokenKeyId`, so this
+ * value must not escape the module unstripped - `deleteConnection` below is the
+ * only caller and reduces it to booleans.
+ *
+ * @param {{ tableName: string, key: object }} args
+ * @returns {Promise<object|null>} The deleted item, or null when there was none.
+ */
+export async function ddbDeleteItem({ tableName, key }) {
+  const { DeleteCommand } = await import("@aws-sdk/lib-dynamodb");
+  const client = await getDocumentClient();
+  const result = await client.send(
+    new DeleteCommand({ TableName: tableName, Key: key, ReturnValues: "ALL_OLD" })
+  );
+  return result?.Attributes || null;
+}
+
+/**
+ * Delete a user's connection row - the app's ONLY copy of their OAuth grant.
+ *
+ * This is irreversible by design (TASK-013): once the row is gone the wrapped
+ * refresh token is gone with it, and no amount of KMS access brings it back. The
+ * grant must therefore already have been revoked at Google before this is
+ * called, because after it there is nothing left to revoke WITH. That ordering is
+ * enforced by `disconnectAccount` in disconnect.mjs, which is the only sanctioned
+ * caller.
+ *
+ * Deleting the whole row also removes, in the same atomic operation, everything
+ * else the row carried: the scan lock (`scanInProgress`/`scanStartedAt`), the
+ * Gmail watermark (`lastHistoryId`), the schedule preferences and the settings.
+ * There is deliberately no partial "clear the token but keep the row" variant - a
+ * row with settings and no grant is exactly the "connected but broken" state the
+ * connection-status work exists to avoid.
+ *
+ * The return value reports what was OBSERVED, never what was assumed: `deleted`
+ * is true only when DynamoDB returned an old image, so a second disconnect
+ * reports `deleted: false` rather than claiming a deletion that did not happen.
+ *
+ * @param {string} userId
+ * @param {object} [deps]
+ * @param {(args: { tableName: string, key: object }) => Promise<object|null>} [deps.deleteItem]
+ * @param {string|null} [deps.tableName]
+ * @param {Record<string, string|undefined>} [deps.env]
+ * @returns {Promise<{ deleted: boolean, hadRefreshToken: boolean }>}
+ */
+export async function deleteConnection(userId, { deleteItem = ddbDeleteItem, tableName = null, env = process.env } = {}) {
+  const table = tableName || resolveTableName(env);
+  if (!table) throw new Error("deleteConnection: CALENDAR_CONNECTIONS_TABLE is not set");
+  if (!userId) throw new Error("deleteConnection: userId is required");
+
+  const previous = await deleteItem({ tableName: table, key: { userId } });
+  // Only two booleans leave this function. The old image itself carries the
+  // ciphertext and the key ARN and is dropped here (CONTAINMENT RULE).
+  const stripped = stripSecrets(previous);
+  return {
+    deleted: stripped !== null,
+    hadRefreshToken: stripped?.hasRefreshToken === true,
+  };
+}
