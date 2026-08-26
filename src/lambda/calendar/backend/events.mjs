@@ -305,6 +305,14 @@ export function clampConfidence(value) {
  * would break month queries; and it is hashed into `eventId`, so canonicalising is
  * what makes a re-scan idempotent.
  *
+ * NOT a day validator. It normalises; it does not verify that the day exists.
+ * `Date.parse` returns NaN only for an out-of-range MONTH - an out-of-range DAY
+ * rolls over silently, so "2026-02-31" comes back as a valid 2026-03-03. Callers
+ * that need to REFUSE an impossible day must compare the canonical `iso` back to
+ * their input; `parseRangeBound` is the worked example. The store path deliberately
+ * does not: a model-supplied date is being canonicalised for hashing and range
+ * keying, where a rolled-over day is still a usable instant.
+ *
  * @param {unknown} value
  * @returns {{ iso: string, epochMs: number, dateOnly: boolean }|null} null for
  *   anything unparseable - the caller records a skip.
@@ -997,10 +1005,22 @@ export function monthRangeFor(dateOnly) {
 /**
  * Parse one `from`/`to` bound.
  *
- * Strict "YYYY-MM-DD". The pattern alone is not enough - "2026-02-31" matches it
- * and is not a date - so the value is also parsed, which rejects impossible days
- * because ISO date parsing yields NaN for them rather than rolling over into
- * March the way `new Date(2026, 1, 31)` would.
+ * Strict "YYYY-MM-DD", and strict about the DAY as well as the shape.
+ *
+ * Two guards, because neither alone is sufficient:
+ *   - the pattern rejects anything that is not four-two-two digits;
+ *   - the ROUND TRIP rejects a well-shaped day that does not exist. Parsing alone
+ *     does not: `Date.parse("2026-02-31T00:00:00.000Z")` is NOT NaN, it silently
+ *     rolls over to 2026-03-03, and "2026-04-31" rolls to 2026-05-01. Only an
+ *     out-of-range MONTH ("2026-13-01") actually yields NaN. So the parsed instant
+ *     is re-rendered as a date and compared back to the input: a day that rolled
+ *     over comes back as a different string and is refused.
+ *
+ * Silently rolling over would be worse than a 400 twice over: the rolled instant
+ * would ship as a DynamoDB BETWEEN key bound for a day that does not exist, and
+ * with only `from` supplied the filled `to` would come from the NEXT month while
+ * the echoed `from` still read the old one, so the reported range and the span
+ * arithmetic would disagree with each other.
  *
  * @param {unknown} value
  * @param {string} field Named in the error so the UI can point at the input.
@@ -1009,7 +1029,10 @@ export function monthRangeFor(dateOnly) {
  */
 export function parseRangeBound(value, field) {
   const raw = String(value ?? "").trim();
-  if (!DATE_ONLY_PATTERN.test(raw) || !normaliseInstant(raw)) {
+  const parsed = DATE_ONLY_PATTERN.test(raw) ? normaliseInstant(raw) : null;
+  // `parsed &&` is not enough on its own - see the docblock. The canonical date
+  // must render back to exactly what was asked for.
+  if (!parsed || parsed.iso.slice(0, 10) !== raw) {
     throw new EventValidationError(`${field} must be a calendar date in YYYY-MM-DD form`, field);
   }
   return raw;
