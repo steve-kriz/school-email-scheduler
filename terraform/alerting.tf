@@ -54,10 +54,6 @@ locals {
   # anything loudly; the filter just silently stops matching.
   calendar_extraction_failed_token = "CALENDAR_EXTRACTION_FAILED"
   calendar_reauth_required_token   = "CALENDAR_REAUTH_REQUIRED"
-
-  # Alarms are created only when there is somewhere to send the notification.
-  # Written once here and reused by every alarm below.
-  calendar_alarms_enabled = var.Alert_SNS_ARN == "" ? 0 : 1
 }
 
 # -----------------------------------------------------------------------------
@@ -70,7 +66,7 @@ locals {
 # nobody is watching a browser when it runs - so CloudWatch is the only place
 # it ever surfaces.
 resource "aws_cloudwatch_metric_alarm" "calendar_lambda_errors" {
-  count = local.calendar_alarms_enabled
+  count = var.Alert_SNS_ARN == "" ? 0 : 1
 
   alarm_name          = "${local.name_prefix}-school-calendar-lambda-errors"
   namespace           = "AWS/Lambda"
@@ -101,7 +97,7 @@ resource "aws_cloudwatch_metric_alarm" "calendar_lambda_errors" {
 # throttled interactive request is a 502 at the ALB, so any throttle is a real
 # fault - never a normal operating condition for this workload.
 resource "aws_cloudwatch_metric_alarm" "calendar_lambda_throttles" {
-  count = local.calendar_alarms_enabled
+  count = var.Alert_SNS_ARN == "" ? 0 : 1
 
   alarm_name          = "${local.name_prefix}-school-calendar-lambda-throttles"
   namespace           = "AWS/Lambda"
@@ -158,7 +154,7 @@ resource "aws_cloudwatch_log_metric_filter" "calendar_extraction_failed" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "calendar_extraction_failures" {
-  count = local.calendar_alarms_enabled
+  count = var.Alert_SNS_ARN == "" ? 0 : 1
 
   alarm_name          = "${local.name_prefix}-school-calendar-extraction-failures"
   namespace           = aws_cloudwatch_log_metric_filter.calendar_extraction_failed.metric_transformation[0].namespace
@@ -216,7 +212,7 @@ resource "aws_cloudwatch_log_metric_filter" "calendar_reauth_required" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "calendar_reauth_required" {
-  count = local.calendar_alarms_enabled
+  count = var.Alert_SNS_ARN == "" ? 0 : 1
 
   alarm_name          = "${local.name_prefix}-school-calendar-reauth-required"
   namespace           = aws_cloudwatch_log_metric_filter.calendar_reauth_required.metric_transformation[0].namespace
@@ -250,7 +246,7 @@ resource "aws_cloudwatch_metric_alarm" "calendar_reauth_required" {
 # Both ALB dimensions are required, and both must be the metric-friendly
 # arn_suffix - not the ARN.
 resource "aws_cloudwatch_metric_alarm" "calendar_target_group_unhealthy_hosts" {
-  count = local.calendar_alarms_enabled
+  count = var.Alert_SNS_ARN == "" ? 0 : 1
 
   alarm_name          = "${local.name_prefix}-school-calendar-tg-unhealthy-hosts"
   namespace           = "AWS/ApplicationELB"
