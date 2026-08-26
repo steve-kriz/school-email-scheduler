@@ -175,6 +175,30 @@ function terraformCreatesSecretClaimsIn(
         'An empty list would excuse every object and disable the guard silently.'
     );
   }
+  // ...and every entry must be a non-blank string. A blank entry is the same
+  // failure one level down: escapeRegex on an empty term contributes the
+  // alternative "e?s?", which matches the empty string at every word boundary,
+  // so ONE blank entry in an otherwise correct list classifies every object as
+  // some other named resource, step 3 below is never reached, and the guard
+  // reports nothing at all for a runbook that plainly claims Terraform creates
+  // the secret. Emptiness is the only way an entry can widen the pattern --
+  // escapeRegex reduces every other entry to a literal -- so rejecting blanks
+  // here is exactly what keeps the compiled pattern incapable of matching
+  // everywhere. Validation lives here, before the pattern is compiled, rather
+  // than inside nonSecretResourcePattern, whose degenerate behaviour on a
+  // blank term is pinned by a test as the hazard being defended against.
+  const blankAt = nonSecretTerms.findIndex(
+    (term) => typeof term !== 'string' || term.trim() === ''
+  );
+  if (blankAt !== -1) {
+    throw new Error(
+      'terraformCreatesSecretClaimsIn: nonSecretTerms[' + blankAt + '] is ' +
+        JSON.stringify(nonSecretTerms[blankAt]) + '; every entry must be a ' +
+        'non-blank string. A blank entry compiles to a pattern that matches at ' +
+        'every word boundary, which excuses every object and disables the guard ' +
+        'as completely as an empty list does.'
+    );
+  }
   const nonSecretResource = nonSecretResourcePattern(nonSecretTerms);
   const prose = proseOf(documentText).replace(/\s+/g, ' ');
   const claims = [];
