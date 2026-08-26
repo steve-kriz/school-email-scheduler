@@ -363,6 +363,12 @@ resource "aws_iam_policy" "calendar_lambda_policy" {
           "dynamodb:DeleteItem",
           "dynamodb:Query",
           "dynamodb:BatchWriteItem",
+          # BatchGetItem is the re-scan lifecycle pre-read (TASK-009): before a
+          # scan overwrites event rows it reads their stored status back by key,
+          # so an event the user already acknowledged is not resurrected into the
+          # "needs attention" list. Without this action that read fails and the
+          # write silently degrades to TASK-007's behaviour.
+          "dynamodb:BatchGetItem",
           "dynamodb:DescribeTable"
         ]
         # DynamoDB evaluates index queries against the INDEX ARN, not the table
