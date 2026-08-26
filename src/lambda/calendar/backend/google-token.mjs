@@ -47,6 +47,7 @@ import {
   getRefreshToken as getStoredRefreshToken,
   updateConnection as updateStoredConnection,
 } from "./connections.mjs";
+import { ALARM_TOKENS, emitAlarm } from "./alarms.mjs";
 
 export { GOOGLE_TOKEN_ENDPOINT };
 
@@ -237,6 +238,9 @@ function defaultLog(message, fields = undefined) {
  * @param {() => number} [deps.nowSeconds] Epoch-seconds clock.
  * @param {Record<string, string|undefined>} [deps.env]
  * @param {(message: string, fields?: object) => void} [deps.log]
+ * @param {typeof emitAlarm} [deps.emitAlarm] Sink for the CloudWatch alarm
+ *   tokens in alarms.mjs; injectable so a test can assert the revocation alarm
+ *   without reading the console.
  * @returns {Promise<string>} A bearer access token.
  * @throws {ReauthRequiredError} Grant revoked, or no stored grant at all.
  * @throws {TokenRefreshError} Any other token-endpoint failure.
@@ -252,6 +256,7 @@ export async function getAccessToken(
     nowSeconds = () => Math.floor(Date.now() / 1000),
     env = process.env,
     log = null,
+    emitAlarm: raiseAlarm = emitAlarm,
   } = {}
 ) {
   if (typeof userId !== "string" || !userId) throw new Error("getAccessToken: userId is required");
@@ -326,6 +331,13 @@ export async function getAccessToken(
     if (status === 400 && oauthError === "invalid_grant") {
       await markReauthRequired(userId, { updateConnection, env, log: logLine });
       logLine("calendar.token.reauth_required", { userId, status });
+      // Alarm token for terraform/alerting.tf. Raised HERE - the one place a
+      // grant is actually observed to be revoked - so a single revocation
+      // produces a single event no matter which caller triggered the refresh.
+      // Deliberately NOT raised on the "no_refresh_token" path above: a user
+      // who never connected is not a revocation, and counting them would make
+      // the mass-revocation alarm fire on ordinary first-time traffic.
+      raiseAlarm(ALARM_TOKENS.REAUTH_REQUIRED, { userId, reason: "invalid_grant" });
       throw new ReauthRequiredError("Gmail authorisation has been revoked; the user must reconnect", {
         reason: "invalid_grant",
         userId,

@@ -108,6 +108,7 @@ import { fetchCandidateMessages, toDomainList, readGmailConfig, DEFAULT_SINCE_DA
 import { extractFromMessage } from "./anthropic.mjs";
 import { storeEvents } from "./events.mjs";
 import { ReauthRequiredError, REAUTH_SCAN_STATUS } from "./google-token.mjs";
+import { ALARM_TOKENS, emitAlarm } from "./alarms.mjs";
 
 /** Hard cap on a browser-triggered scan (ticket requirement): a full scan can
  * take minutes, which is longer than any reasonable request should keep a
@@ -292,6 +293,9 @@ async function safePatch(patchConnection, userId, patch, env, log) {
  * @param {typeof fetchCandidateMessages} [deps.fetchCandidateMessages]
  * @param {typeof extractFromMessage} [deps.extractFromMessage]
  * @param {typeof storeEvents} [deps.storeEvents]
+ * @param {typeof emitAlarm} [deps.emitAlarm] Sink for the CloudWatch alarm
+ *   tokens in alarms.mjs; injectable so a test can assert an alarm was raised
+ *   without reading the console.
  * @returns {Promise<{ status: string, messagesScanned: number, eventsCreated: number, eventsUpdated: number, skipped: number, truncated: boolean, errors: Array<{id: string, error: string}> }>}
  */
 export async function runScan({ userId, mode = "manual", maxMessages = null } = {}, deps = {}) {
@@ -310,6 +314,7 @@ export async function runScan({ userId, mode = "manual", maxMessages = null } = 
     fetchCandidateMessages: fetchMessages = fetchCandidateMessages,
     extractFromMessage: extractOne = extractFromMessage,
     storeEvents: persistEvents = storeEvents,
+    emitAlarm: raiseAlarm = emitAlarm,
     ...ioDeps
   } = deps;
 
@@ -408,6 +413,16 @@ export async function runScan({ userId, mode = "manual", maxMessages = null } = 
         // One unreadable message must not cost the batch - matching
         // gmail.mjs/anthropic.mjs's own "partial success is a success" rule.
         extractionErrors.push({ id: String(message?.id ?? ""), error: shortError(err) });
+        // ...but a run where EVERY message fails this way still reports success
+        // to the runtime, so the only way it becomes visible is this token and
+        // the alarm on it (terraform/alerting.tf). Error NAME only, never the
+        // message: a thrown Anthropic error can quote the prompt back.
+        raiseAlarm(ALARM_TOKENS.EXTRACTION_FAILED, {
+          userId,
+          mode,
+          messageId: String(message?.id ?? ""),
+          errorName: err?.name || "Error",
+        });
       }
       processed += 1;
     }
