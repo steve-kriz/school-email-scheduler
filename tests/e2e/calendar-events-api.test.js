@@ -276,16 +276,33 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
         table
       );
 
-      // parseRangeBound's docblock states this case explicitly: "the pattern
-      // alone is not enough - 2026-02-31 matches it and is not a date - so the
-      // value is also parsed, which rejects impossible days".
-      assert.equal(
-        response.statusCode,
-        400,
-        `2026-02-31 is not a date; sending it as a key bound was ${JSON.stringify(table.queries[0]?.ExpressionAttributeValues)}`
-      );
+      // 2026-02-31 matches YYYY-MM-DD and is not a day. Date.parse rolls it
+      // forward to 2026-03-03 rather than refusing it, so without an explicit
+      // round-trip check the API would send "2026-02-31T00:00:00.000Z" as a
+      // BETWEEN bound - an instant that does not exist.
+      //
+      // The message is a PLAIN STRING: an interpolated read of the request the
+      // route did NOT make is a diagnostic that only makes sense while the bug
+      // is present, and evaluating it eagerly is how such a message escapes the
+      // assertion it was meant to explain.
+      assert.equal(response.statusCode, 400, '2026-02-31 is not a date and must not reach DynamoDB as a key bound');
       assert.equal(body.field, 'from');
-      assert.equal(table.callCount, 0);
+      assert.equal(table.callCount, 0, 'an impossible day must be refused before any DynamoDB call');
+      assert.deepEqual(table.queries, [], 'no query may have been issued at all');
+    });
+
+    it('Given the real days on either side of an impossible one, When they are queried, Then they are accepted', async () => {
+      // The round-trip check must reject impossible days, not every date near a
+      // month boundary.
+      for (const [from, to] of [['2026-02-28', '2026-03-05'], ['2026-03-01', '2026-03-05'], ['2028-02-29', '2028-03-05']]) {
+        const table = new FakeEventsTable([]);
+        const { response } = await invoke(
+          albEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from, to } }),
+          table
+        );
+        assert.equal(response.statusCode, 200, `${from} is a real calendar day and must be accepted`);
+        assert.equal(table.queries.length, 1);
+      }
     });
   });
 

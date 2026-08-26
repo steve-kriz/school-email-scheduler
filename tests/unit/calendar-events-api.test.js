@@ -175,14 +175,41 @@ describe('TASK-009 unit: range resolution', () => {
   });
 
   it('refuses an impossible day rather than rolling it into the next month', () => {
-    // parseRangeBound's own docblock: "2026-02-31 matches [the pattern] and is
-    // not a date - so the value is also parsed, which rejects impossible days".
+    // parseRangeBound's docblock: the YYYY-MM-DD pattern alone is not enough,
+    // because "2026-02-31" matches it and is not a day. Date.parse does NOT
+    // reject those - it rolls 2026-02-31 forward to 2026-03-03 - so the bound
+    // has to round-trip through its own canonical form to be refused.
+    //
+    // The failure message is a PLAIN STRING on purpose. An interpolated
+    // `resolveRange({ from: '2026-02-31' })` here would be evaluated eagerly,
+    // before assert.throws ever runs, so once the bound is correctly refused the
+    // message expression itself would throw and escape the test - a diagnostic
+    // that can only be built while the bug is present.
+    for (const [value, field] of [['2026-02-31', 'from'], ['2026-04-31', 'to'], ['2026-02-30', 'from'], ['2026-06-31', 'to']]) {
+      assert.throws(
+        () => parseRangeBound(value, field),
+        (err) => {
+          assert.equal(err?.name, 'EventValidationError', `${value} must be refused as EventValidationError`);
+          assert.equal(err.field, field);
+          return true;
+        },
+        `${value} is not a calendar day and must not be accepted as a range bound`
+      );
+    }
+
+    // And the whole-range entry point refuses it too, rather than silently
+    // querying a bound that names a day which does not exist.
     assert.throws(
-      () => parseRangeBound('2026-02-31', 'from'),
-      (err) => err?.name === 'EventValidationError',
-      `2026-02-31 was accepted; resolveRange produced ${JSON.stringify(resolveRange({ from: '2026-02-31', to: '2026-03-05' }))}`
+      () => resolveRange({ from: '2026-02-31', to: '2026-03-05' }),
+      (err) => err?.name === 'EventValidationError' && err.field === 'from'
     );
-    assert.throws(() => parseRangeBound('2026-04-31', 'to'), (err) => err?.name === 'EventValidationError');
+
+    // The neighbouring real days still pass, so the check rejects impossible
+    // days rather than everything near a month boundary.
+    assert.equal(parseRangeBound('2026-02-28', 'from'), '2026-02-28');
+    assert.equal(parseRangeBound('2028-02-29', 'from'), '2028-02-29', 'a real leap day is still a date');
+    assert.equal(parseRangeBound('2026-03-01', 'from'), '2026-03-01');
+    assert.equal(parseRangeBound('2026-12-31', 'to'), '2026-12-31');
   });
 
   it('accepts a span of exactly the maximum and refuses one day more', () => {
