@@ -93,8 +93,89 @@ const NEGATED_OBJECT = /^\s*(nothing|none|no|neither|nor)\b/i;
 const SECRET_ANAPHOR =
   /^\s*(?:the|its|this|that|these|those)?\s*(?:value|values|contents?|payload|version)\b/i;
 
-/** Clauses in the given document that claim Terraform creates the secret. */
-function terraformCreatesSecretClaimsIn(documentText) {
+// The anaphor set above answers "is this object the secret?" only for the five
+// words it lists, so a writer who paraphrases the secret as "the credential",
+// "the config entry" or "the item" was making the exact false claim this guard
+// exists to catch and was reported on neither path (TASK-030). A synonym list
+// for the secret can never be complete -- there is always one more paraphrase
+// -- so the object test is inverted instead. It asks three questions, in this
+// order, and its default answer is to REPORT:
+//   1. Is the object provably the secret (the literal word, or an anaphor for
+//      it carried over a clause boundary)?          -> claim.
+//   2. Otherwise, is the object provably something else -- one of the
+//      non-secret resources this stack's Terraform genuinely does create?
+//                                                   -> not a claim.
+//   3. Otherwise the guard cannot classify the object at all
+//                                                   -> claim, reported.
+// Step 3 is the substance of the change: a guard that cannot decide must report
+// the claim rather than swallow it. Over-firing is visible in a diff and is
+// fixed by naming the resource; a missed false claim ships in the runbook and
+// costs an operator a ResourceNotFoundException on put-secret-value followed by
+// a failed terraform apply. "resource" is deliberately absent from the list
+// below: it names nothing in particular, so "Terraform creates the resource for
+// this stack" is undeterminable and must be reported.
+//
+// Every term is load-bearing on its own -- remove one and the fixture naming
+// that resource starts being reported as a false claim, so each entry is pinned
+// by a test that reddens when it is dropped. The list is a parameter of the
+// guard rather than a closed-over constant so that the pinning sweep can run in
+// memory, rebuilding the pattern from a filtered array, instead of mutating
+// this file's source text (a source-text mutation is what silently no-opped in
+// TASK-099).
+const NON_SECRET_RESOURCE_TERMS = Object.freeze([
+  'role',
+  'table',
+  'key',
+  'bucket',
+  'log group',
+  'alias',
+  'policy',
+  'manifest',
+  'schema'
+]);
+
+/** A pattern matching any of the given non-secret resource head nouns, tolerant
+ *  of a simple plural (`roles`, `aliases`) and of the whitespace collapsing
+ *  proseOf() has already done. Irregular plurals ("policies") are deliberately
+ *  not matched: an object this cannot classify is reported, which is the safe
+ *  direction. */
+function nonSecretResourcePattern(terms) {
+  const alternatives = terms.map(
+    (term) => `${term.trim().split(/\s+/).map(escapeRegex).join('\\s+')}e?s?`
+  );
+  return new RegExp(`\\b(?:${alternatives.join('|')})\\b`, 'i');
+}
+
+/** The object phrase of a verb: the text following it up to the first
+ *  preposition or conjunction, so a resource named in a trailing adjunct
+ *  ("...creates the credential for the events table") cannot be mistaken for
+ *  the object itself and excuse the claim. */
+function objectPhraseOf(afterText) {
+  return afterText
+    .slice(0, OBJECT_WINDOW)
+    .split(
+      /\b(?:for|from|in|into|on|onto|to|with|without|by|and|or|but|so|because|when|while|before|after|that|which|as|at|via|per)\b/i
+    )[0];
+}
+
+/** Clauses in the given document that claim Terraform creates the secret.
+ *
+ *  `nonSecretTerms` exists so the pinning sweep can rebuild the exclusion list
+ *  with one entry missing without touching this file on disk. It must never be
+ *  empty: an empty list compiles to a pattern that matches everywhere, which
+ *  would excuse every object and silently switch the guard off, so that is
+ *  rejected loudly rather than allowed to pass green. */
+function terraformCreatesSecretClaimsIn(
+  documentText,
+  { nonSecretTerms = NON_SECRET_RESOURCE_TERMS } = {}
+) {
+  if (!Array.isArray(nonSecretTerms) || nonSecretTerms.length === 0) {
+    throw new Error(
+      'terraformCreatesSecretClaimsIn: nonSecretTerms must be a non-empty array. ' +
+        'An empty list would excuse every object and disable the guard silently.'
+    );
+  }
+  const nonSecretResource = nonSecretResourcePattern(nonSecretTerms);
   const prose = proseOf(documentText).replace(/\s+/g, ' ');
   const claims = [];
 
@@ -118,19 +199,38 @@ function terraformCreatesSecretClaimsIn(documentText) {
       BACK_REFERRING_SUBJECT.test(before) && /\bterraform\b/i.test(priorClause);
     if (carriesTerraformSubject && NEGATED_OBJECT.test(after)) continue;
 
+    const passiveByTerraform = /\bby\b[^,]{0,25}\bterraform\b/i.test(
+      after.slice(0, SUBJECT_WINDOW)
+    );
     const governedByTerraform =
       /\bterraform\b/i.test(before.slice(-SUBJECT_WINDOW)) ||
-      /\bby\b[^,]{0,25}\bterraform\b/i.test(after.slice(0, SUBJECT_WINDOW)) ||
+      passiveByTerraform ||
       carriesTerraformSubject;
     if (!governedByTerraform) continue;
 
+    // Step 1: the object is provably the secret.
     const secretIsTheObject =
       /\bsecrets?\b/i.test(after.slice(0, OBJECT_WINDOW)) ||
       /\bsecrets?\b/i.test(before.slice(-OBJECT_WINDOW)) ||
       (carriesTerraformSubject &&
         SECRET_ANAPHOR.test(after) &&
         /\bsecrets?\b/i.test(priorClause));
-    if (!secretIsTheObject) continue;
+
+    // Step 2: the object is provably some other named resource. In the passive
+    // ("The DynamoDB table is created by Terraform") the object sits before the
+    // verb, so that window is consulted only on the passive path -- consulting
+    // it always would let a resource named anywhere earlier in the clause
+    // excuse a claim about the secret.
+    const objectIsAnotherResource =
+      !secretIsTheObject &&
+      (nonSecretResource.test(objectPhraseOf(after)) ||
+        (passiveByTerraform && nonSecretResource.test(before.slice(-OBJECT_WINDOW))));
+
+    // Step 3: neither -- the object could not be classified, so it is reported.
+    // This is the fail-closed default and is deliberately the opposite of the
+    // previous behaviour, which required the object to be provably the secret
+    // and swallowed everything else.
+    if (objectIsAnotherResource) continue;
 
     if (NEGATION_BEFORE_VERB.test(before)) continue;
 
@@ -771,6 +871,146 @@ describe('Google OAuth Configuration Preflight E2E Tests', () => {
               'true statement about what Terraform does create is reported as a false claim.'
           );
         });
+      });
+
+      // TASK-030: the paraphrase. Calling the secret "the credential", "the
+      // config entry", "the entry", "the item" or "the resource" is the same
+      // false claim, and a technical writer makes that substitution for
+      // readability without thinking about it. None of these were reported on
+      // either path while the object had to be *provably* the secret; they are
+      // reported now because an object the guard cannot classify is reported
+      // rather than swallowed. Each fixture is appended to an in-memory copy of
+      // the real runbook and run through the real guard.
+      const PARAPHRASED_OBJECT_CLAIM_FIXTURES = [
+        { object: 'credential', sentence: 'Terraform creates the credential for this stack.' },
+        {
+          object: 'config entry',
+          sentence: 'Terraform provisions the config entry for this stack.'
+        },
+        { object: 'entry', sentence: 'Terraform creates the entry for this stack.' },
+        { object: 'item', sentence: 'Terraform provisions the item for this stack.' },
+        { object: 'resource', sentence: 'Terraform creates the resource for this stack.' },
+        {
+          object: 'credential, carried across a clause boundary',
+          sentence: 'Terraform handles this secret. It creates the credential for you.'
+        },
+        {
+          object: 'entry, carried across a clause boundary',
+          sentence: 'Terraform handles this secret. It creates the entry for you.'
+        },
+        {
+          object: 'item, carried across a clause boundary',
+          sentence: 'Terraform handles this secret. It provisions the item for you.'
+        }
+      ];
+
+      PARAPHRASED_OBJECT_CLAIM_FIXTURES.forEach((fixture) => {
+        it(`Then a claim whose object is "${fixture.object}" is reported`, () => {
+          const baseline = runbookText();
+          assert.deepEqual(
+            terraformCreatesSecretClaimsIn(baseline),
+            [],
+            'Baseline runbook must be claim-free for this fixture to mean anything'
+          );
+
+          const mutated = `${baseline}\n\n${fixture.sentence}\n`;
+          const claims = terraformCreatesSecretClaimsIn(mutated);
+
+          assert.ok(
+            claims.length > 0,
+            `The guard missed "${fixture.sentence}". Paraphrasing the secret as ` +
+              `"${fixture.object}" must not be a way to put a false ownership claim ` +
+              'in the runbook with the suite green.'
+          );
+        });
+      });
+
+      // The fail-closed default itself, with an object that is in no list at
+      // all: neither the secret nor a resource the guard recognises. A guard
+      // that cannot decide must report.
+      it('Then an object the guard cannot classify at all is reported, not swallowed', () => {
+        const baseline = runbookText();
+        assert.deepEqual(
+          terraformCreatesSecretClaimsIn(baseline),
+          [],
+          'Baseline runbook must be claim-free for this fixture to mean anything'
+        );
+
+        const undeterminable = 'Terraform creates the thingamajig for this stack.';
+        const mutated = `${baseline}\n\n${undeterminable}\n`;
+
+        assert.ok(
+          terraformCreatesSecretClaimsIn(mutated).length > 0,
+          `The guard swallowed "${undeterminable}". An object it cannot classify ` +
+            'must be reported: that is the fail-closed default, and reverting it to ' +
+            '"report only what is provably the secret" is what let every paraphrase ' +
+            'through.'
+        );
+      });
+
+      // Per-term pinning for the exclusion list. The sweep rebuilds the list in
+      // memory with one entry filtered out and re-runs the real guard, so no
+      // source text is rewritten (a source-text mutation is the thing that
+      // silently no-opped elsewhere in this suite). The removal is asserted to
+      // have actually applied before either result is trusted.
+      const NON_SECRET_TERM_FIXTURES = {
+        role: 'Terraform reads the secret. It also creates the Lambda execution role.',
+        table: 'Terraform reads the secret. It also creates the DynamoDB table.',
+        key: 'Terraform reads the secret. It also creates the KMS key.',
+        bucket: 'Terraform reads the secret. It also creates the deployment bucket.',
+        'log group': 'Terraform reads the secret. It also creates the CloudWatch log group.',
+        alias: 'Terraform reads the secret. It also creates the KMS alias.',
+        policy: 'Terraform reads the secret. It also creates the IAM policy.',
+        manifest: 'Terraform reads the secret. It also creates the deployment manifest.',
+        schema: 'Terraform reads the secret. It also creates the events schema.'
+      };
+
+      it('Then every non-secret-resource term is individually pinned by a fixture', () => {
+        assert.deepEqual(
+          Object.keys(NON_SECRET_TERM_FIXTURES).slice().sort(),
+          NON_SECRET_RESOURCE_TERMS.slice().sort(),
+          'Every entry in NON_SECRET_RESOURCE_TERMS needs a fixture that names it, ' +
+            'or a term could be added or removed without any test noticing'
+        );
+
+        for (const term of NON_SECRET_RESOURCE_TERMS) {
+          const withoutTerm = NON_SECRET_RESOURCE_TERMS.filter((entry) => entry !== term);
+
+          // Prove the mutation applied before trusting either result below.
+          assert.equal(
+            withoutTerm.length,
+            NON_SECRET_RESOURCE_TERMS.length - 1,
+            `Removing "${term}" did not change the list length, so the sweep below ` +
+              'would compare a list against itself and pass vacuously'
+          );
+          assert.ok(
+            !withoutTerm.includes(term),
+            `"${term}" survived its own removal; the mutation did not apply`
+          );
+
+          const mutated = `${runbookText()}\n\n${NON_SECRET_TERM_FIXTURES[term]}\n`;
+
+          assert.deepEqual(
+            terraformCreatesSecretClaimsIn(mutated),
+            [],
+            `With the full list, "${NON_SECRET_TERM_FIXTURES[term]}" is accurate ` +
+              'documentation and must not be reported'
+          );
+          assert.ok(
+            terraformCreatesSecretClaimsIn(mutated, { nonSecretTerms: withoutTerm }).length > 0,
+            `Removing "${term}" from NON_SECRET_RESOURCE_TERMS changed nothing, so ` +
+              'that entry is unpinned and could be dropped silently'
+          );
+        }
+      });
+
+      it('Then an empty exclusion list is rejected rather than disabling the guard', () => {
+        assert.throws(
+          () => terraformCreatesSecretClaimsIn(runbookText(), { nonSecretTerms: [] }),
+          /non-empty array/,
+          'An empty list compiles to a pattern that matches everywhere, which would ' +
+            'excuse every object and switch the guard off silently. It must be loud.'
+        );
       });
 
       // The counterpart to the table above: tightening the carried object test
