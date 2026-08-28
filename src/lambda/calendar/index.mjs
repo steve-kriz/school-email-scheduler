@@ -1,4 +1,5 @@
-import { dirname } from "path";
+import { readFileSync } from "fs";
+import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 
 import {
@@ -63,7 +64,7 @@ import {
 
 // ESM has no __dirname/__filename. Derive them from import.meta.url, exactly as
 // the chatbot Lambda does, so frontend assets can be read relative to the
-// bundle root once TASK-010 adds them.
+// bundle root.
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
@@ -72,8 +73,7 @@ const ASSET_DIR = __dirname;
 
 // Cache frontend files in memory after first read. Lambda containers are reused
 // between invocations, so each asset is read from disk at most once per
-// container. Populated by the frontend ticket; declared here so the serve path
-// has somewhere to cache from day one.
+// container (see `readFrontendFile`).
 const fileCache = new Map();
 
 // --- Origin Allowlist ---
@@ -1812,6 +1812,171 @@ export async function routeEventsRequest(path, method, event, options = {}) {
   return null;
 }
 
+// --- Frontend static assets (TASK-010) ---
+// The browser app is served from this same Lambda, following the chatbot's
+// pattern: each file is read from disk on first request and cached in the
+// module-level `fileCache`, so a warm container reads each asset at most once.
+//
+// PATH TRAVERSAL IS ELIMINATED HERE, NOT FILTERED. No filesystem path is ever
+// built from any part of a request. The request path is looked up VERBATIM in
+// `FRONTEND_ROUTES` - not decoded, not normalised, not stripped of "..", not
+// lower-cased - and what it maps to is a filename literal from `FRONTEND_FILES`,
+// which is frozen at module load. `/calendar/../../etc/passwd` and its
+// percent-encoded twin `/calendar/%2e%2e%2f%2e%2e%2fetc%2fpasswd` are simply
+// keys that are not in the map, so both fall through to the router's 404 having
+// opened nothing. A filter would have to be right about every encoding of every
+// traversal; an allowlist has nothing to be right about.
+//
+// These files are served WITHOUT a session on purpose. They contain no user
+// data and no configuration: the pages render a "connect" state and fetch
+// everything they show from the authenticated API above, which is where the
+// tenancy boundary lives. Gating the HTML behind a session would mean the
+// signed-out user got a bare 401 body instead of the page that offers to sign
+// them in.
+
+/**
+ * The only files this service will ever read out of `frontend/`, and the
+ * content type each is served as.
+ *
+ * Frozen, and the sole source of both facts - a file that is not a key here
+ * cannot be read (see `readFrontendFile`) and has no content type to be served
+ * with, so adding a route without adding the file is a visible failure rather
+ * than a quiet one.
+ */
+const FRONTEND_FILES = Object.freeze({
+  "index.html": "text/html",
+  "settings.html": "text/html",
+  "app.js": "application/javascript",
+  "settings.js": "application/javascript",
+  "styles.css": "text/css",
+});
+
+/**
+ * Request path -> filename. Exact string keys; the path is never transformed
+ * before the lookup, and the value is never derived from the path.
+ */
+const FRONTEND_ROUTES = new Map([
+  ["/calendar", "index.html"],
+  ["/calendar/", "index.html"],
+  ["/calendar/index.html", "index.html"],
+  ["/calendar/settings", "settings.html"],
+  ["/calendar/settings/", "settings.html"],
+  ["/calendar/settings.html", "settings.html"],
+  ["/calendar/app.js", "app.js"],
+  ["/calendar/settings.js", "settings.js"],
+  ["/calendar/styles.css", "styles.css"],
+]);
+
+/**
+ * Content-Security-Policy for the two HTML pages.
+ *
+ * `script-src 'self'` is the point of it: the app deliberately has no inline
+ * script and no CDN dependency, so a policy that allows neither costs nothing
+ * and turns "an email title was rendered as markup" from a working injection
+ * into a blocked one. This is defence in depth behind the actual fix, which is
+ * that the client builds its DOM with textContent and never assembles markup
+ * from data - see frontend/app.js.
+ *
+ * `form-action 'none'` is safe because the settings form is submitted by script
+ * (which calls preventDefault) and never natively.
+ */
+const FRONTEND_CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self'",
+  "img-src 'self' data:",
+  "connect-src 'self'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'none'",
+].join("; ");
+
+/**
+ * Read an allowlisted frontend file, through the module-level cache.
+ *
+ * FAILS CLOSED, LOUDLY. A filename that is not an own key of `FRONTEND_FILES`
+ * never reaches `join`, so there is no path by which request-derived text could
+ * become a filesystem path even if a future route were wired up carelessly. The
+ * guard throws rather than returning null: a silent null would surface as an
+ * unexplained 404 with nothing in the log to say a lookup was refused.
+ *
+ * `join(assetDir, "frontend", filename)` is safe precisely because `filename` is
+ * one of five string literals from a frozen object - it is not user input that
+ * has been checked, it is not user input at all.
+ *
+ * @param {string} filename One of the `FRONTEND_FILES` keys.
+ * @param {object} [deps]
+ * @param {typeof readFileSync} [deps.readFile] Injectable disk read.
+ * @param {Map<string, string>} [deps.cache] Injectable cache (defaults to the
+ *   module-level `fileCache`, which is what makes the read happen once).
+ * @param {string} [deps.assetDir]
+ * @returns {string} File contents.
+ * @throws {Error} When the filename is not allowlisted, or the read fails.
+ */
+export function readFrontendFile(filename, { readFile = readFileSync, cache = fileCache, assetDir = ASSET_DIR } = {}) {
+  if (typeof filename !== "string" || !Object.prototype.hasOwnProperty.call(FRONTEND_FILES, filename)) {
+    // The name is truncated because in the impossible-but-guarded case where it
+    // came from a request, it is unvalidated input of unknown size.
+    throw new Error(`readFrontendFile: "${String(filename).slice(0, 64)}" is not an allowlisted frontend file`);
+  }
+  if (cache.has(filename)) return cache.get(filename);
+  const content = readFile(join(assetDir, "frontend", filename), "utf-8");
+  cache.set(filename, content);
+  return content;
+}
+
+/**
+ * Dispatch the frontend routes. Returns null when the request is not one of
+ * them, so the handler can carry on to the 404 path.
+ *
+ * Synchronous, unlike the other dispatchers: there is no await on this path, and
+ * `handler` awaits its result anyway.
+ *
+ * @param {string} path
+ * @param {string} method
+ * @param {object} _event Unused; kept so every dispatcher has one signature.
+ * @param {object} [options]
+ * @param {string|null} [options.origin]
+ * @param {string[]} [options.allowlist]
+ * @param {typeof readFileSync} [options.readFile] Injectable disk read.
+ * @param {Map<string, string>} [options.fileCache] Injectable cache.
+ * @param {string} [options.assetDir]
+ * @returns {object|null} ALB response, or null.
+ */
+export function routeFrontendRequest(path, method, _event, options = {}) {
+  const { origin = null, allowlist, readFile, fileCache: cache, assetDir } = options;
+
+  if (method !== "GET") return null;
+
+  // Verbatim lookup. Nothing is decoded or normalised first - see the section
+  // note above for why that is the security property and not an oversight.
+  const filename = FRONTEND_ROUTES.get(path);
+  if (filename === undefined) return null;
+
+  let content;
+  try {
+    content = readFrontendFile(filename, { readFile, cache, assetDir });
+  } catch (err) {
+    logBasic("[Calendar] Could not serve a frontend file:", {
+      filename,
+      errorName: err?.name || "Error",
+      errorMessage: err?.message || "",
+    });
+    return jsonResponse(500, { error: "Could not load the page" }, { origin, allowlist });
+  }
+
+  const contentType = FRONTEND_FILES[filename];
+  // nosniff on everything: a browser that guesses a content type can be talked
+  // into treating one of these as something it is not.
+  const headers = { "X-Content-Type-Options": ["nosniff"] };
+  if (contentType === "text/html") {
+    headers["Content-Security-Policy"] = [FRONTEND_CSP];
+    headers["Referrer-Policy"] = ["same-origin"];
+  }
+
+  return buildResponse(200, content, contentType, { origin, allowlist, headers });
+}
+
 /**
  * Narrow the handler's third argument down to route dependency overrides.
  *
@@ -1854,7 +2019,8 @@ function asRouteDeps(value) {
  *
  * The health check is what the target group polls, so it answers first and stays
  * deliberately open. The Google sign-in routes follow, then settings, the scan/
- * schedule endpoints and the events API. The frontend is added by TASK-010.
+ * schedule endpoints, the events API, and finally the frontend's static files -
+ * last, so no static path can ever shadow an API route.
  *
  * The third parameter is an injection seam, not part of the Lambda contract: the
  * runtime calls `handler(event, context, callback)` and its callback is a
@@ -1970,7 +2136,18 @@ export async function handler(event, context = undefined, deps = {}) {
     return finalise(eventsResponse);
   }
 
-  // 404 for everything else — the frontend assets arrive with TASK-010.
+  // The browser app itself (TASK-010): two HTML pages, two ES modules and a
+  // stylesheet, resolved through an exact-match allowlist. Anything that is not
+  // one of those nine paths returns null here and falls through to the 404
+  // below, having read nothing from disk - which is what makes
+  // `/calendar/../../etc/passwd` and its encoded forms uninteresting rather
+  // than dangerous.
+  const frontendResponse = routeFrontendRequest(path, method, event, { origin, ...routeDeps });
+  if (frontendResponse) {
+    return finalise(frontendResponse);
+  }
+
+  // 404 for everything else.
   return finalise(jsonResponse(404, { error: "Not found", path }, { origin }));
 }
 
@@ -1999,4 +2176,7 @@ export {
   SCAN_SCHEDULE_PATH,
   EVENTS_PATH,
   EVENTS_UPCOMING_PATH,
+  FRONTEND_FILES,
+  FRONTEND_ROUTES,
+  FRONTEND_CSP,
 };
