@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>School calendar settings</title>
+    <link rel="stylesheet" href="/calendar/styles.css" />
+  </head>
+  <body data-page="settings">
+    <header class="app-header">
+      <h1 class="app-title">Settings</h1>
+      <nav class="app-nav">
+        <a class="nav-link" href="/calendar">Back to the calendar</a>
+      </nav>
+    </header>
+
+    <main class="app-main app-main--narrow">
+      <section id="connection-state" class="connection-state" aria-live="polite"></section>
+
+      <div id="settings-body" class="settings-body" hidden>
+        <p id="settings-summary" class="settings-summary"></p>
+
+        <form id="settings-form" class="panel settings-panel" novalidate>
+          <h2>Your school</h2>
+
+          <div class="field">
+            <label class="field-label" for="school-name-input">School name</label>
+            <input id="school-name-input" class="field-input" type="text" autocomplete="off" />
+            <p id="error-schoolName" class="field-error" role="alert" hidden></p>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="search-domains-input">School email domains</label>
+            <textarea id="search-domains-input" class="field-input" rows="3"></textarea>
+            <p class="field-hint">
+              One domain per line, or separated by commas. These are the sender
+              domains we treat as school mail, so a public mail provider such as
+              gmail.com is not accepted.
+            </p>
+            <p id="error-searchDomains" class="field-error" role="alert" hidden></p>
+          </div>
+
+          <h2>Automatic scanning</h2>
+
+          <div class="field field--inline">
+            <input id="schedule-enabled-input" class="field-checkbox" type="checkbox" />
+            <label class="field-label" for="schedule-enabled-input">Scan my mail automatically</label>
+            <p id="error-scheduleEnabled" class="field-error" role="alert" hidden></p>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="schedule-frequency-input">How often</label>
+            <select id="schedule-frequency-input" class="field-input">
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+            </select>
+            <p id="error-scheduleFrequency" class="field-error" role="alert" hidden></p>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="schedule-day-input">On which day (weekly only)</label>
+            <select id="schedule-day-input" class="field-input">
+              <option value="0">Sunday</option>
+              <option value="1">Monday</option>
+              <option value="2">Tuesday</option>
+              <option value="3">Wednesday</option>
+              <option value="4">Thursday</option>
+              <option value="5">Friday</option>
+              <option value="6">Saturday</option>
+            </select>
+            <p id="error-dayOfWeek" class="field-error" role="alert" hidden></p>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="schedule-hour-input">At which hour (0&#8211;23)</label>
+            <input id="schedule-hour-input" class="field-input" type="number" min="0" max="23" step="1" />
+            <p id="error-scheduleHour" class="field-error" role="alert" hidden></p>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="timezone-input">Time zone</label>
+            <input id="timezone-input" class="field-input" type="text" autocomplete="off" />
+            <p id="error-timezone" class="field-error" role="alert" hidden></p>
+          </div>
+
+          <p id="error-form" class="field-error" role="alert" hidden></p>
+          <p id="settings-status" class="notice" role="status" aria-live="polite" hidden></p>
+
+          <button id="save-settings" type="submit" class="btn btn-primary">Save settings</button>
+        </form>
+      </div>
+    </main>
+
+    <script type="module" src="/calendar/settings.js"></script>
+  </body>
+</html>

@@ -1,0 +1,528 @@
+/*
+ * School calendar - browser styles.
+ *
+ * No web fonts, no imports and no remote URLs: the Lambda is the only origin
+ * this app is allowed to talk to, and the pages are served under a
+ * default-src 'self' Content-Security-Policy.
+ *
+ * ACCESSIBILITY NOTE, and it is a requirement rather than a preference: no
+ * state in this app is signalled by colour alone. Overdue rows carry a visible
+ * "Overdue" label, the current day carries a visible "Today" marker, and the
+ * empty states say in words that they are a good outcome. The colours below
+ * are reinforcement only, so the interface survives greyscale printing and
+ * colour-blind readers.
+ */
+
+:root {
+  --ink: #1c2430;
+  --ink-soft: #56636f;
+  --line: #d8dee6;
+  --surface: #ffffff;
+  --page: #f4f6f9;
+  --accent: #1f5f9c;
+  --accent-soft: #e6eff8;
+  --good: #1c6b45;
+  --good-soft: #e6f4ec;
+  --warn: #8a4b0c;
+  --warn-soft: #fbeee0;
+  --alarm: #93231f;
+  --alarm-soft: #fbe7e6;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 16px;
+  line-height: 1.45;
+}
+
+.app-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 1rem 1.5rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.app-title {
+  margin: 0;
+  font-size: 1.35rem;
+}
+
+.app-subtitle {
+  margin: 0;
+  color: var(--ink-soft);
+}
+
+.app-nav {
+  margin-left: auto;
+}
+
+.nav-link,
+.link {
+  color: var(--accent);
+}
+
+.app-main {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(260px, 1fr);
+  gap: 1.25rem;
+  padding: 1.25rem 1.5rem 3rem;
+  align-items: start;
+}
+
+.app-main--narrow {
+  grid-template-columns: minmax(0, 640px);
+}
+
+.connection-state {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.app-body {
+  display: contents;
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+/* --- Connection / prompt cards --- */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left-width: 6px;
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.card-title {
+  margin: 0 0 0.35rem;
+  font-size: 1.1rem;
+}
+
+.card-body {
+  margin: 0 0 0.75rem;
+  color: var(--ink-soft);
+}
+
+.card--connect {
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.card--reauth {
+  border-left-color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.card--school {
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.card--identity {
+  border-left-color: var(--line);
+}
+
+/* --- Buttons and links-as-buttons --- */
+
+.btn {
+  font: inherit;
+  padding: 0.4rem 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.btn:hover {
+  border-color: var(--accent);
+}
+
+.btn[disabled] {
+  opacity: 0.6;
+  cursor: progress;
+}
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+.btn-link {
+  display: inline-block;
+  font: inherit;
+  padding: 0.4rem 0.85rem;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent);
+  color: #ffffff;
+  text-decoration: none;
+}
+
+.btn-small {
+  font-size: 0.85rem;
+  padding: 0.25rem 0.6rem;
+}
+
+/* --- Calendar --- */
+
+.calendar-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.month-heading {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-left: auto;
+}
+
+.calendar-weekdays,
+.calendar-week {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 2px;
+}
+
+/* Weeks really are rows: the grid stacks them, each one a seven-column grid. */
+.calendar-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+}
+
+.day-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.25rem;
+}
+
+.chip-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.attention-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+
+.detail-value {
+  overflow-wrap: anywhere;
+}
+
+.settings-summary-name {
+  overflow-wrap: anywhere;
+}
+
+.weekday {
+  padding: 0.25rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--ink-soft);
+  text-align: center;
+}
+
+.day-cell {
+  min-height: 96px;
+  padding: 0.3rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.day-cell--outside {
+  background: var(--page);
+  color: var(--ink-soft);
+}
+
+.day-cell--today {
+  border-color: var(--accent);
+  border-width: 2px;
+  background: var(--accent-soft);
+}
+
+.day-number {
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+/* Paired with the visible "Today" text marker - never colour alone. */
+.day-today-marker {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.all-day-band {
+  display: grid;
+  gap: 2px;
+}
+
+.chip {
+  font: inherit;
+  font-size: 0.78rem;
+  text-align: left;
+  padding: 0.15rem 0.3rem;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  width: 100%;
+}
+
+.chip--all-day {
+  border-left-color: var(--good);
+  background: var(--good-soft);
+}
+
+.chip--attention {
+  border-left-color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.chip-time {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-soft);
+  margin-right: 0.3rem;
+}
+
+.more-toggle {
+  font: inherit;
+  font-size: 0.75rem;
+  border: none;
+  background: none;
+  color: var(--accent);
+  text-align: left;
+  padding: 0.1rem 0.2rem;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+/* --- Attention panel --- */
+
+.attention-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.attention-item {
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  border-radius: 6px;
+  padding: 0.5rem;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.attention-item--overdue {
+  border-left-color: var(--alarm);
+  background: var(--alarm-soft);
+}
+
+.attention-title {
+  font-weight: 600;
+}
+
+.attention-meta {
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+.attention-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.badge {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.05rem 0.35rem;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+}
+
+.badge--overdue {
+  color: var(--alarm);
+}
+
+.badge--due {
+  color: var(--ink-soft);
+}
+
+/* --- Detail panel --- */
+
+.detail-panel {
+  grid-column: 1 / -1;
+}
+
+.detail-title {
+  margin: 0 0 0.5rem;
+}
+
+.detail-row {
+  margin: 0 0 0.35rem;
+}
+
+.detail-label {
+  font-weight: 600;
+  margin-right: 0.35rem;
+}
+
+.detail-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+/* --- Messages --- */
+
+.empty-state {
+  margin: 0.75rem 0 0;
+  padding: 0.75rem;
+  border-radius: 6px;
+  color: var(--good);
+  background: var(--good-soft);
+  border: 1px solid var(--good);
+}
+
+.notice {
+  margin: 0.5rem 0 0;
+  padding: 0.5rem 0.65rem;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--page);
+}
+
+.notice--info {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.notice--problem {
+  border-color: var(--alarm);
+  background: var(--alarm-soft);
+}
+
+.scan-message {
+  margin: 0 0 0.5rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--page);
+}
+
+/* --- Settings form --- */
+
+.settings-body {
+  display: grid;
+  gap: 1rem;
+}
+
+.settings-summary {
+  margin: 0;
+  color: var(--ink-soft);
+}
+
+.settings-panel {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.field {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.field--inline {
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.field-label {
+  font-weight: 600;
+}
+
+.field-input {
+  font: inherit;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  width: 100%;
+}
+
+.field-checkbox {
+  width: auto;
+}
+
+.field-hint {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+}
+
+.field-error {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--alarm);
+}
+
+[hidden] {
+  display: none !important;
+}
+
+@media (max-width: 860px) {
+  .app-main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

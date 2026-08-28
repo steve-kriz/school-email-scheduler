@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>School calendar</title>
+    <link rel="stylesheet" href="/calendar/styles.css" />
+  </head>
+  <!--
+    data-page is what app.js boots on. app.js is also imported by settings.js
+    for its shared helpers, so the calendar bootstrap must not run there.
+  -->
+  <body data-page="calendar">
+    <header class="app-header">
+      <h1 class="app-title">School calendar</h1>
+      <p id="school-name" class="app-subtitle"></p>
+      <nav class="app-nav">
+        <a class="nav-link" href="/calendar/settings">Settings</a>
+      </nav>
+    </header>
+
+    <main class="app-main">
+      <!--
+        Connection state: the connect prompt, the "tell us your school" prompt
+        and the reconnect banner all render here. Every node inside is built by
+        app.js with createElement/textContent - no markup is ever assembled
+        from a string, here or there.
+      -->
+      <section id="connection-state" class="connection-state" aria-live="polite"></section>
+
+      <div id="app-body" class="app-body" hidden>
+        <section class="panel calendar-panel" aria-labelledby="month-heading">
+          <div class="calendar-toolbar">
+            <h2 id="month-heading" class="month-heading">Loading&#8230;</h2>
+            <div class="toolbar-actions">
+              <button id="prev-month" type="button" class="btn">Previous month</button>
+              <button id="today" type="button" class="btn">Today</button>
+              <button id="next-month" type="button" class="btn">Next month</button>
+              <button id="scan-now" type="button" class="btn btn-primary">Scan now</button>
+            </div>
+          </div>
+
+          <p id="scan-message" class="scan-message" role="status" aria-live="polite" hidden></p>
+
+          <div id="calendar-weekdays" class="calendar-weekdays" aria-hidden="true"></div>
+          <div id="calendar-grid" class="calendar-grid" role="grid" aria-labelledby="month-heading"></div>
+
+          <p id="calendar-empty" class="empty-state empty-state--success" hidden>
+            No events this month. Nothing to keep track of just yet.
+          </p>
+          <p id="calendar-truncated" class="notice notice--info" hidden></p>
+        </section>
+
+        <aside class="panel attention-panel" aria-labelledby="attention-heading">
+          <h2 id="attention-heading">Needs attention</h2>
+          <p id="attention-message" class="notice" role="status" aria-live="polite" hidden></p>
+          <ul id="attention-list" class="attention-list"></ul>
+          <p id="attention-empty" class="empty-state empty-state--success" hidden>
+            Nothing needs attention. You are all caught up.
+          </p>
+        </aside>
+      </div>
+
+      <section id="event-detail" class="panel detail-panel" hidden aria-labelledby="detail-title"></section>
+    </main>
+
+    <script type="module" src="/calendar/app.js"></script>
+  </body>
+</html>
