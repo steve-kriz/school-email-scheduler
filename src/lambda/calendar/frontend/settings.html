@@ -88,6 +88,84 @@
 
           <button id="save-settings" type="submit" class="btn btn-primary">Save settings</button>
         </form>
+
+        <!--
+          DISCONNECT GMAIL (TASK-013).
+
+          Two irreversible things can happen here and the control says both out
+          loud, because "Disconnect" on its own tells a parent nothing about what
+          becomes of the calendar they have been using:
+
+            1. This app's access to Gmail is revoked at Google. Unconditional -
+               it is the whole point of the control, and it is stated first.
+            2. The extracted events are EITHER kept OR permanently deleted. That
+               is an explicit choice, not an assumption, and "keep" is the
+               preselected one. Nothing here defaults to destroying data.
+
+          The submit button stays disabled until the exact phrase is typed. The
+          phrase differs between the two choices (see settings.js) so a user who
+          switches to "delete everything" after typing the keep-phrase has to
+          retype - the confirmation cannot be inherited from the milder option.
+        -->
+        <section id="disconnect-gmail" class="settings__section" aria-labelledby="disconnect-heading">
+          <h2 id="disconnect-heading">Disconnect Gmail</h2>
+
+          <p id="disconnect-summary">
+            Disconnecting revokes this app's access to your Gmail account at Google. We stop reading your
+            mail immediately and the stored authorisation is deleted, so no future scans can run. To use
+            the calendar again you would have to connect Gmail from scratch.
+          </p>
+
+          <fieldset class="disconnect__choice">
+            <legend>What should happen to the events already in your calendar?</legend>
+
+            <p class="disconnect__option">
+              <input
+                type="radio"
+                id="disconnect-events-keep"
+                name="disconnect-events"
+                value="keep"
+                checked
+              />
+              <label for="disconnect-events-keep">
+                <strong>Keep my calendar.</strong>
+                Revoke access to Gmail, but keep the events that have already been extracted. You can
+                still read them; nothing new will be added.
+              </label>
+            </p>
+
+            <p class="disconnect__option">
+              <input type="radio" id="disconnect-events-delete" name="disconnect-events" value="delete" />
+              <label for="disconnect-events-delete">
+                <strong>Delete my calendar as well.</strong>
+                Revoke access to Gmail and permanently delete every event this app extracted from your
+                mail. This cannot be undone and there is no backup to restore from.
+              </label>
+            </p>
+          </fieldset>
+
+          <p class="disconnect__confirm">
+            <label for="disconnect-confirm">
+              Type <code id="disconnect-confirm-phrase">DISCONNECT</code> to confirm
+            </label>
+            <input
+              type="text"
+              id="disconnect-confirm"
+              name="disconnect-confirm"
+              autocomplete="off"
+              autocapitalize="off"
+              autocorrect="off"
+              spellcheck="false"
+              aria-describedby="disconnect-summary"
+            />
+          </p>
+
+          <p>
+            <button type="button" id="disconnect-submit" disabled>Disconnect Gmail</button>
+          </p>
+
+          <p id="disconnect-status" role="status" aria-live="polite"></p>
+        </section>
       </div>
     </main>
 

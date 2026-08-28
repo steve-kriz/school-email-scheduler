@@ -1840,3 +1840,241 @@ export function applyPreservedLifecycle(item, existing) {
     createdAt: existing.createdAt ?? item.createdAt,
   };
 }
+
+/* ===========================================================================
+ * ERASING A USER'S EVENTS (TASK-013)
+ * ---------------------------------------------------------------------------
+ * The disconnect route offers to delete everything this app extracted from a
+ * user's mail. That is unrecoverable, so the code below is written to the
+ * opposite standard from the read paths above: a read that quietly returns a
+ * short page is a bug you can see, whereas a DELETE that quietly stops half way
+ * and still reports success is a bug that looks exactly like success.
+ *
+ * Three rules follow from that, and none of them are optional:
+ *   1. NOTHING IS INFERRED. `deleted` counts keys DynamoDB confirmed it wrote,
+ *      chunk length minus `UnprocessedItems` - never "we sent 25, so 25 went".
+ *   2. PAGING RUNS TO EXHAUSTION. The read paths stop at MAX_QUERY_PAGES and
+ *      report `truncated`; stopping early here would leave rows behind, so this
+ *      follows `LastEvaluatedKey` until DynamoDB stops returning one. The
+ *      MAX_DELETE_PAGES bound below is a runaway guard, not a page size, and
+ *      hitting it sets `complete: false`.
+ *   3. INCOMPLETE IS REPORTED, NOT SWALLOWED. Unprocessed keys that survived
+ *      every retry, and a page cap that was actually reached, both clear
+ *      `complete`. The route surfaces that to the user rather than answering a
+ *      plain "deleted".
+ *
+ * Tenancy is the partition key here as everywhere else in this module: the keys
+ * to delete come from a Query whose hash key is the SESSION-derived userId, so
+ * one user's erase cannot address another user's partition. There is no Scan and
+ * no application-code filter on userId.
+ * =========================================================================== */
+
+/**
+ * Runaway guard on the erase loop, not a page size.
+ *
+ * Every page deletes the rows it returned, so the loop terminates on its own;
+ * this bound exists only so a pathological partition (or a query dependency that
+ * keeps handing back the same `LastEvaluatedKey`) cannot spin a Lambda until its
+ * timeout. Deliberately an order of magnitude above MAX_QUERY_PAGES: reaching it
+ * means rows remain, which is reported as `complete: false` rather than being
+ * quietly accepted the way a truncated read is.
+ */
+export const MAX_DELETE_PAGES = 200;
+
+/**
+ * Query parameters that enumerate every event key a user owns.
+ *
+ * Uses StartsAtIndex with a hash-key-only condition and NO range condition, so
+ * the whole of the user's history is in scope rather than one date window.
+ *
+ * `ProjectionExpression` is the two table key attributes and nothing else. A
+ * delete needs keys; pulling the full row would drag titles, descriptions,
+ * subjects and senders through a code path whose only job is to destroy them,
+ * and put them one careless log line away from CloudWatch. Both names go through
+ * placeholders for consistency with the other builders here.
+ *
+ * Pure and exported so the projection, and the absence of a range condition, are
+ * assertable with the SDK absent.
+ *
+ * @param {{ tableName: string, userId: string, exclusiveStartKey?: object|null }} args
+ * @returns {object} QueryCommand input.
+ */
+export function buildUserEventKeysQueryParams({ tableName, userId, exclusiveStartKey = null }) {
+  const params = {
+    TableName: tableName,
+    IndexName: STARTS_AT_INDEX,
+    KeyConditionExpression: "#userId = :userId",
+    ProjectionExpression: "#userId, #eventId",
+    ExpressionAttributeNames: { "#userId": "userId", "#eventId": "eventId" },
+    ExpressionAttributeValues: { ":userId": userId },
+    ScanIndexForward: true,
+  };
+  if (exclusiveStartKey) params.ExclusiveStartKey = exclusiveStartKey;
+  return params;
+}
+
+/**
+ * Real DynamoDB BatchWriteItem carrying DeleteRequests. Default `batchDelete`.
+ *
+ * The mirror image of `ddbBatchWrite`: same 25-key cap, same `UnprocessedItems`
+ * envelope, unwrapped to bare keys so the retry loop above it never has to know
+ * the request shape. UnprocessedItems is NOT an error - it is how DynamoDB
+ * reports partial throttling, and ignoring it here silently leaves rows behind
+ * after telling the user their data was erased.
+ *
+ * @param {{ tableName: string, keys: Array<{ userId: string, eventId: string }> }} args
+ * @returns {Promise<{ unprocessed: object[] }>}
+ */
+export async function ddbBatchDelete({ tableName, keys }) {
+  const { BatchWriteCommand } = await import("@aws-sdk/lib-dynamodb");
+  const client = await getDocumentClient();
+  const result = await client.send(
+    new BatchWriteCommand({
+      RequestItems: {
+        [tableName]: keys.map(({ userId, eventId }) => ({ DeleteRequest: { Key: { userId, eventId } } })),
+      },
+    })
+  );
+  const remaining = result?.UnprocessedItems?.[tableName] || [];
+  return { unprocessed: remaining.map((request) => request?.DeleteRequest?.Key).filter(Boolean) };
+}
+
+/**
+ * Reduce a queried index item to the table key, or null when it cannot be one.
+ *
+ * A row missing either key attribute cannot be deleted, and pretending otherwise
+ * would inflate the count. The caller treats a rejected item as "rows remain".
+ *
+ * @param {object} item
+ * @returns {{ userId: string, eventId: string }|null}
+ */
+function toEventKey(item) {
+  const userId = item?.userId;
+  const eventId = item?.eventId;
+  if (typeof userId !== "string" || !userId) return null;
+  if (typeof eventId !== "string" || !eventId) return null;
+  return { userId, eventId };
+}
+
+/**
+ * Delete EVERY event belonging to one user.
+ *
+ * Pages `buildUserEventKeysQueryParams` through `LastEvaluatedKey` to
+ * exhaustion, deleting each page in BatchWriteItem chunks of at most 25 and
+ * retrying `UnprocessedItems` with the same jittered backoff `putEvents` uses.
+ * Every wait goes through the INJECTED `sleep` and jitters through the INJECTED
+ * `random`, so a test drives every retry instantly and deterministically.
+ *
+ * `complete` is the honest answer to "is their data gone?" and is false when
+ * anything at all was left behind: keys still unprocessed after `maxAttempts`,
+ * an item the index returned without a usable key, or the MAX_DELETE_PAGES
+ * runaway guard being reached. Callers must report it rather than reducing the
+ * result to its count.
+ *
+ * @param {object} args
+ * @param {string} args.userId Session-derived. Never request-supplied.
+ * @param {string|null} [args.tableName]
+ * @param {object} [deps]
+ * @param {(params: object) => Promise<{ items: object[], lastEvaluatedKey: object|null }>} [deps.query]
+ * @param {(args: { tableName: string, keys: object[] }) => Promise<{ unprocessed: object[] }>} [deps.batchDelete]
+ * @param {(ms: number) => Promise<void>} [deps.sleep]
+ * @param {() => number} [deps.random]
+ * @param {number} [deps.maxAttempts]
+ * @param {number} [deps.baseDelayMs]
+ * @param {number} [deps.maxDelayMs]
+ * @param {number} [deps.maxPages]
+ * @param {Record<string, string|undefined>} [deps.env]
+ * @param {(message: string, fields?: object) => void} [deps.log]
+ * @returns {Promise<{ deleted: number, pages: number, requests: number, unprocessed: object[], complete: boolean }>}
+ */
+export async function deleteEventsForUser(
+  { userId, tableName = null } = {},
+  {
+    query = ddbQuery,
+    batchDelete = ddbBatchDelete,
+    sleep = defaultSleep,
+    random = Math.random,
+    maxAttempts = MAX_BATCH_ATTEMPTS,
+    baseDelayMs = RETRY_BASE_DELAY_MS,
+    maxDelayMs = RETRY_MAX_DELAY_MS,
+    maxPages = MAX_DELETE_PAGES,
+    env = process.env,
+    log = null,
+  } = {}
+) {
+  if (typeof userId !== "string" || !userId) throw new Error("deleteEventsForUser: userId is required");
+  const logLine = typeof log === "function" ? log : makeLogger(env);
+  const table = requireTable(tableName, env, "deleteEventsForUser");
+  const pageCap = Math.max(1, Math.floor(Number(maxPages)) || MAX_DELETE_PAGES);
+
+  let deleted = 0;
+  let pages = 0;
+  let requests = 0;
+  let complete = true;
+  const leftOver = [];
+  let exclusiveStartKey = null;
+
+  for (;;) {
+    pages += 1;
+    const page = await query(buildUserEventKeysQueryParams({ tableName: table, userId, exclusiveStartKey }));
+
+    const keys = [];
+    for (const item of page?.items || []) {
+      const key = toEventKey(item);
+      if (key) keys.push(key);
+      // An index item with no usable table key cannot be deleted. That is a row
+      // that survives the erase, so the result must not claim completeness.
+      else complete = false;
+    }
+
+    for (const chunk of chunkItems(keys)) {
+      let pending = chunk;
+      let attempt = 0;
+
+      while (pending.length > 0 && attempt < maxAttempts) {
+        attempt += 1;
+        requests += 1;
+        const result = await batchDelete({ tableName: table, keys: pending });
+        const unprocessed = Array.isArray(result?.unprocessed) ? result.unprocessed.filter(Boolean) : [];
+        // Counted from what DynamoDB did NOT hand back, never from what was sent.
+        deleted += pending.length - unprocessed.length;
+
+        if (unprocessed.length === 0) break;
+        if (attempt >= maxAttempts) {
+          pending = unprocessed;
+          break;
+        }
+        const delayMs = backoffDelayMs({ attempt, baseDelayMs, maxDelayMs, random });
+        logLine("calendar.events.delete_unprocessed_retry", { userId, count: unprocessed.length, attempt, delayMs });
+        await sleep(delayMs);
+        pending = unprocessed;
+      }
+
+      if (pending.length > 0 && attempt >= maxAttempts) leftOver.push(...pending);
+    }
+
+    exclusiveStartKey = page?.lastEvaluatedKey || null;
+    if (!exclusiveStartKey) break;
+    if (pages >= pageCap) {
+      // Rows remain and we stopped looking. Say so; do not report a clean erase.
+      complete = false;
+      logLine("calendar.events.delete_page_cap", { userId, pages, deleted });
+      break;
+    }
+  }
+
+  if (leftOver.length > 0) complete = false;
+
+  // Counts and ids only - no title, description, subject or sender has been read
+  // into this function at all (see the key-only ProjectionExpression above).
+  logLine("calendar.events.deleted_for_user", {
+    userId,
+    deleted,
+    pages,
+    requests,
+    unprocessed: leftOver.length,
+    complete,
+  });
+
+  return { deleted, pages, requests, unprocessed: leftOver, complete };
+}

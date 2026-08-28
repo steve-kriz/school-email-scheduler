@@ -91,11 +91,20 @@ suite was concurrently reading the working tree. `npm-scripts.test.js` and
 `dynamodb-calendar.test.js` mutates fixtures on disk — all three would be exposed to
 a file being rewritten underneath them.
 
-Recorded here rather than as its own ticket because it is unreproduced and shares
-this ticket's root cause (line-ending conversion). If it recurs — especially in CI —
-it deserves separate characterisation with the failing leaf names captured. Anyone
-fixing this ticket should consider whether normalising line endings repo-wide would
-eliminate the race as a side effect.
+**SUPERSEDED — a better explanation has since emerged.** TASK-030's fix coder
+reproduced a concrete contention flake: `tests/e2e/terraform-resolver.test.js` and
+`tests/e2e/terraform-scaffold.test.js` both shell out to `terraform validate`
+against the same directory, and under parallel `node --test` one times out at 30s
+and takes the other's assertion down with it — producing **exactly two** extra
+failures, the same +2 signature as the anomaly above. That is now raised as
+**TASK-103**, and it is the stronger hypothesis: it is reproduced, it is
+deterministic under contention, and serial re-runs clear it.
+
+The line-ending race described here remains *possible* but unproven and is no
+longer the leading explanation. Whoever fixes TASK-103 should confirm or rule out
+this anomaly and record the answer in both tickets. Anyone fixing the present
+ticket should still consider whether normalising line endings repo-wide would
+remove a class of hazard as a side effect.
 
 ## Acceptance Criteria
 - [ ] `tests/unit/dynamodb-calendar.test.js` passes on a fresh CRLF checkout and on

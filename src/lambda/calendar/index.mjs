@@ -33,6 +33,7 @@ import {
   serializeSessionCookie,
 } from "./backend/session.mjs";
 import { connectionUserId, getConnection, putConnection, toPublicJson } from "./backend/connections.mjs";
+import { disconnectAccount, RevocationError } from "./backend/disconnect.mjs";
 import {
   loadSettings,
   parseJsonBody,
@@ -391,6 +392,7 @@ const AUTH_START_PATH = "/calendar/api/auth/google/start";
 const AUTH_CALLBACK_PATH = "/calendar/api/auth/google/callback";
 const AUTH_LOGOUT_PATH = "/calendar/api/auth/logout";
 const AUTH_ME_PATH = "/calendar/api/auth/me";
+const AUTH_DISCONNECT_PATH = "/calendar/api/auth/disconnect";
 
 /**
  * Percent-decode an ALB query-string value.
@@ -682,6 +684,228 @@ export async function handleAuthLogout(event, options = {}) {
   });
 }
 
+/** The only body field the disconnect route reads. */
+const DELETE_EVENTS_FIELD = "deleteEvents";
+
+/**
+ * Read `deleteEvents` out of a parsed disconnect body.
+ *
+ * Absent means FALSE. The destructive choice is never implied - a client that
+ * forgot the field, or sent an empty body, keeps its calendar.
+ *
+ * A field that is present but not a boolean is a 400, not a silent false. "0",
+ * "no", `null` and `{}` all coerce to something under truthiness rules, and a
+ * route that quietly reinterprets them is one careless client away from either
+ * erasing a calendar nobody asked to erase or refusing to erase one that was.
+ * Saying so is cheap; guessing is not.
+ *
+ * `SettingsValidationError` is reused rather than a new class invented for one
+ * field: it is this file's established "the caller sent something unusable"
+ * signal, its message is client-safe by construction, and the 400 mapping below
+ * is the same one every other route uses.
+ *
+ * @param {object} payload Parsed JSON body.
+ * @returns {boolean}
+ * @throws {SettingsValidationError} When present and not a boolean.
+ */
+function readDeleteEventsFlag(payload) {
+  const value = payload?.[DELETE_EVENTS_FIELD];
+  if (value === undefined || value === null) return false;
+  if (typeof value !== "boolean") {
+    // The offending value is never echoed - it is unvalidated input.
+    throw new SettingsValidationError(DELETE_EVENTS_FIELD, "deleteEvents must be true or false");
+  }
+  return value;
+}
+
+/**
+ * POST /calendar/api/auth/disconnect - revoke the Gmail grant and delete data.
+ *
+ * The real counterpart to `logout`, which only expires a cookie. This revokes
+ * the app's access at Google, deletes the connection row (and with it the only
+ * copy of the wrapped refresh token), optionally erases every extracted event,
+ * and then ends the browser session.
+ *
+ * The ordering, the fail-closed revocation and the partial-failure reasoning all
+ * live in backend/disconnect.mjs; this function only maps them onto HTTP:
+ *
+ *   401 - no valid session. Resolved BEFORE the body is parsed, so an
+ *         unauthenticated caller learns nothing about the payload shape.
+ *   400 - `deleteEvents` present but not a boolean, or an unparseable body.
+ *   502 - Google refused the revocation (5xx, network error, an unrecognised
+ *         4xx). NOTHING was deleted and the session cookie is deliberately NOT
+ *         cleared: the user is still connected, the failure is retryable, and
+ *         signing them out of a connection that still exists would hide it from
+ *         them. This is the one case where doing less is the safe answer -
+ *         deleting the stored token here would leave a live grant on the user's
+ *         Google account that this app could never revoke again.
+ *   200 - done, with the counts and the cleared session cookie.
+ *
+ * The 200 body reports what was OBSERVED: `connectionDeleted` comes from
+ * DynamoDB's old image, `eventsDeleted` counts only keys DynamoDB confirmed, and
+ * `eventsDeleteComplete` is false whenever rows may remain. A deletion route that
+ * answers a confident "done" it did not verify is worse than one that fails.
+ *
+ * @param {object} event
+ * @param {object} [options]
+ * @param {string|null} [options.origin]
+ * @param {string[]} [options.allowlist]
+ * @param {Record<string, string|undefined>} [options.env]
+ * @param {number} [options.nowSeconds]
+ * @param {typeof disconnectAccount} [options.disconnectAccount] Injectable orchestration.
+ * @param {Function} [options.getConnection] Injectable storage read.
+ * @param {Function} [options.getRefreshToken] Injectable token read.
+ * @param {Function} [options.deleteConnection] Injectable row delete.
+ * @param {Function} [options.deleteEventsForUser] Injectable event erase.
+ * @param {Function} [options.deleteScanSchedule] Injectable schedule delete.
+ * @param {Function} [options.revokeGrant] Injectable revocation.
+ * @param {Function} [options.resetTokenCache] Injectable access-token cache drop.
+ * @param {(url: string, init: object) => Promise<any>} [options.fetchImpl]
+ * @param {string} [options.revokeEndpoint]
+ * @param {Function} [options.query] Forwarded to the event erase.
+ * @param {Function} [options.batchDelete] Forwarded to the event erase.
+ * @param {Function} [options.sleep] Forwarded to the event erase.
+ * @param {Function} [options.random] Forwarded to the event erase.
+ * @param {number} [options.maxAttempts] Forwarded to the event erase.
+ * @param {number} [options.maxPages] Forwarded to the event erase.
+ * @param {string|null} [options.tableName] Connections table override.
+ * @param {string|null} [options.eventsTableName] Events table override.
+ * @param {Function} [options.log]
+ * @returns {Promise<object>} ALB response.
+ */
+export async function handleAuthDisconnect(event, options = {}) {
+  const {
+    origin = null,
+    allowlist,
+    env = process.env,
+    nowSeconds = Math.floor(Date.now() / 1000),
+    disconnectAccount: runDisconnect = disconnectAccount,
+    getConnection: loadConnection,
+    getRefreshToken,
+    deleteConnection,
+    deleteEventsForUser,
+    deleteScanSchedule: removeSchedule,
+    revokeGrant,
+    resetTokenCache,
+    fetchImpl,
+    revokeEndpoint,
+    query,
+    batchDelete,
+    sleep,
+    random,
+    maxAttempts,
+    maxPages,
+    tableName = null,
+    eventsTableName = null,
+    log,
+  } = options;
+
+  // Session first, exactly as everywhere else in this file.
+  const session = resolveSession(event, { env, nowSeconds });
+  if (!session.ok) {
+    return jsonResponse(session.statusCode, session.payload, { origin, allowlist });
+  }
+
+  let deleteEvents;
+  try {
+    deleteEvents = readDeleteEventsFlag(parseJsonBody(event));
+  } catch (err) {
+    // `name` is checked alongside `instanceof` so the branch still holds if a
+    // test has loaded settings.mjs as a second module instance.
+    if (err instanceof SettingsValidationError || err?.name === "SettingsValidationError") {
+      logBasic("[Calendar] Disconnect rejected:", { field: err.field ?? "body" });
+      return jsonResponse(400, { error: err.message, field: err.field ?? null }, { origin, allowlist });
+    }
+    logBasic("[Calendar] Disconnect body could not be read:", {
+      errorName: err?.name || "Error",
+      errorMessage: err?.message || "unknown error",
+    });
+    return jsonResponse(500, { error: "Could not disconnect your Google account" }, { origin, allowlist });
+  }
+
+  // Session-derived and nowhere else. A `userId` in the body would let any
+  // signed-in caller revoke and erase another account.
+  const userId = connectionUserId(session.claims.sub);
+
+  let result;
+  try {
+    result = await runDisconnect(
+      { userId, deleteEvents, tableName, eventsTableName },
+      {
+        getConnection: loadConnection,
+        getRefreshToken,
+        deleteConnection,
+        deleteEventsForUser,
+        deleteScanSchedule: removeSchedule,
+        revokeGrant,
+        resetTokenCache,
+        fetchImpl,
+        revokeEndpoint,
+        query,
+        batchDelete,
+        sleep,
+        random,
+        maxAttempts,
+        maxPages,
+        env,
+        log,
+      }
+    );
+  } catch (err) {
+    if (err instanceof RevocationError || err?.name === "RevocationError") {
+      // 502, because the failure is Google's or the network's, not this
+      // service's and not the user's. `reason` is a short log-safe token; the
+      // revoke request and response bodies are never logged (see disconnect.mjs).
+      logBasic("[Calendar] Could not revoke the Google grant - nothing was deleted:", {
+        userId,
+        reason: err.reason || "revoke_failed",
+        statusCode: err.statusCode || 0,
+      });
+      return jsonResponse(
+        502,
+        { error: "Could not revoke access at Google. Nothing was deleted - please try again." },
+        { origin, allowlist }
+      );
+    }
+    logBasic("[Calendar] Disconnect failed:", {
+      userId,
+      errorName: err?.name || "Error",
+      errorMessage: err?.message || "unknown error",
+    });
+    return jsonResponse(500, { error: "Could not disconnect your Google account" }, { origin, allowlist });
+  }
+
+  // userId, counts and outcome. Never the token, the revoke body or a title.
+  logBasic("[Calendar] Google account disconnected", {
+    userId,
+    revoked: result.revoked === true,
+    connectionDeleted: result.connectionDeleted === true,
+    scheduleCleared: result.scheduleCleared !== false,
+    eventsDeleted: Number.isFinite(result.eventsDeleted) ? result.eventsDeleted : 0,
+    eventsDeleteComplete: result.eventsDeleteComplete !== false,
+  });
+
+  // The session goes with the grant. Both cookies are expired, matching logout:
+  // an abandoned sign-in must not outlive the account it was for.
+  return jsonResponse(
+    200,
+    {
+      revoked: result.revoked === true,
+      connectionDeleted: result.connectionDeleted === true,
+      eventsDeleted: Number.isFinite(result.eventsDeleted) ? result.eventsDeleted : 0,
+      // Reported ALWAYS, not only when it is false: an absent field reads as
+      // "fine" and this is the one flag that says rows may still be there.
+      eventsDeleteComplete: result.eventsDeleteComplete !== false,
+      scheduleCleared: result.scheduleCleared !== false,
+    },
+    {
+      origin,
+      allowlist,
+      headers: { "Set-Cookie": [serializeClearedSessionCookie(), serializeClearedStateCookie()] },
+    }
+  );
+}
+
 /**
  * GET /calendar/api/auth/me - who is signed in, and are they connected?
  *
@@ -776,6 +1000,7 @@ export async function routeAuthRequest(path, method, event, options = {}) {
   if (path === AUTH_CALLBACK_PATH && method === "GET") return handleAuthCallback(event, options);
   if (path === AUTH_LOGOUT_PATH && method === "POST") return handleAuthLogout(event, options);
   if (path === AUTH_ME_PATH && method === "GET") return handleAuthMe(event, options);
+  if (path === AUTH_DISCONNECT_PATH && method === "POST") return handleAuthDisconnect(event, options);
   return null;
 }
 
@@ -1944,6 +2169,7 @@ export {
   AUTH_CALLBACK_PATH,
   AUTH_LOGOUT_PATH,
   AUTH_ME_PATH,
+  AUTH_DISCONNECT_PATH,
   SETTINGS_PATH,
   SCAN_PATH,
   SCAN_STATUS_PATH,
