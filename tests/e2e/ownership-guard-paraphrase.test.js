@@ -470,6 +470,72 @@ describe('E2E Feature: A false ownership claim is caught however the secret is n
     });
   });
 
+  describe('Scenario: One bad entry cannot switch the guard off either', () => {
+    // Failure/edge path, one level below the scenario above. A list can be a
+    // non-empty array and STILL disable the guard: escapeRegex turns a blank
+    // entry into the alternative "e?s?", which matches the empty string at
+    // every word boundary, so ONE blank entry among eight good ones classifies
+    // every object as "some other named resource" and the guard returns [] for
+    // a runbook that plainly claims Terraform creates the credential. Each case
+    // below is proved to throw, and to name the offending index rather than
+    // failing with a bare TypeError from deep inside the pattern build.
+    const SWALLOWED_CLAIM = 'Terraform creates the credential for this stack.';
+
+    const BAD_ENTRIES = [
+      { label: 'a single blank entry', value: [''] },
+      { label: 'a single whitespace-only entry', value: ['   '] },
+      { label: 'a blank entry first in an otherwise valid list', value: ['', 'role'] },
+      { label: 'a blank entry last in an otherwise valid list', value: ['role', ''] },
+      { label: 'a null entry', value: [null] },
+      { label: 'a numeric entry', value: [42] },
+      { label: 'a numeric entry in an otherwise valid list', value: ['role', 42] }
+    ];
+
+    BAD_ENTRIES.forEach((example) => {
+      it(`Given ${example.label}, When the guard is called, Then it throws and names the offending entry`, () => {
+        assert.throws(
+          () =>
+            terraformCreatesSecretClaimsIn(runbookCopyContaining(SWALLOWED_CLAIM), {
+              nonSecretTerms: example.value
+            }),
+          (error) => {
+            assert.ok(error instanceof Error, 'must throw an Error, not a bare value');
+            assert.match(
+              error.message,
+              /non-blank string|non-empty array/,
+              `nonSecretTerms ${JSON.stringify(example.value)} was accepted. It ` +
+                `leaves the guard unable to report "${SWALLOWED_CLAIM}", which looks ` +
+                'exactly like a clean runbook.'
+            );
+            const offending = example.value.findIndex(
+              (term) => typeof term !== 'string' || term.trim() === ''
+            );
+            assert.ok(
+              error.message.includes(`[${offending}]`),
+              'The error must name the offending index so the operator is not left ' +
+                `hunting through the list; got: ${error.message}`
+            );
+            return true;
+          }
+        );
+      });
+    });
+
+    it('Given a list that is valid apart from one blank entry, When that blank is removed, Then the guard runs and reports the claim', () => {
+      // Proves the rejections above are about blankness specifically and not
+      // about the list being refused for some incidental reason: the same list
+      // without the blank is accepted and still does its job.
+      const claims = terraformCreatesSecretClaimsIn(runbookCopyContaining(SWALLOWED_CLAIM), {
+        nonSecretTerms: ['', ...NON_SECRET_RESOURCE_TERMS].filter((term) => term.trim() !== '')
+      });
+      assert.ok(
+        claims.length > 0,
+        'With a clean list the guard must still report the paraphrased claim; if it ' +
+          'does not, the throws above prove nothing about blankness.'
+      );
+    });
+  });
+
   describe('Scenario: The real runbook still passes unchanged', () => {
     let runbookDigestBefore;
 
