@@ -1,11 +1,11 @@
 ---
 id: TASK-049
 title: URL
-status: defining
+status: todo
 created: 2026-08-28T21:29:10.401Z
-updated: 2026-08-28T21:53:00.000Z
-question: BLOCKING — a Lambda function URL cannot have a WAF in front of it, so this ticket as worded does the exact thing TASK-048 ("Remove the WAF") was marked wont-do for. waf_calendar.tf publishes a REGIONAL rule group consumed by the shared basestack ALB's Web ACL; regional WAF ACLs attach to ALB/API Gateway/AppSync/Cognito only, never to a function URL. Also alerting.tf:266-269 alarms on ALB dimensions that stop reporting, and main.tf:33-43 gets the custom hostname FROM the ALB. Pick one: (1) Function URL with authorization_type NONE, accepting loss of all WAF rules including the /calendar/api/scan rate limit that caps Anthropic spend per IP, loss of the ALB-keyed health alarm, and a URL change to https://<id>.lambda-url.<region>.on.aws. (2) Keep the ALB and add a function URL alongside it for a specific caller, undoing nothing — if this is what you actually meant the ticket shrinks dramatically. (3) CloudFront in front of the function URL with AWS_IAM + OAC, keeping hostname, TLS and a WAF, but requiring a new us-east-1 ACM cert, a CLOUDFRONT-scope Web ACL owned by this stack, and a CLOUDFRONT-scope RE-ISSUE of the rule group (the existing one is scope=REGIONAL and its capacity is immutable) — bigger than the ALB wiring it replaces. Under options 1 and 3 the Google Cloud console redirect URI must be updated by hand or sign-in fails with redirect_uri_mismatch.
+updated: 2026-08-28T22:20:47.000Z
 activities: [{"activity":"ba","model":"claude-opus-4-8","startedAt":"2026-08-28T21:45:00.000Z","finishedAt":"2026-08-28T21:53:00.000Z","note":"DEFINED and PARKED on a blocking security decision. Confirmed all six conflict points the orchestrator supplied, then SIZED THE TICKET WELL BEYOND THEM. Established the ALB is NOT ours to remove - data.aws_lb.web_app_alb and data.aws_lb_listener are DATA SOURCES on a basestack ALB shared with the chatbot (which owns listener priority 119 to our 121), so remove the ALB can only mean remove this app four ALB resources. Established THE PUBLIC HOSTNAME CANNOT SURVIVE: aws_route53_record.this is an A-ALIAS to the ALB, a function URL is not a valid Route53 alias target, and a CNAME to it fails TLS because the cert is AWS-owned for the lambda-url domain. BIGGEST FINDING - THIS IS A CODE MIGRATION, NOT A TERRAFORM CHANGE: the handler is ALB-payload-shaped end to end (event.path, event.httpMethod, event.multiValueHeaders; buildResponse returns statusDescription plus multiValueHeaders; finalise inspects response.multiValueHeaders) while function URLs use payload format 2.0 and IGNORE multiValueHeaders on the response entirely, so an unmigrated response silently returns 200 with no Content-Type and no Set-Cookie and sign-in loops forever with nothing in the logs. Counted 168 occurrences of multiValueHeaders/statusDescription/httpMethod across 10 test files. TWO SILENT-BREAKAGE LANDMINES FOUND BY READING, NOT GUESSING: isScheduledScanEvent distinguishes an EventBridge scan from an HTTP request by httpMethod === undefined AND path === undefined, and BOTH are undefined in a format 2.0 event, so any HTTP request carrying a source property would be misrouted into a scan; and getQueryParam percent-decodes precisely because ALB delivers query values still encoded, while format 2.0 delivers them already decoded, so the OAuth code gets DOUBLE-DECODED and sign-in breaks only for values containing escapes - an intermittent-looking failure. Verified CloudFront is viable before offering it (the aws_global us-east-1 provider alias exists at provider.tf:32-46 and is currently UNUSED) but priced it honestly: needs a new us-east-1 ACM cert with DNS validation since basestack exports no cert, a CLOUDFRONT-scope ACL owned by this stack, and a CLOUDFRONT-scope re-issue of the rule group because the existing one is REGIONAL and its capacity is immutable. Wrote every acceptance criterion as an INVARIANT that holds under all three options so nothing presumes an answer. Also flagged the TASK-010 collision: that ticket is live on index.mjs and this one rewrites the same file response layer. Token/cost telemetry not correlated; 52615 total subagent tokens, direction unsplit, so tokensIn/tokensOut omitted rather than guessed"}]
+answer: remove waf, remove alerting
 ---
 
 ## Description
@@ -35,31 +35,47 @@ Format 2.0 supplies `rawPath` and `requestContext.http.method`, a single-value `
 map plus a `cookies` array, and IGNORES `multiValueHeaders` on the response — so an
 unmigrated response silently loses every header, including `Set-Cookie` and `Content-Type`.
 
-### BLOCKING DECISION — do not build until answered
-Removing the ALB removes ALL WAF protection from these endpoints and orphans
-`aws_wafv2_rule_group.calendar_protection`. `terraform/waf_calendar.tf` deliberately
-creates NO web ACL and NO `aws_wafv2_web_acl_association`: it publishes a REGIONAL rule
-group consumed by the shared ALB's basestack-owned ACL. AWS WAF regional ACLs associate
-with ALB / API Gateway / AppSync / Cognito — never with a Lambda function URL. There is
-no way to keep a WAF directly in front of a function URL.
+### DECISION MADE — build option 1: bare function URL, accept the losses
+The conflict was raised and the user answered: **"remove waf, remove alerting"**.
+Build a plain `aws_lambda_function_url` with `authorization_type = "NONE"` and
+deliberately give up the WAF and the ALB-keyed alarm. No CloudFront, no ACM cert,
+no replacement ACL. This section records WHY that is a deliberate, informed choice
+rather than an oversight, so nobody "fixes" it later:
 
-The user has already declined removing the WAF (TASK-048 "Remove the WAF", `resolution:
-wont-do`, in `tasks/done/`), so this ticket as literally worded would accomplish exactly
-that. It also breaks TASK-011's alerting: `terraform/alerting.tf:266-269` keys
-`calendar_target_group_unhealthy_hosts` on `TargetGroup`/`LoadBalancer` dimensions that
-stop reporting, and an alarm on a metric that never reports never fires. And the public
-hostname is an ALB property, so the URL users visit changes.
+- **The WAF genuinely cannot follow.** `terraform/waf_calendar.tf` creates NO web ACL
+  and NO `aws_wafv2_web_acl_association`: it publishes a REGIONAL rule group consumed
+  by the shared ALB's basestack-owned ACL. AWS WAF regional ACLs associate with
+  ALB / API Gateway / AppSync / Cognito — never with a Lambda function URL. Keeping a
+  WAF here was only possible via CloudFront, which was considered and declined.
+- **What is knowingly given up:** every rule in `calendar_protection`, including the
+  `/calendar/api/scan` rate limit that caps Anthropic spend per IP and the
+  OAuth-callback allow rule; the `calendar_target_group_unhealthy_hosts` alarm; and
+  the only thing currently probing `/calendar/api/health` (the ALB health check,
+  300s interval). TASK-011 is partially undone on purpose.
+- **This supersedes TASK-048** (`resolution: wont-do`, "Remove the WAF"). That ticket
+  declined removing the WAF as a standalone act; this one accepts its removal as the
+  price of the function URL. If TASK-048's reasoning is ever revisited, start here.
+- **The public hostname changes.** The app moves to
+  `https://<url-id>.lambda-url.<region>.on.aws/calendar/...`; the custom hostname and
+  its Route53 A-ALIAS go away, and TLS is served by an AWS-owned certificate.
+- **`authorization_type = "NONE"` is required**, because it is the only value a browser
+  can reach directly (`AWS_IAM` needs SigV4 on every request). The endpoint is therefore
+  publicly reachable with no network-layer filtering in front of it; the app's own
+  session auth remains the only guard on the data routes.
 
-See the `question` frontmatter field. Acceptance criteria below are written as
-INVARIANTS that hold under every option, so nothing here presumes an answer.
+**Operational prerequisite, easy to miss and it breaks sign-in:** the Google Cloud
+console redirect URI must be updated by hand to the new function-URL origin, or OAuth
+fails with `redirect_uri_mismatch` (`docs/google-oauth-setup.md:147-149`).
 
 ## Acceptance Criteria
 
 ### Ingress and Terraform
 - [ ] An `aws_lambda_function_url` for `aws_lambda_function.calendar` exists in
       `terraform/lambda_calendar.tf` and its URL is exposed as a Terraform output.
-- [ ] Its `authorization_type` is set to the value chosen in the Open Question,
-      and the file carries a comment stating why that value is safe for this deployment.
+- [ ] Its `authorization_type` is `"NONE"` (the decided value — the only one a browser
+      can reach directly), and the file carries a comment stating that this endpoint is
+      deliberately public with no WAF in front of it, and that app-level session auth is
+      the only guard on the data routes.
 - [ ] `aws_lb_target_group.calendar_lambda_tg`, `aws_lb_listener_rule.calendar_listener_rule`,
       `aws_lb_target_group_attachment.calendar_lambda_attachment` and
       `aws_lambda_permission.calendar_allow_alb` are all removed together — no resource
@@ -108,22 +124,28 @@ INVARIANTS that hold under every option, so nothing here presumes an answer.
 - [ ] Base64 request bodies still decode (`backend/settings.mjs:692` reads
       `event.isBase64Encoded`).
 
-### Monitoring and WAF invariants (answer-independent)
-- [ ] No CloudWatch alarm remains defined on a metric that can no longer report. If
-      `calendar_target_group_unhealthy_hosts` is removed, the ticket records what replaces
-      availability monitoring for `/calendar/api/health` — which the ALB health check
-      (interval 300s) is the only thing exercising today.
-- [ ] `aws_wafv2_rule_group.calendar_protection` and its outputs
-      (`calendar_waf_rule_group_arn`, `calendar_waf_managed_rule_groups`) are NOT left in
-      a state where they are published for an ACL that no longer sees this app's traffic:
-      they are either still consumed by an ACL in the request path, or removed, per the
-      answer to the Open Question. A rule group with no consumer is not an acceptable end state.
-- [ ] If rate limiting no longer applies, `var.calendar_waf_rate_limit` and
-      `var.calendar_scan_rate_limit` (`terraform/variables.tf:165-207`) are removed or
-      their docstrings corrected — no variable claims to protect a path it no longer protects.
-- [ ] The cost control on `/calendar/api/scan` (one Anthropic completion per email) is
-      either still enforced somewhere, or its removal is explicitly acknowledged in the
-      answer to the Open Question.
+### Monitoring and WAF removal (decided: remove both)
+- [ ] `aws_cloudwatch_metric_alarm.calendar_target_group_unhealthy_hosts`
+      (`terraform/alerting.tf:236-277`) is REMOVED, not left defined on `TargetGroup` /
+      `LoadBalancer` dimensions that can no longer report. An alarm on a metric that never
+      reports never fires, which is worse than no alarm because it looks like coverage.
+- [ ] `aws_wafv2_rule_group.calendar_protection` is REMOVED along with its outputs
+      `calendar_waf_rule_group_arn` and `calendar_waf_managed_rule_groups`
+      (`terraform/waf_calendar.tf`). A rule group published for an ACL that no longer sees
+      this app's traffic is not an acceptable end state.
+- [ ] `var.calendar_waf_rate_limit` and `var.calendar_scan_rate_limit`
+      (`terraform/variables.tf:165-207`) are removed, along with their values in all four
+      files under `terraform/config/`. No variable is left claiming to protect a path it
+      no longer protects.
+- [ ] `terraform/variables.tf:170`'s comment referencing
+      `aws_wafv2_rule_group.calendar_protection` is removed or corrected, since it will
+      name a resource that no longer exists.
+- [ ] The loss of the `/calendar/api/scan` cost control is recorded in the code, not just
+      in this ticket: the scan route carries a comment stating that the per-IP rate limit
+      that capped Anthropic spend was removed with the WAF, so the next person reading it
+      knows the cap is gone rather than assuming it still applies.
+- [ ] Nothing probes `/calendar/api/health` after this change, and that is recorded as a
+      known gap in the ticket's build notes rather than silently accepted.
 
 ### Tests and docs
 - [ ] Every test asserting the ALB wiring is updated to assert the new ingress, not
