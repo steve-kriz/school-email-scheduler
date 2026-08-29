@@ -102,7 +102,7 @@ describe('Unit Tests: CORS Origin Gate', () => {
           origin: 'https://example.com',
           allowlist: OFFICEHQ
         });
-        assert.equal(response.multiValueHeaders['Access-Control-Allow-Origin'], undefined,
+        assert.equal(response.headers['Access-Control-Allow-Origin'], undefined,
           'A disallowed origin was echoed in Access-Control-Allow-Origin');
       });
 
@@ -157,19 +157,19 @@ describe('Unit Tests: CORS Origin Gate', () => {
           origin: 'https://evil-officehq.com.au',
           allowlist: OFFICEHQ
         });
-        assert.equal(response.multiValueHeaders['Access-Control-Allow-Origin'], undefined,
+        assert.equal(response.headers['Access-Control-Allow-Origin'], undefined,
           'A lookalike origin was echoed in Access-Control-Allow-Origin');
       });
     });
 
     describe('Scenario: Credentials are never paired with a wildcard origin', () => {
       const credentialsHeaderOf = (response) =>
-        Object.keys(response.multiValueHeaders)
+        Object.keys(response.headers)
           .filter((name) => name.toLowerCase() === 'access-control-allow-credentials');
 
       it('Given ALLOWED_ORIGINS is unset, When any response is built, Then it does not carry Access-Control-Allow-Credentials', () => {
         const response = buildResponse(200, '{}', 'application/json', { origin: 'https://anything.example.com', allowlist: OPEN });
-        assert.equal(response.multiValueHeaders['Access-Control-Allow-Origin'][0], '*',
+        assert.equal(response.headers['Access-Control-Allow-Origin'], '*',
           'Open mode did not emit a wildcard Access-Control-Allow-Origin');
         assert.deepEqual(credentialsHeaderOf(response), [],
           'A wildcard-origin response carried Access-Control-Allow-Credentials');
@@ -185,7 +185,7 @@ describe('Unit Tests: CORS Origin Gate', () => {
           allowlist: OPEN,
           headers: { 'Access-Control-Allow-Credentials': ['true'] }
         });
-        assert.equal(response.multiValueHeaders['Access-Control-Allow-Origin'][0], '*',
+        assert.equal(response.headers['Access-Control-Allow-Origin'], '*',
           'Open mode did not emit a wildcard Access-Control-Allow-Origin');
         assert.deepEqual(credentialsHeaderOf(response), [],
           'buildResponse emitted Access-Control-Allow-Credentials while the resolved origin was "*"');
@@ -219,9 +219,10 @@ describe('Unit Tests: CORS Origin Gate', () => {
           allowlist: OFFICEHQ,
           headers: { 'Access-Control-Allow-Credentials': ['true'] }
         });
-        assert.equal(response.multiValueHeaders['Access-Control-Allow-Origin'][0], 'https://officehq.com.au',
+        assert.equal(response.headers['Access-Control-Allow-Origin'], 'https://officehq.com.au',
           'An allowed origin was not echoed back');
-        assert.deepEqual(response.multiValueHeaders['Access-Control-Allow-Credentials'], ['true'],
+        // Payload format 2.0 folds array header values to a single string.
+        assert.equal(response.headers['Access-Control-Allow-Credentials'], 'true',
           'Credentials were stripped for a specifically allowed (non-wildcard) origin');
       });
     });
@@ -232,9 +233,9 @@ describe('Unit Tests: CORS Origin Gate', () => {
           origin: 'https://sub.officehq.com.au',
           allowlist: OFFICEHQ
         });
-        assert.equal(response.multiValueHeaders['Access-Control-Allow-Origin'][0], 'https://sub.officehq.com.au',
+        assert.equal(response.headers['Access-Control-Allow-Origin'], 'https://sub.officehq.com.au',
           'An allowed subdomain origin was not echoed back');
-        assert.deepEqual(response.multiValueHeaders['Vary'], ['Origin'],
+        assert.equal(response.headers['Vary'], 'Origin',
           'Vary: Origin was not set alongside an echoed origin');
       });
     });
@@ -350,10 +351,10 @@ describe('Unit Tests: CORS Origin Gate', () => {
       it('Given a route that returns a raw response object carrying Allow-Credentials, And the resolved origin is "*", When the response leaves the router via finalise, Then it does not carry Access-Control-Allow-Credentials', () => {
         const rawResponse = {
           statusCode: 200,
-          multiValueHeaders: {
-            'Access-Control-Allow-Credentials': ['true'],
-            'Access-Control-Allow-Origin': ['*'],
-            'Content-Type': ['application/json']
+          headers: {
+            'Access-Control-Allow-Credentials': 'true',
+            'Access-Control-Allow-Origin': '*',
+            'Content-Type': 'application/json'
           },
           body: '{}',
           isBase64Encoded: false
@@ -362,11 +363,11 @@ describe('Unit Tests: CORS Origin Gate', () => {
         const finalised = finalise(rawResponse);
 
         // Confirm the wildcard origin is present
-        assert.equal(finalised.multiValueHeaders['Access-Control-Allow-Origin'][0], '*',
+        assert.equal(finalised.headers['Access-Control-Allow-Origin'], '*',
           'Wildcard origin was not present in the hand-rolled response');
 
         // Confirm credentials header was stripped
-        const credentialsHeaders = Object.keys(finalised.multiValueHeaders)
+        const credentialsHeaders = Object.keys(finalised.headers)
           .filter((name) => name.toLowerCase() === 'access-control-allow-credentials');
         assert.deepEqual(credentialsHeaders, [],
           'finalise did not strip Access-Control-Allow-Credentials from a wildcard-origin response');
@@ -375,10 +376,10 @@ describe('Unit Tests: CORS Origin Gate', () => {
       it('And the header-name variant is case-insensitive', () => {
         const rawResponse = {
           statusCode: 200,
-          multiValueHeaders: {
-            'access-control-allow-credentials': ['true'],
-            'Access-Control-Allow-Origin': ['*'],
-            'Content-Type': ['application/json']
+          headers: {
+            'access-control-allow-credentials': 'true',
+            'Access-Control-Allow-Origin': '*',
+            'Content-Type': 'application/json'
           },
           body: '{}',
           isBase64Encoded: false
@@ -387,11 +388,11 @@ describe('Unit Tests: CORS Origin Gate', () => {
         const finalised = finalise(rawResponse);
 
         // Confirm wildcard origin is present
-        assert.equal(finalised.multiValueHeaders['Access-Control-Allow-Origin'][0], '*',
+        assert.equal(finalised.headers['Access-Control-Allow-Origin'], '*',
           'Wildcard origin was not present');
 
         // Confirm lowercase credentials header was stripped
-        const credentialsHeaders = Object.keys(finalised.multiValueHeaders)
+        const credentialsHeaders = Object.keys(finalised.headers)
           .filter((name) => name.toLowerCase() === 'access-control-allow-credentials');
         assert.deepEqual(credentialsHeaders, [],
           'finalise did not strip lowercase access-control-allow-credentials from a wildcard-origin response');
@@ -400,7 +401,10 @@ describe('Unit Tests: CORS Origin Gate', () => {
       it('But finalise leaves credentials intact when the origin is not a wildcard', () => {
         const rawResponse = {
           statusCode: 200,
-          multiValueHeaders: {
+          // Array values are deliberately kept here: `finalise` documents that it
+          // tolerates them, because a hand-rolled response never went through
+          // buildResponse's flattening.
+          headers: {
             'Access-Control-Allow-Credentials': ['true'],
             'Access-Control-Allow-Origin': ['https://officehq.com.au'],
             'Content-Type': ['application/json']
@@ -411,11 +415,11 @@ describe('Unit Tests: CORS Origin Gate', () => {
 
         const finalised = finalise(rawResponse);
 
-        assert.deepEqual(finalised.multiValueHeaders['Access-Control-Allow-Credentials'], ['true'],
+        assert.deepEqual(finalised.headers['Access-Control-Allow-Credentials'], ['true'],
           'finalise stripped credentials when the origin was not a wildcard');
       });
 
-      it('And finalise handles a null/missing multiValueHeaders gracefully', () => {
+      it('And finalise handles a null/missing headers map gracefully', () => {
         const rawResponse = {
           statusCode: 200,
           body: '{}',
@@ -430,7 +434,7 @@ describe('Unit Tests: CORS Origin Gate', () => {
           threw = true;
         }
 
-        assert.equal(threw, false, 'finalise threw when multiValueHeaders was missing');
+        assert.equal(threw, false, 'finalise threw when the headers map was missing');
         assert.ok(result, 'finalise returned falsy value');
       });
     });

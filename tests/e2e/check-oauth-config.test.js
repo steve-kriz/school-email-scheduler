@@ -558,13 +558,31 @@ describe('Google OAuth Configuration Preflight E2E Tests', () => {
     });
 
     describe('Scenario: Every deployed environment has a registered callback', () => {
-      it('Given the runbook redirect URI table and terraform tfvars files', () => {
+      // TASK-049: the callback origin is a Lambda function URL whose id AWS
+      // generates at create time, so it is NOT derivable from hosted_zone in the
+      // tfvars any more. What the runbook must now carry is the DERIVATION (read
+      // the `calendar_function_url` output and append the callback path), one row
+      // per deployment, plus the unchanged localhost URI.
+      it('Given the runbook redirect URI table, Then it documents the function-URL derivation for every deployment', () => {
         const runbookPath = path.join(DOCS_DIR, 'google-oauth-setup.md');
         assert.ok(fs.existsSync(runbookPath), 'google-oauth-setup.md not found');
         const runbookContent = fs.readFileSync(runbookPath, 'utf-8');
 
-        // Parse tfvars files for hosted_zone
-        const expectedUris = [];
+        assert.ok(
+          runbookContent.includes('terraform output -raw calendar_function_url'),
+          'Runbook does not tell the operator how to read the function URL out of Terraform'
+        );
+        assert.ok(
+          /lambda-url\.<region>\.on\.aws/.test(runbookContent),
+          'Runbook does not describe the *.lambda-url.<region>.on.aws origin the app is served from'
+        );
+        assert.ok(
+          runbookContent.includes('<terraform output calendar_function_url>calendar/api/auth/google/callback'),
+          'Runbook does not give the redirect URI as the function URL output plus the callback path'
+        );
+
+        // One table row per deployment that exists in the tfvars, so a new
+        // tenant cannot be added without the runbook gaining a row.
         const tfvarsConfigs = [
           { env: 'dev', tenant: 'au', file: 'dev/au.tfvars' },
           { env: 'prod', tenant: 'au', file: 'prod/au.tfvars' },
@@ -575,24 +593,38 @@ describe('Google OAuth Configuration Preflight E2E Tests', () => {
         for (const config of tfvarsConfigs) {
           const tfvarsPath = path.join(TERRAFORM_CONFIG_DIR, config.file);
           assert.ok(fs.existsSync(tfvarsPath), `tfvars file not found: ${config.file}`);
-          const tfvarsContent = fs.readFileSync(tfvarsPath, 'utf-8');
 
-          const match = tfvarsContent.match(/hosted_zone\s*=\s*"([^"]+)"/);
-          assert.ok(match, `hosted_zone not found in ${config.file}`);
-
-          const hostedZone = match[1];
-          const callbackUri = `https://calendar.${hostedZone}/calendar/api/auth/google/callback`;
-          expectedUris.push(callbackUri);
+          const rowPattern = new RegExp(
+            `\\|\\s*\`?${config.env}\`?\\s*\\|\\s*\`?${config.tenant}\`?\\s*\\|[^\\n]*calendar_function_url`
+          );
+          assert.ok(
+            rowPattern.test(runbookContent),
+            `Runbook has no redirect-URI row deriving the callback from calendar_function_url for ${config.env}/${config.tenant}`
+          );
         }
 
-        // Also expect localhost
-        expectedUris.push('http://localhost:3000/calendar/api/auth/google/callback');
+        // The localhost URI is unchanged: local dev still sets PUBLIC_BASE_URL
+        // explicitly, and an explicit value still overrides the derivation.
+        assert.ok(
+          runbookContent.includes('http://localhost:3000/calendar/api/auth/google/callback'),
+          'Runbook no longer documents the localhost callback URI'
+        );
+      });
 
-        // Verify every URI appears in the runbook
-        for (const uri of expectedUris) {
+      it('FAILURE PATH: the runbook no longer advertises the removed calendar.<hosted_zone> ALB hostname', () => {
+        const runbookPath = path.join(DOCS_DIR, 'google-oauth-setup.md');
+        const runbookContent = fs.readFileSync(runbookPath, 'utf-8');
+
+        const tfvarsConfigs = ['dev/au.tfvars', 'prod/au.tfvars', 'prod/uk.tfvars', 'prod/us.tfvars'];
+        for (const file of tfvarsConfigs) {
+          const tfvarsContent = fs.readFileSync(path.join(TERRAFORM_CONFIG_DIR, file), 'utf-8');
+          const match = tfvarsContent.match(/hosted_zone\s*=\s*"([^"]+)"/);
+          assert.ok(match, `hosted_zone not found in ${file}`);
+
+          const staleUri = `https://calendar.${match[1]}/calendar/api/auth/google/callback`;
           assert.ok(
-            runbookContent.includes(uri),
-            `Runbook does not contain expected callback URI: ${uri}`
+            !runbookContent.includes(staleUri),
+            `Runbook still lists ${staleUri}; that Route53 record and ALB listener rule were removed by TASK-049, so registering it would guarantee redirect_uri_mismatch`
           );
         }
       });

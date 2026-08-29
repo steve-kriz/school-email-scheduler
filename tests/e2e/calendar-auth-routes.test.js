@@ -114,28 +114,34 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
   describe('GET /calendar/api/auth/google/start', () => {
     it('should return 302 with Google authorization URL', async () => {
       const event = {
-        path: '/calendar/api/auth/google/start',
-        httpMethod: 'GET',
-        headers: {},
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/start',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/start' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
       };
 
       const response = await handler(event, undefined, { env: defaultEnv });
 
       assert.equal(response.statusCode, 302);
-      assert.ok(response.multiValueHeaders.Location);
-      const location = response.multiValueHeaders.Location[0];
+      assert.ok(response.headers.Location);
+      const location = response.headers.Location;
       assert.ok(location.includes('https://accounts.google.com/o/oauth2/v2/auth'));
     });
 
     it('should include all required OAuth parameters in redirect', async () => {
       const event = {
-        path: '/calendar/api/auth/google/start',
-        httpMethod: 'GET',
-        headers: {},
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/start',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/start' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
       };
 
       const response = await handler(event, undefined, { env: defaultEnv });
-      const location = response.multiValueHeaders.Location[0];
+      const location = response.headers.Location;
 
       assert.ok(location.includes(`client_id=${clientId}`));
       assert.ok(location.includes('scope='));
@@ -149,13 +155,16 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
 
     it('should set HttpOnly state cookie with verifier and state', async () => {
       const event = {
-        path: '/calendar/api/auth/google/start',
-        httpMethod: 'GET',
-        headers: {},
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/start',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/start' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
       };
 
       const response = await handler(event, undefined, { env: defaultEnv });
-      const setCookie = response.multiValueHeaders['Set-Cookie'];
+      const setCookie = response.cookies;
 
       assert.ok(setCookie);
       const stateCookie = setCookie.find((c) => c.includes('calendar_oauth_state='));
@@ -179,13 +188,16 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       };
 
       const event = {
-        path: '/calendar/api/auth/google/start',
-        httpMethod: 'GET',
-        headers: {},
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/start',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/start' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
       };
 
       const response = await handler(event, undefined, { env: defaultEnv, randomBytes });
-      const location = response.multiValueHeaders.Location[0];
+      const location = response.headers.Location;
 
       // The actual generated verifier will be different, but we verify
       // the pattern: any 43-char base64url sequence should not appear in the URL
@@ -194,9 +206,12 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
 
     it('should return 500 when GOOGLE_CLIENT_ID is missing', async () => {
       const event = {
-        path: '/calendar/api/auth/google/start',
-        httpMethod: 'GET',
-        headers: {},
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/start',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/start' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
       };
 
       const env = { ...defaultEnv, GOOGLE_CLIENT_ID: '' };
@@ -209,9 +224,12 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
 
     it('should return 500 when PUBLIC_BASE_URL is missing', async () => {
       const event = {
-        path: '/calendar/api/auth/google/start',
-        httpMethod: 'GET',
-        headers: {},
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/start',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/start' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
       };
 
       const env = { ...defaultEnv, PUBLIC_BASE_URL: '' };
@@ -222,9 +240,12 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
 
     it('should not leak secrets in logs', async () => {
       const event = {
-        path: '/calendar/api/auth/google/start',
-        httpMethod: 'GET',
-        headers: {},
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/start',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/start' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
       };
 
       capturedLogs = [];
@@ -246,8 +267,12 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
   describe('GET /calendar/api/auth/google/callback - State validation', () => {
     it('should return 400 when state parameter is missing', async () => {
       const event = {
-        path: '/calendar/api/auth/google/callback',
-        httpMethod: 'GET',
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/callback',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/callback' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
         queryStringParameters: {
           code: 'auth-code-123',
         },
@@ -263,8 +288,12 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
 
     it('should return 400 when state cookie is missing (expired or blocked)', async () => {
       const event = {
-        path: '/calendar/api/auth/google/callback',
-        httpMethod: 'GET',
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/callback',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/callback' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
         queryStringParameters: {
           state: 'any-state-value',
           code: 'auth-code-123',
@@ -284,15 +313,17 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       const cookieData = Buffer.from(JSON.stringify({ state: stateValue, codeVerifier }), 'utf8').toString('base64url');
 
       const event = {
-        path: '/calendar/api/auth/google/callback',
-        httpMethod: 'GET',
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/callback',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/callback' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
         queryStringParameters: {
           state: 'different-state-value',
           code: 'auth-code-123',
         },
-        multiValueHeaders: {
-          cookie: [`calendar_oauth_state=${cookieData}`],
-        },
+        cookies: [`calendar_oauth_state=${cookieData}`],
       };
 
       const response = await handler(event, undefined, { env: defaultEnv });
@@ -306,20 +337,22 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       const cookieData = Buffer.from(JSON.stringify({ state: stateValue, codeVerifier }), 'utf8').toString('base64url');
 
       const event = {
-        path: '/calendar/api/auth/google/callback',
-        httpMethod: 'GET',
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/callback',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/callback' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
         queryStringParameters: {
           state: 'wrong-state',
           code: 'auth-code-123',
         },
-        multiValueHeaders: {
-          cookie: [`calendar_oauth_state=${cookieData}`],
-        },
+        cookies: [`calendar_oauth_state=${cookieData}`],
       };
 
       const response = await handler(event, undefined, { env: defaultEnv });
 
-      const setCookie = response.multiValueHeaders['Set-Cookie'];
+      const setCookie = response.cookies;
       assert.ok(setCookie);
       const clearedCookie = setCookie.find((c) => c.includes('calendar_oauth_state='));
       assert.ok(clearedCookie);
@@ -332,15 +365,17 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       const cookieData = Buffer.from(JSON.stringify({ state: stateValue, codeVerifier }), 'utf8').toString('base64url');
 
       const event = {
-        path: '/calendar/api/auth/google/callback',
-        httpMethod: 'GET',
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/callback',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/callback' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
         queryStringParameters: {
           state: stateValue,
           code: 'auth-code-123',
         },
-        multiValueHeaders: {
-          cookie: [`calendar_oauth_state=${cookieData}`],
-        },
+        cookies: [`calendar_oauth_state=${cookieData}`],
       };
 
       const env = { ...defaultEnv, SESSION_SECRET: '' };
@@ -358,15 +393,17 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       const cookieData = Buffer.from(JSON.stringify({ state: stateValue, codeVerifier }), 'utf8').toString('base64url');
 
       const event = {
-        path: '/calendar/api/auth/google/callback',
-        httpMethod: 'GET',
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/callback',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/callback' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
         queryStringParameters: {
           state: stateValue,
           code: 'bad-code',
         },
-        multiValueHeaders: {
-          cookie: [`calendar_oauth_state=${cookieData}`],
-        },
+        cookies: [`calendar_oauth_state=${cookieData}`],
       };
 
       // Mock exchange that fails
@@ -391,15 +428,17 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       const cookieData = Buffer.from(JSON.stringify({ state: stateValue, codeVerifier }), 'utf8').toString('base64url');
 
       const event = {
-        path: '/calendar/api/auth/google/callback',
-        httpMethod: 'GET',
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/callback',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/callback' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
         queryStringParameters: {
           state: stateValue,
           error: 'access_denied',
         },
-        multiValueHeaders: {
-          cookie: [`calendar_oauth_state=${cookieData}`],
-        },
+        cookies: [`calendar_oauth_state=${cookieData}`],
       };
 
       const response = await handler(event, undefined, { env: defaultEnv });
@@ -415,15 +454,17 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       const cookieData = Buffer.from(JSON.stringify({ state: stateValue, codeVerifier }), 'utf8').toString('base64url');
 
       const event = {
-        path: '/calendar/api/auth/google/callback',
-        httpMethod: 'GET',
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/callback',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/callback' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
         queryStringParameters: {
           state: stateValue,
           code: 'bad-code',
         },
-        multiValueHeaders: {
-          cookie: [`calendar_oauth_state=${cookieData}`],
-        },
+        cookies: [`calendar_oauth_state=${cookieData}`],
       };
 
       const exchangeCode = async () => {
@@ -435,7 +476,7 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
         exchangeCode,
       });
 
-      const setCookie = response.multiValueHeaders['Set-Cookie'];
+      const setCookie = response.cookies;
       assert.ok(setCookie);
       const clearedCookie = setCookie.find((c) => c.includes('calendar_oauth_state='));
       assert.ok(clearedCookie);
@@ -498,15 +539,17 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       };
 
       const event = {
-        path: '/calendar/api/auth/google/callback',
-        httpMethod: 'GET',
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/callback',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/callback' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
         queryStringParameters: {
           state: stateValue,
           code: 'valid-code',
         },
-        multiValueHeaders: {
-          cookie: [`calendar_oauth_state=${cookieData}`],
-        },
+        cookies: [`calendar_oauth_state=${cookieData}`],
       };
 
       const response = await handler(event, undefined, {
@@ -579,15 +622,17 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       };
 
       const event = {
-        path: '/calendar/api/auth/google/callback',
-        httpMethod: 'GET',
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/callback',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/callback' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
         queryStringParameters: {
           state: stateValue,
           code: 'valid-code',
         },
-        multiValueHeaders: {
-          cookie: [`calendar_oauth_state=${cookieData}`],
-        },
+        cookies: [`calendar_oauth_state=${cookieData}`],
       };
 
       const response = await handler(event, undefined, {
@@ -620,15 +665,17 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       const mockPutConnection = async () => ({});
 
       const event = {
-        path: '/calendar/api/auth/google/callback',
-        httpMethod: 'GET',
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/callback',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/callback' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
         queryStringParameters: {
           state: stateValue,
           code: 'valid-code',
         },
-        multiValueHeaders: {
-          cookie: [`calendar_oauth_state=${cookieData}`],
-        },
+        cookies: [`calendar_oauth_state=${cookieData}`],
       };
 
       const response = await handler(event, undefined, {
@@ -638,7 +685,7 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       });
 
       assert.equal(response.statusCode, 302);
-      const setCookie = response.multiValueHeaders['Set-Cookie'];
+      const setCookie = response.cookies;
       assert.ok(setCookie);
 
       const sessionCookie = setCookie.find((c) => c.includes('calendar_session='));
@@ -669,15 +716,17 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       const mockPutConnection = async () => ({});
 
       const event = {
-        path: '/calendar/api/auth/google/callback',
-        httpMethod: 'GET',
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/callback',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/callback' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
         queryStringParameters: {
           state: stateValue,
           code: 'valid-code',
         },
-        multiValueHeaders: {
-          cookie: [`calendar_oauth_state=${cookieData}`],
-        },
+        cookies: [`calendar_oauth_state=${cookieData}`],
       };
 
       const response = await handler(event, undefined, {
@@ -687,7 +736,7 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       });
 
       assert.equal(response.statusCode, 302);
-      assert.equal(response.multiValueHeaders.Location[0], POST_LOGIN_PATH);
+      assert.equal(response.headers.Location, POST_LOGIN_PATH);
     });
 
     it('should preserve existing refresh token when new one is empty', async () => {
@@ -714,15 +763,17 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       };
 
       const event = {
-        path: '/calendar/api/auth/google/callback',
-        httpMethod: 'GET',
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/callback',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/callback' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
         queryStringParameters: {
           state: stateValue,
           code: 'valid-code',
         },
-        multiValueHeaders: {
-          cookie: [`calendar_oauth_state=${cookieData}`],
-        },
+        cookies: [`calendar_oauth_state=${cookieData}`],
       };
 
       const response = await handler(event, undefined, {
@@ -753,15 +804,17 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       };
 
       const event = {
-        path: '/calendar/api/auth/google/callback',
-        httpMethod: 'GET',
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/callback',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/callback' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
         queryStringParameters: {
           state: stateValue,
           code: secretCode,
         },
-        multiValueHeaders: {
-          cookie: [`calendar_oauth_state=${cookieData}`],
-        },
+        cookies: [`calendar_oauth_state=${cookieData}`],
       };
 
       await handler(event, undefined, {
@@ -798,15 +851,17 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       const mockPutConnection = async () => ({});
 
       const event = {
-        path: '/calendar/api/auth/google/callback',
-        httpMethod: 'GET',
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/callback',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/callback' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
         queryStringParameters: {
           state: stateValue,
           code: 'valid-code',
         },
-        multiValueHeaders: {
-          cookie: [`calendar_oauth_state=${cookieData}`],
-        },
+        cookies: [`calendar_oauth_state=${cookieData}`],
       };
 
       await handler(event, undefined, {
@@ -838,15 +893,17 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       };
 
       const event = {
-        path: '/calendar/api/auth/google/callback',
-        httpMethod: 'GET',
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/callback',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/callback' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
         queryStringParameters: {
           state: stateValue,
           code: 'valid-code',
         },
-        multiValueHeaders: {
-          cookie: [`calendar_oauth_state=${cookieData}`],
-        },
+        cookies: [`calendar_oauth_state=${cookieData}`],
       };
 
       await handler(event, undefined, {
@@ -881,15 +938,17 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       };
 
       const event = {
-        path: '/calendar/api/auth/google/callback',
-        httpMethod: 'GET',
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/callback',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/callback' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
         queryStringParameters: {
           state: stateValue,
           code: 'valid-code',
         },
-        multiValueHeaders: {
-          cookie: [`calendar_oauth_state=${cookieData}`],
-        },
+        cookies: [`calendar_oauth_state=${cookieData}`],
       };
 
       const response = await handler(event, undefined, {
@@ -918,15 +977,17 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       };
 
       const event = {
-        path: '/calendar/api/auth/google/callback',
-        httpMethod: 'GET',
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/callback',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/callback' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
         queryStringParameters: {
           state: stateValue,
           code: 'valid-code',
         },
-        multiValueHeaders: {
-          cookie: [`calendar_oauth_state=${cookieData}`],
-        },
+        cookies: [`calendar_oauth_state=${cookieData}`],
       };
 
       const response = await handler(event, undefined, {
@@ -954,15 +1015,17 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       };
 
       const event = {
-        path: '/calendar/api/auth/google/callback',
-        httpMethod: 'GET',
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/callback',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/callback' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
         queryStringParameters: {
           state: stateValue,
           code: 'valid-code',
         },
-        multiValueHeaders: {
-          cookie: [`calendar_oauth_state=${cookieData}`],
-        },
+        cookies: [`calendar_oauth_state=${cookieData}`],
       };
 
       const response = await handler(event, undefined, {
@@ -977,9 +1040,12 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
   describe('GET /calendar/api/auth/me', () => {
     it('should return 401 when not signed in', async () => {
       const event = {
-        path: '/calendar/api/auth/me',
-        httpMethod: 'GET',
-        headers: {},
+        version: '2.0',
+        rawPath: '/calendar/api/auth/me',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/me' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
       };
 
       const response = await handler(event, undefined, { env: defaultEnv });
@@ -1001,11 +1067,12 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       };
 
       const event = {
-        path: '/calendar/api/auth/me',
-        httpMethod: 'GET',
-        multiValueHeaders: {
-          cookie: [`calendar_session=${sessionToken}`],
-        },
+        version: '2.0',
+        rawPath: '/calendar/api/auth/me',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/me' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [`calendar_session=${sessionToken}`],
       };
 
       const response = await handler(event, undefined, {
@@ -1034,11 +1101,12 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       };
 
       const event = {
-        path: '/calendar/api/auth/me',
-        httpMethod: 'GET',
-        multiValueHeaders: {
-          cookie: [`calendar_session=${sessionToken}`],
-        },
+        version: '2.0',
+        rawPath: '/calendar/api/auth/me',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/me' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [`calendar_session=${sessionToken}`],
       };
 
       const response = await handler(event, undefined, {
@@ -1063,11 +1131,12 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       };
 
       const event = {
-        path: '/calendar/api/auth/me',
-        httpMethod: 'GET',
-        multiValueHeaders: {
-          cookie: [`calendar_session=${sessionToken}`],
-        },
+        version: '2.0',
+        rawPath: '/calendar/api/auth/me',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/me' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [`calendar_session=${sessionToken}`],
       };
 
       const response = await handler(event, undefined, {
@@ -1096,11 +1165,12 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       const tamperedToken = tamperedPayload + '.' + signature;
 
       const event = {
-        path: '/calendar/api/auth/me',
-        httpMethod: 'GET',
-        multiValueHeaders: {
-          cookie: [`calendar_session=${tamperedToken}`],
-        },
+        version: '2.0',
+        rawPath: '/calendar/api/auth/me',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/me' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [`calendar_session=${tamperedToken}`],
       };
 
       const response = await handler(event, undefined, { env: defaultEnv });
@@ -1116,11 +1186,12 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       );
 
       const event = {
-        path: '/calendar/api/auth/me',
-        httpMethod: 'GET',
-        multiValueHeaders: {
-          cookie: [`calendar_session=${sessionToken}`],
-        },
+        version: '2.0',
+        rawPath: '/calendar/api/auth/me',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/me' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [`calendar_session=${sessionToken}`],
       };
 
       // Verify with time advanced beyond expiry
@@ -1149,11 +1220,12 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       };
 
       const event = {
-        path: '/calendar/api/auth/me',
-        httpMethod: 'GET',
-        multiValueHeaders: {
-          cookie: [`calendar_session=${sessionToken}`],
-        },
+        version: '2.0',
+        rawPath: '/calendar/api/auth/me',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/me' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [`calendar_session=${sessionToken}`],
       };
 
       const response = await handler(event, undefined, {
@@ -1170,29 +1242,35 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
   describe('POST /calendar/api/auth/logout', () => {
     it('should return 204 with cleared cookies', async () => {
       const event = {
-        path: '/calendar/api/auth/logout',
-        httpMethod: 'POST',
-        headers: {},
+        version: '2.0',
+        rawPath: '/calendar/api/auth/logout',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'POST', path: '/calendar/api/auth/logout' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
       };
 
       const response = await handler(event, undefined, { env: defaultEnv });
 
       assert.equal(response.statusCode, 204);
-      const setCookie = response.multiValueHeaders['Set-Cookie'];
+      const setCookie = response.cookies;
       assert.ok(setCookie);
       assert.ok(setCookie.length >= 2); // Both session and state cookies cleared
     });
 
     it('should expire session cookie', async () => {
       const event = {
-        path: '/calendar/api/auth/logout',
-        httpMethod: 'POST',
-        headers: {},
+        version: '2.0',
+        rawPath: '/calendar/api/auth/logout',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'POST', path: '/calendar/api/auth/logout' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
       };
 
       const response = await handler(event, undefined, { env: defaultEnv });
 
-      const setCookie = response.multiValueHeaders['Set-Cookie'];
+      const setCookie = response.cookies;
       const sessionCookie = setCookie.find((c) => c.includes('calendar_session='));
       assert.ok(sessionCookie);
       assert.ok(sessionCookie.includes('Max-Age=0'));
@@ -1200,14 +1278,17 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
 
     it('should expire state cookie', async () => {
       const event = {
-        path: '/calendar/api/auth/logout',
-        httpMethod: 'POST',
-        headers: {},
+        version: '2.0',
+        rawPath: '/calendar/api/auth/logout',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'POST', path: '/calendar/api/auth/logout' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
       };
 
       const response = await handler(event, undefined, { env: defaultEnv });
 
-      const setCookie = response.multiValueHeaders['Set-Cookie'];
+      const setCookie = response.cookies;
       const stateCookie = setCookie.find((c) => c.includes('calendar_oauth_state='));
       assert.ok(stateCookie);
       assert.ok(stateCookie.includes('Max-Age=0'));
@@ -1231,11 +1312,12 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       const tamperedToken = payload + '.' + tamperedSig;
 
       const event = {
-        path: '/calendar/api/auth/me',
-        httpMethod: 'GET',
-        multiValueHeaders: {
-          cookie: [`calendar_session=${tamperedToken}`],
-        },
+        version: '2.0',
+        rawPath: '/calendar/api/auth/me',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/me' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [`calendar_session=${tamperedToken}`],
       };
 
       const response = await handler(event, undefined, {
@@ -1260,11 +1342,12 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       const truncatedToken = payload + '.' + signature.slice(0, signature.length - 5); // Truncate
 
       const event = {
-        path: '/calendar/api/auth/me',
-        httpMethod: 'GET',
-        multiValueHeaders: {
-          cookie: [`calendar_session=${truncatedToken}`],
-        },
+        version: '2.0',
+        rawPath: '/calendar/api/auth/me',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/me' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [`calendar_session=${truncatedToken}`],
       };
 
       const response = await handler(event, undefined, {
@@ -1284,14 +1367,16 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       const cookieData = Buffer.from(JSON.stringify({ state: stateValue, codeVerifier }), 'utf8').toString('base64url');
 
       const event = {
-        path: '/calendar/api/auth/google/callback',
-        httpMethod: 'GET',
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/callback',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/callback' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
         queryStringParameters: {
           state: stateValue,
         },
-        multiValueHeaders: {
-          cookie: [`calendar_oauth_state=${cookieData}`],
-        },
+        cookies: [`calendar_oauth_state=${cookieData}`],
       };
 
       const response = await handler(event, undefined, { env: defaultEnv });
@@ -1301,15 +1386,17 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
 
     it('should handle malformed state cookie', async () => {
       const event = {
-        path: '/calendar/api/auth/google/callback',
-        httpMethod: 'GET',
+        version: '2.0',
+        rawPath: '/calendar/api/auth/google/callback',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/callback' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
         queryStringParameters: {
           state: 'any-state',
           code: 'any-code',
         },
-        multiValueHeaders: {
-          cookie: ['calendar_oauth_state=invalid-base64-!!!'],
-        },
+        cookies: ['calendar_oauth_state=invalid-base64-!!!'],
       };
 
       const response = await handler(event, undefined, { env: defaultEnv });
@@ -1324,11 +1411,12 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
       );
 
       const event = {
-        path: '/calendar/api/auth/me',
-        httpMethod: 'GET',
-        multiValueHeaders: {
-          cookie: [`calendar_session=${sessionToken}`],
-        },
+        version: '2.0',
+        rawPath: '/calendar/api/auth/me',
+        rawQueryString: '',
+        requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/me' } },
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [`calendar_session=${sessionToken}`],
       };
 
       const response = await handler(event, undefined, {

@@ -448,8 +448,10 @@ describe('Calendar Scan Orchestration E2E Tests', () => {
       });
     });
 
-    describe('Scenario: ALB event is not a scheduled event', () => {
-      it('Given {httpMethod:"GET", path:"/scan"}, When isScheduledScanEvent is called, Then returns false', () => {
+    describe('Scenario: An HTTP request is never mistaken for a scheduled scan', () => {
+      it('Given an ALB-shaped {httpMethod:"GET", path:"/scan"}, When isScheduledScanEvent is called, Then returns false', () => {
+        // Kept as a regression guard: the ALB shape must still be excluded, so
+        // widening the check for payload format 2.0 did not drop the old case.
         const event = {
           source: 'scheduled-scan',
           httpMethod: 'GET', // ALB events have httpMethod
@@ -459,6 +461,41 @@ describe('Calendar Scan Orchestration E2E Tests', () => {
         const result = isScheduledScanEvent(event);
 
         assert.equal(result, false, 'ALB events should not match');
+      });
+
+      it('Given a format 2.0 HTTP event that carries a "source" property, And no httpMethod and no path property because format 2.0 has neither, When isScheduledScanEvent inspects it, Then it returns false', () => {
+        // TASK-049. This is the dangerous case: a Lambda function URL sends
+        // NEITHER httpMethod NOR path, so a check that excluded only those two
+        // would classify a real browser request as a schedule - answering the
+        // browser with a bare result object (a blank page) and running no scan.
+        const event = {
+          source: 'scheduled-scan',
+          version: '2.0',
+          rawPath: '/calendar/api/scan',
+          rawQueryString: '',
+          headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+          cookies: [],
+          requestContext: {
+            domainName: 'abc123.lambda-url.ap-southeast-2.on.aws',
+            http: { method: 'POST', path: '/calendar/api/scan' },
+          },
+        };
+
+        assert.equal(isScheduledScanEvent(event), false,
+          'a function URL HTTP request was classified as a scheduled scan');
+      });
+
+      it('And rawPath alone, or requestContext alone, is enough to disqualify it', () => {
+        assert.equal(
+          isScheduledScanEvent({ source: 'scheduled-scan', rawPath: '/calendar/api/scan' }),
+          false,
+          'rawPath must disqualify a schedule'
+        );
+        assert.equal(
+          isScheduledScanEvent({ source: 'scheduled-scan', requestContext: { http: { method: 'GET' } } }),
+          false,
+          'requestContext must disqualify a schedule'
+        );
       });
     });
 
@@ -486,9 +523,15 @@ describe('Calendar Scan Orchestration E2E Tests', () => {
     describe('Scenario: POST /calendar/api/scan requires session', () => {
       it('Given no session cookie, When POST /calendar/api/scan, Then returns 401', async () => {
         const event = {
-          path: '/calendar/api/scan',
-          httpMethod: 'POST',
-          headers: { Cookie: '' }, // No session
+          version: '2.0',
+          rawPath: '/calendar/api/scan',
+          rawQueryString: '',
+          headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+          cookies: [], // No session: format 2.0 carries cookies here, not in a header
+          requestContext: {
+            domainName: 'abc123.lambda-url.ap-southeast-2.on.aws',
+            http: { method: 'POST', path: '/calendar/api/scan' },
+          },
           body: '{}',
         };
 

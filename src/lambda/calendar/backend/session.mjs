@@ -38,8 +38,11 @@ export const SESSION_COOKIE_NAME = "calendar_session";
 export const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 /**
- * Cookie path. Scoped to /calendar so the session is not sent to the other apps
- * sharing this ALB and hostname (the chatbot owns /chatbot).
+ * Cookie path. Scoped to /calendar, which is where the app lives. This began as
+ * a way to keep the session off the other apps that shared the ALB hostname (the
+ * chatbot owns /chatbot); since TASK-049 the app has its own function-URL origin
+ * and shares it with nothing, so the scoping is now just least privilege - the
+ * cookie is still not sent on any path this app does not serve.
  */
 export const SESSION_COOKIE_PATH = "/calendar";
 
@@ -264,8 +267,9 @@ export function serializeClearedSessionCookie({ path = SESSION_COOKIE_PATH } = {
 }
 
 /**
- * Parse a Cookie header into a name -> value map. Tolerates the array form the
- * ALB delivers with lambda_multi_value_headers_enabled, and cookie values that
+ * Parse a Cookie header into a name -> value map. Tolerates an array of parts -
+ * which is both payload format 2.0's `cookies` array (one "name=value" per
+ * entry) and the array form the ALB used to deliver - and cookie values that
  * themselves contain "=" (base64 padding, JWT-ish tokens).
  *
  * @param {string|string[]|null|undefined} raw
@@ -289,14 +293,26 @@ export function parseCookieHeader(raw) {
 }
 
 /**
- * Cookies from an ALB event, whichever header shape it arrived in.
+ * Cookies from a request event, whichever shape they arrived in.
+ *
+ * A Lambda function URL (payload format 2.0) does NOT put cookies in the header
+ * map at all: it strips them into a top-level `cookies` array, so reading only
+ * the Cookie header there finds nothing and every request looks signed out
+ * (TASK-049). The header path is kept for the ALB shape and for any caller that
+ * still sends a plain Cookie header, and is tried second so a real `cookies`
+ * array always wins.
+ *
  * @param {object} event
  * @returns {Record<string, string>}
  */
 export function getCookies(event) {
-  const headers = event?.multiValueHeaders || event?.headers || {};
-  // HTTP header names are case-insensitive; the ALB lower-cases them, but do not
-  // depend on that.
+  if (Array.isArray(event?.cookies) && event.cookies.length > 0) {
+    return parseCookieHeader(event.cookies);
+  }
+
+  const headers = event?.headers || event?.multiValueHeaders || {};
+  // HTTP header names are case-insensitive; both event formats lower-case them,
+  // but do not depend on that.
   for (const name of Object.keys(headers)) {
     if (name.toLowerCase() === "cookie") {
       return parseCookieHeader(headers[name]);
@@ -306,7 +322,7 @@ export function getCookies(event) {
 }
 
 /**
- * Read a named cookie from an ALB event.
+ * Read a named cookie from a request event.
  * @param {object} event
  * @param {string} name
  * @returns {string|null}

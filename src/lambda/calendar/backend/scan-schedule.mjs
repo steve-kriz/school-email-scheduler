@@ -62,7 +62,7 @@ import { runScan } from "./scan.mjs";
 import { createHash } from "node:crypto";
 
 /** Sentinel the scheduled invocation payload carries so index.mjs can tell a
- * scheduler-delivered event apart from an ALB request. */
+ * scheduler-delivered event apart from an HTTP request. */
 export const SCAN_SCHEDULED_SOURCE = "scheduled-scan";
 
 /** Accepted `frequency` values. */
@@ -413,10 +413,18 @@ export async function deleteScanSchedule(
  *
  * `source` alone is not sufficient - it is a free-form string a bus event (or
  * anything else that might one day target this Lambda) could also carry - so
- * this additionally requires the event to clearly NOT be an ALB request: ALB
- * events always carry `httpMethod` and `path`, which the schedule Input this
- * module writes (see `putScanSchedule`) never sets. Mirrors the chatbot's
- * `isScheduledSummaryEvent` exactly.
+ * this additionally requires the event to clearly NOT be an HTTP request. Both
+ * request shapes are excluded, because getting this wrong is silent in both
+ * directions: an HTTP request misread as a schedule would answer a browser with
+ * a bare result object (no status, no headers), and a schedule misread as HTTP
+ * would 404 and never run the scan.
+ *
+ *   - `rawPath` / `requestContext` are what a Lambda function URL sends
+ *     (payload format 2.0, TASK-049).
+ *   - `httpMethod` / `path` are what the ALB sent before it.
+ *
+ * The schedule Input this module writes (see `putScanSchedule`) sets none of the
+ * four. Mirrors the chatbot's `isScheduledSummaryEvent`, widened for format 2.0.
  *
  * @param {unknown} event
  * @returns {boolean}
@@ -427,7 +435,9 @@ export function isScheduledScanEvent(event) {
     typeof event === "object" &&
     event.source === SCAN_SCHEDULED_SOURCE &&
     event.httpMethod === undefined &&
-    event.path === undefined
+    event.path === undefined &&
+    event.rawPath === undefined &&
+    event.requestContext === undefined
   );
 }
 

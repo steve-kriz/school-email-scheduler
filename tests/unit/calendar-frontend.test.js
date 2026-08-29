@@ -90,7 +90,7 @@ const FILE_BODIES = {
 };
 
 const headerOf = (response, name) => {
-  const value = response.multiValueHeaders?.[name];
+  const value = response.headers?.[name];
   return Array.isArray(value) ? value[0] : value;
 };
 

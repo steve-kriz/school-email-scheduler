@@ -47,7 +47,10 @@ const CONFIG_DIR = path.join(TERRAFORM_DIR, 'config');
 const DEV_AU_VAR_FILE = 'config/dev/au.tfvars';
 
 const alertingContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'alerting.tf'), 'utf-8');
-const wafContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'waf_calendar.tf'), 'utf-8');
+// TASK-049 deleted terraform/waf_calendar.tf. Reading it here would throw at
+// module load and take the whole file down, so the path is only ever used to
+// assert its ABSENCE.
+const WAF_TF_PATH = path.join(TERRAFORM_DIR, 'waf_calendar.tf');
 
 // --- Backend modules under test. Imported by absolute file URL, the
 // convention the rest of this suite uses on Windows. ---
@@ -157,21 +160,29 @@ describe('Feature: Operational guardrails - alerting (TASK-011)', () => {
       );
 
       const names = alarmNames();
-      assert.ok(names.length >= 5, `expected at least 5 alarms in alerting.tf, found ${names.length}`);
+      // Four since TASK-049 removed the ALB target-group alarm.
+      assert.ok(names.length >= 4, `expected at least 4 alarms in alerting.tf, found ${names.length}`);
       for (const name of names) {
         const { value } = tfConsole(alarmCountExpression(name));
         assert.strictEqual(value, '0', `alarm "${name}" would still be created in an environment with no SNS topic`);
       }
     });
 
-    it('And planning succeeds: terraform validate reports error_count 0 with both new files present', () => {
+    it('And planning succeeds: terraform validate reports error_count 0 without waf_calendar.tf', () => {
       // NOT a `terraform plan`: that needs AWS credentials, an S3 backend and
       // two remote data sources, none of which exist here. What IS proved is
-      // that the configuration including alerting.tf and waf_calendar.tf is
-      // valid, and that the guard above evaluates to zero.
-      for (const file of ['alerting.tf', 'waf_calendar.tf']) {
+      // that the configuration is valid, and that the guard above evaluates to
+      // zero. waf_calendar.tf is deliberately NOT in this list any more:
+      // TASK-049 deleted it, and the configuration must still validate without
+      // it - a dangling reference to the removed rule group would show up here.
+      for (const file of ['alerting.tf', 'lambda_calendar.tf']) {
         assert.ok(fs.existsSync(path.join(TERRAFORM_DIR, file)), `${file} must exist to be validated`);
       }
+      assert.strictEqual(
+        fs.existsSync(WAF_TF_PATH),
+        false,
+        'waf_calendar.tf must be gone, and the configuration must still validate without it'
+      );
 
       const result = spawnSync(TERRAFORM_BIN, ['validate', '-json', '-no-color'], {
         cwd: TERRAFORM_DIR,
@@ -291,217 +302,92 @@ describe('Feature: Operational guardrails - alerting (TASK-011)', () => {
     });
   });
 
-  describe('Scenario: An unhealthy target is alarmed', () => {
-    it('Given the alerting configuration, Then an alarm exists on the calendar target group UnHealthyHostCount metric', () => {
-      const body = extractResourceBody(
-        alertingContent,
-        'aws_cloudwatch_metric_alarm',
-        'calendar_target_group_unhealthy_hosts'
+  describe('Scenario: No alarm is left watching a metric that cannot report (TASK-049)', () => {
+    it('When terraform is applied without the ALB target group, Then no CloudWatch alarm remains with a TargetGroup or LoadBalancer dimension for this app', () => {
+      assert.strictEqual(
+        extractResourceBody(alertingContent, 'aws_cloudwatch_metric_alarm', 'calendar_target_group_unhealthy_hosts'),
+        null,
+        'the target-group health alarm survives; with no target group it can only report INSUFFICIENT_DATA, which looks like health'
       );
-      assert.ok(body, 'no target-group health alarm declared');
-      assert.strictEqual(readArgument(body, 'metric_name'), 'UnHealthyHostCount');
-      assert.strictEqual(readArgument(body, 'namespace'), 'AWS/ApplicationELB');
-      const dimensions = extractBlock(body.replace(/dimensions\s*=\s*\{/, 'dimensions {'), 'dimensions');
-      assert.strictEqual(readArgument(dimensions, 'TargetGroup'), 'aws_lb_target_group.calendar_lambda_tg.arn_suffix');
-      assert.strictEqual(readArgument(dimensions, 'LoadBalancer'), 'data.aws_lb.web_app_alb.arn_suffix');
+
+      for (const name of alarmNames()) {
+        const body = extractResourceBody(alertingContent, 'aws_cloudwatch_metric_alarm', name);
+        assert.notStrictEqual(
+          readArgument(body, 'namespace'),
+          'AWS/ApplicationELB',
+          `alarm "${name}" still watches AWS/ApplicationELB`
+        );
+        const dimensions = extractBlock(body.replace(/dimensions\s*=\s*\{/, 'dimensions {'), 'dimensions');
+        if (!dimensions) continue;
+        assert.strictEqual(readArgument(dimensions, 'TargetGroup'), null, `alarm "${name}" keeps a TargetGroup dimension`);
+        assert.strictEqual(readArgument(dimensions, 'LoadBalancer'), null, `alarm "${name}" keeps a LoadBalancer dimension`);
+      }
     });
   });
 });
 
-describe('Feature: Operational guardrails - WAF (TASK-011)', () => {
-  const ruleGroup = parseRuleGroup(wafContent, 'calendar_protection');
-  const byName = Object.fromEntries(ruleGroup.rules.map((rule) => [rule.name, rule]));
-
-  describe('Scenario: Page requests are rate limited per IP', () => {
-    it('Given the WAF configuration, Then a rate-based rule scoped to "/calendar*" uses calendar_waf_rate_limit', () => {
-      const rule = byName['calendar-rate-limit'];
-      assert.ok(rule, 'no baseline rate-limit rule declared');
-      assert.strictEqual(rule.statement.kind, 'rate_based');
-      assert.strictEqual(rule.statement.limit, 'var.calendar_waf_rate_limit');
-      assert.strictEqual(rule.statement.aggregateKeyType, 'IP');
-      assert.strictEqual(rule.statement.scopeDown.field, 'uri_path');
-      assert.strictEqual(rule.statement.scopeDown.searchString, '/calendar');
-      assert.strictEqual(rule.statement.scopeDown.positionalConstraint, 'STARTS_WITH');
+/**
+ * TASK-049: the WAF rule group is removed, not repointed.
+ *
+ * aws_wafv2_rule_group.calendar_protection was consumed by the basestack ALB's
+ * Web ACL. A regional Web ACL cannot be associated with a Lambda function URL,
+ * so once the app moved there the rule group had NO consumer in the request
+ * path - it would still cost WCU and still look protective in the console while
+ * inspecting nothing.
+ */
+describe('Feature: The WAF rule group is removed along with its outputs (TASK-049)', () => {
+  describe('Scenario: No WAF rule group is left without a consumer', () => {
+    it('When the change is applied, Then terraform/waf_calendar.tf no longer exists', () => {
+      assert.strictEqual(fs.existsSync(WAF_TF_PATH), false, 'terraform/waf_calendar.tf still exists');
     });
 
-    it('And calendar_waf_rate_limit defaults to 300 (evaluated by terraform, not read from the file)', () => {
-      assert.strictEqual(tfConsole('var.calendar_waf_rate_limit').value, '300');
+    it('And no .tf file declares a WAF rule group, web ACL or association for this app', () => {
+      const tfFiles = fs.readdirSync(TERRAFORM_DIR).filter((name) => name.endsWith('.tf'));
+      assert.ok(tfFiles.length > 0, 'no terraform files found');
+      for (const name of tfFiles) {
+        const content = fs.readFileSync(path.join(TERRAFORM_DIR, name), 'utf-8');
+        for (const type of [
+          'aws_wafv2_rule_group',
+          'aws_wafv2_web_acl',
+          'aws_wafv2_web_acl_association',
+          'aws_wafv2_web_acl_logging_configuration',
+        ]) {
+          assert.ok(
+            !new RegExp(`^\\s*resource\\s+"${type}"`, 'm').test(content),
+            `${name} still declares a ${type}, which nothing in the request path can consume`
+          );
+        }
+      }
     });
 
-    it('And the WAF period is the 5-minute window WAF rate-based rules use by design', () => {
-      // AWS WAF rate-based rules are fixed at a 5-minute evaluation window
-      // unless evaluation_window_sec is set; leaving it unset is what makes
-      // "per 5 minutes per IP" true.
-      const rateRules = ruleGroup.rules.filter((rule) => rule.statement.kind === 'rate_based');
-      assert.strictEqual(rateRules.length, 2, 'two rate-based rules');
-      for (const rule of rateRules) {
-        assert.strictEqual(
-          /evaluation_window_sec/.test(wafContent),
-          false,
-          `rule "${rule.name}" must leave the default 300-second window in place for "per 5 minutes" to hold`
+    it('And no output still exports the rule group ARN', () => {
+      const tfFiles = fs.readdirSync(TERRAFORM_DIR).filter((name) => name.endsWith('.tf'));
+      for (const name of tfFiles) {
+        const content = fs.readFileSync(path.join(TERRAFORM_DIR, name), 'utf-8');
+        assert.ok(
+          !/output\s+"calendar_waf_rule_group_arn"/.test(content),
+          `${name} still exports calendar_waf_rule_group_arn for a resource that no longer exists`
         );
       }
     });
-  });
 
-  describe('Scenario: Scanning is limited more tightly than browsing', () => {
-    it('Given the WAF configuration, Then a rate-based rule scoped to "/calendar/api/scan" uses calendar_scan_rate_limit', () => {
-      const rule = byName['calendar-scan-rate-limit'];
-      assert.ok(rule, 'no scan rate-limit rule declared');
-      assert.strictEqual(rule.statement.limit, 'var.calendar_scan_rate_limit');
-      assert.strictEqual(rule.statement.scopeDown.searchString, '/calendar/api/scan');
-      assert.strictEqual(rule.action, 'block');
-    });
-
-    it('And calendar_scan_rate_limit defaults to 10', () => {
-      assert.strictEqual(tfConsole('var.calendar_scan_rate_limit').value, '10');
-    });
-
-    it('And calendar_scan_rate_limit is lower than calendar_waf_rate_limit', () => {
-      const { value } = tfConsole('var.calendar_scan_rate_limit < var.calendar_waf_rate_limit');
-      assert.strictEqual(value, 'true', 'a scan costs Gmail calls and model tokens; it cannot share the page-load bound');
-    });
-
-    it('FAILURE PATH: a limit below the AWS WAF floor of 10 is rejected by variable validation', () => {
-      const { stderr } = tfConsole('var.calendar_scan_rate_limit', ['-var', 'calendar_scan_rate_limit=5']);
-      const squashed = stderr.replace(/\s+/g, ' ');
-      assert.match(squashed, /Invalid value for variable/, `expected a validation error, got: ${squashed}`);
-      assert.match(
-        squashed,
-        /calendar_scan_rate_limit must be at least 10/,
-        `the validation must name the floor it enforces, got: ${squashed}`
-      );
-    });
-
-    it('FAILURE PATH: the page-load limit has the same floor', () => {
-      const { stderr } = tfConsole('var.calendar_waf_rate_limit', ['-var', 'calendar_waf_rate_limit=9']);
-      assert.match(stderr.replace(/\s+/g, ' '), /calendar_waf_rate_limit must be at least 10/);
-    });
-
-    it('EDGE: a value exactly at the floor is accepted', () => {
-      const { value, stderr } = tfConsole('var.calendar_scan_rate_limit', ['-var', 'calendar_scan_rate_limit=10']);
-      assert.strictEqual(value, '10');
-      assert.strictEqual(
-        /Invalid value for variable/.test(stderr),
-        false,
-        `10 is the documented minimum and must not be rejected: ${stderr}`
-      );
-    });
-  });
-
-  describe('Scenario: Sign-in still works behind the WAF', () => {
-    const callback = {
-      method: 'GET',
-      uriPath: '/calendar/api/auth/google/callback',
-      queryString:
-        'code=4%2F0AeanS0Y-a-very-long-opaque-authorization-code-value-that-a-size-rule-would-flag&state=9f2c1b7e4d5a6f8091a2b3c4d5e6f708',
-    };
-
-    it('When a GET to "/calendar/api/auth/google/callback" carries code and state parameters, Then no rule blocks the request', () => {
-      const result = evaluateRuleGroup(ruleGroup.rules, callback);
-      assert.notStrictEqual(result.decision, 'block', `a rule blocked sign-in: ${result.ruleName}`);
-      assert.strictEqual(result.decision, 'allow', 'the callback is explicitly and terminally allowed');
-      assert.strictEqual(result.ruleName, 'calendar-oauth-callback-allow');
-    });
-
-    it('And it is still allowed when the caller has already exceeded both rate limits (a NATted school)', () => {
-      const result = evaluateRuleGroup(ruleGroup.rules, callback, {
-        overLimitRules: ['calendar-rate-limit', 'calendar-scan-rate-limit'],
-      });
-      assert.strictEqual(result.decision, 'allow', 'a single school egress IP must not lock every user out of sign-in');
-    });
-
-    it('And no rule can even see the code or state parameters, so no query-string rule can flag them', () => {
-      const fields = new Set();
-      const collect = (statement) => {
-        if (statement.kind === 'byte_match') fields.add(statement.field);
-        if (statement.kind === 'rate_based' && statement.scopeDown) collect(statement.scopeDown);
-        if (statement.statements) statement.statements.forEach(collect);
-        if (statement.statement) collect(statement.statement);
-      };
-      ruleGroup.rules.forEach((rule) => collect(rule.statement));
-      assert.deepStrictEqual([...fields].sort(), ['method', 'uri_path']);
-    });
-
-    it('AC 11 (DEVIATION, reported not papered over): managed rule groups are captured as an inherited list, not declared', () => {
-      // A managed_rule_group_statement is not a legal block inside an
-      // aws_wafv2_rule_group - only inside a Web ACL - and the shared ALB's
-      // only Web ACL belongs to the basestack. That constraint was verified
-      // independently against the pinned provider (hashicorp/aws 6.61.0),
-      // which rejects the block with "Blocks of type
-      // managed_rule_group_statement are not expected here". So the selection
-      // is captured as a local plus an output instead. This test pins WHAT WAS
-      // BUILT, and names it as a deviation so it is judged, not hidden.
-      const localsMatch = /calendar_waf_inherited_managed_rule_groups\s*=\s*\[([\s\S]*?)\]/.exec(wafContent);
-      assert.ok(localsMatch, 'the inherited managed rule group selection must be declared as a local');
-      const selection = [...localsMatch[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
-      assert.deepStrictEqual(selection, [
-        'AWSManagedRulesWindowsRuleSet',
-        'AWSManagedRulesCommonRuleSet',
-        'AWSManagedRulesSQLiRuleSet',
-        'AWSManagedRulesKnownBadInputsRuleSet',
-      ]);
+    it('FAILURE PATH: the scan rate limit that capped Anthropic spend per IP is gone, and nothing silently claims otherwise', () => {
+      // This is a deliberate, documented loss - the test exists so it cannot be
+      // quietly reintroduced as a comment while no rule enforces it.
+      const variables = fs.readFileSync(path.join(TERRAFORM_DIR, 'variables.tf'), 'utf-8');
       assert.ok(
-        selection.includes('AWSManagedRulesCommonRuleSet') && selection.includes('AWSManagedRulesKnownBadInputsRuleSet'),
-        'the ticket names the common rule set and known-bad-inputs as the minimum'
+        !variables.includes('variable "calendar_scan_rate_limit"'),
+        'var.calendar_scan_rate_limit is still declared but no rule consumes it'
       );
+      const lambdaTf = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
       assert.match(
-        wafContent,
-        /output\s+"calendar_waf_managed_rule_groups"/,
-        'the selection must be exported so it can be diffed against the live ACL'
+        lambdaTf,
+        /WAF/,
+        'lambda_calendar.tf must record that the function URL has no WAF in front of it'
       );
-      assert.strictEqual(
-        ruleGroup.rules.some((rule) => rule.statement.kind === 'managed_rule_group'),
-        false,
-        'no managed_rule_group_statement is (or can be) declared inside the rule group'
-      );
-    });
-
-    it('And the rule group is handed to the shared ALB the way waf_chatbot.tf does it: an exported ARN', () => {
-      assert.match(wafContent, /output\s+"calendar_waf_rule_group_arn"/, 'the rule group ARN must be exported');
-      assert.match(
-        wafContent,
-        /value\s*=\s*aws_wafv2_rule_group\.calendar_protection\.arn/,
-        'the exported ARN must be this rule group'
-      );
-      assert.strictEqual(
-        /resource\s+"aws_wafv2_web_acl_association"/.test(wafContent),
-        false,
-        'an ALB can hold exactly one Web ACL and the basestack already owns it'
-      );
-    });
-  });
-
-  describe('Scenario: WAF logging does not capture credentials', () => {
-    it('Given any WAF logging configuration, Then request bodies, cookies and Authorization headers are excluded', () => {
-      // There is no logging configuration at all - the strongest form of
-      // "excluded". The chatbot has none either, and inventing a logging
-      // destination for the shared ACL is not this service's call.
-      assert.strictEqual(
-        /resource\s+"aws_wafv2_web_acl_logging_configuration"/.test(wafContent),
-        false,
-        'no WAF logging destination is created, so no request content can be written to one'
-      );
-      assert.strictEqual(
-        /redacted_fields/.test(wafContent),
-        false,
-        'redacted_fields only exists inside a logging configuration; there is none'
-      );
-    });
-
-    it('And sampled requests - the one content-bearing knob a rule group has - are off everywhere', () => {
-      assert.strictEqual(ruleGroup.visibility.sampledRequestsEnabled, false, 'group-level sampling must be off');
-      for (const rule of ruleGroup.rules) {
-        assert.strictEqual(rule.visibility.sampledRequestsEnabled, false, `rule "${rule.name}" must not sample`);
-      }
-      assert.strictEqual(ruleGroup.rules.length, 3, 'three rules plus the group makes four visibility_config blocks');
     });
   });
 });
-
-// -----------------------------------------------------------------------------
-// The emitters. Every DB/Gmail/HTTP dependency is a mock; no connection opens.
-// -----------------------------------------------------------------------------
 
 describe('Feature: the Lambda actually emits what the alarms count (TASK-011)', () => {
   /** Deps for runScan with every I/O boundary mocked. */

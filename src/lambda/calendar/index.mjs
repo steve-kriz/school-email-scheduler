@@ -203,15 +203,26 @@ function getCorsOrigin(origin, allowlist = ALLOWED_ORIGINS) {
 }
 
 /**
- * Pull the request Origin (or Referer) out of an ALB event's headers. With
- * lambda_multi_value_headers_enabled the values arrive as arrays, so handle
- * both shapes.
+ * Read one header, from either the single-value map payload format 2.0 sends or
+ * the array-valued map the ALB used to send. Names must be given lower-cased:
+ * both formats lower-case header names on the way in.
+ *
+ * @param {Record<string, string|string[]>} headers
+ * @param {string} name
+ * @returns {string|undefined}
+ */
+function readHeader(headers, name) {
+  const value = headers?.[name];
+  return Array.isArray(value) ? value[0] : value;
+}
+
+/**
+ * Pull the request Origin (or Referer) out of an event's headers. Function URL
+ * events use a single-value `headers` map; the ALB used arrays, so both shapes
+ * are still handled.
  */
 function getRequestOrigin(headers) {
-  const read = (name) => {
-    const value = headers?.[name];
-    return Array.isArray(value) ? value[0] : value;
-  };
+  const read = (name) => readHeader(headers, name);
   const origin = read("origin");
   if (origin) return origin;
   const referer = read("referer");
@@ -223,28 +234,93 @@ function getRequestOrigin(headers) {
   }
 }
 
-const STATUS_TEXT = {
-  200: "OK",
-  204: "No Content",
-  302: "Found",
-  400: "Bad Request",
-  401: "Unauthorized",
-  403: "Forbidden",
-  404: "Not Found",
-  500: "Internal Server Error",
-  // Used when Google's token endpoint - not this service - is what failed.
-  502: "Bad Gateway",
-};
-
-const CREDENTIALS_HEADER = "access-control-allow-credentials";
+/** Hostnames are letters, digits, dots, hyphens and an optional :port. */
+const HOSTNAME_PATTERN = /^[A-Za-z0-9.-]+(:\d+)?$/;
 
 /**
- * Build an ALB-compatible response (multi-value headers format).
+ * The public origin this request was actually served on - the value
+ * PUBLIC_BASE_URL is supposed to hold, resolved per request (TASK-049).
  *
- * The target group sets lambda_multi_value_headers_enabled = true, so the ALB
- * expects `multiValueHeaders` (every value an array) rather than `headers`.
- * That is what lets later tickets emit several Set-Cookie headers from one
- * response - a single-value `headers` map cannot.
+ * WHY THIS IS NOT SIMPLY AN ENV VAR ANY MORE. The app is served from a Lambda
+ * function URL whose host contains a URL id AWS generates when the function URL
+ * is created. Terraform cannot put that id in this function's own environment:
+ * the function URL depends on the function, so reading it back into the
+ * function's environment block is a dependency cycle. The env var is therefore
+ * EMPTY in deployed environments, and the origin is taken from the request -
+ * where it is not a guess but the literal host the client reached us on, which
+ * also means it follows the URL id automatically if the function URL is ever
+ * recreated.
+ *
+ * An explicitly configured PUBLIC_BASE_URL still wins, unchanged, so local
+ * development (`http://localhost:3000`) and any future CDN or custom domain in
+ * front of the function keep working by setting one variable.
+ *
+ * The derived host is checked against `HOSTNAME_PATTERN` before use. The only
+ * thing built from this value is the Google `redirect_uri`, and Google refuses
+ * any redirect_uri that is not registered on the OAuth client - so a spoofed
+ * Host cannot redirect an authorisation code anywhere. The pattern is there so
+ * a hostile Host header cannot inject path or query text into a URL we
+ * construct; an unusable host resolves to "" and the route then reports "Google
+ * sign-in is not configured" rather than sending Google something malformed.
+ *
+ * @param {object} event
+ * @param {Record<string, string|undefined>} [env]
+ * @returns {string} Origin with no trailing slash, or "" when none can be found.
+ */
+export function resolvePublicBaseUrl(event, env = process.env) {
+  const configured = String(env?.PUBLIC_BASE_URL || "")
+    .trim()
+    .replace(/\/+$/, "");
+  if (configured) return configured;
+
+  const headers = event?.headers || event?.multiValueHeaders || {};
+  // requestContext.domainName is the function URL's own host, set by the Lambda
+  // service rather than copied from the request, so it is preferred.
+  const host = String(event?.requestContext?.domainName || readHeader(headers, "host") || "").trim();
+  if (!host || !HOSTNAME_PATTERN.test(host)) return "";
+
+  // A function URL is HTTPS-only; x-forwarded-proto is honoured so a local
+  // proxy or a future fronting service can say otherwise.
+  const proto = String(readHeader(headers, "x-forwarded-proto") || "https").trim();
+  if (proto !== "http" && proto !== "https") return `https://${host}`;
+  return `${proto}://${host}`;
+}
+
+const CREDENTIALS_HEADER = "access-control-allow-credentials";
+const SET_COOKIE_HEADER = "set-cookie";
+
+/**
+ * Collapse a header value to the single string payload format 2.0's `headers`
+ * map takes. An array is joined with ", ", which is the standard way to fold
+ * repeated headers onto one line - and is only ever reached for headers where
+ * folding is legal, because `Set-Cookie` (the one header that must NOT be
+ * folded) is split out into `cookies` before this is called.
+ *
+ * @param {string|string[]} value
+ * @returns {string}
+ */
+function flattenHeaderValue(value) {
+  return Array.isArray(value) ? value.map(String).join(", ") : String(value);
+}
+
+/**
+ * Build a Lambda function URL response (payload format 2.0).
+ *
+ * SHAPE, and why it changed (TASK-049): this used to return an ALB response -
+ * `statusDescription` plus a `multiValueHeaders` map of arrays, which the ALB
+ * target group emitted verbatim because it set
+ * lambda_multi_value_headers_enabled. A function URL uses payload format 2.0
+ * instead: it reads `statusCode`, a SINGLE-VALUE `headers` map and a `cookies`
+ * ARRAY, and it IGNORES `multiValueHeaders` and `statusDescription` entirely -
+ * silently. A response left in the old shape would go out as a 200 with no
+ * Content-Type and no Set-Cookie, so sign-in would loop forever with nothing in
+ * the logs. Nothing in this file may return `multiValueHeaders` again.
+ *
+ * `options.headers` still accepts array values, so callers can keep passing
+ * `{ "Set-Cookie": [a, b] }`: entries whose name is `Set-Cookie` (compared
+ * case-insensitively, because header names are) are moved into `cookies`, which
+ * is what lets one response set several cookies - the job `multiValueHeaders`
+ * used to do. Every other array is folded to one string.
  *
  * Security invariant: `Access-Control-Allow-Credentials` is never emitted while
  * the resolved origin is the wildcard "*". With ALLOWED_ORIGINS unset the gate
@@ -262,34 +338,35 @@ const CREDENTIALS_HEADER = "access-control-allow-credentials";
  * @param {number} statusCode
  * @param {string} body           already-serialised body
  * @param {string} [contentType]
- * @param {{origin?: string|null, headers?: Record<string, string[]>, allowlist?: string[]}} [options]
+ * @param {{origin?: string|null, headers?: Record<string, string|string[]>, allowlist?: string[]}} [options]
+ * @returns {{statusCode: number, headers: Record<string, string>, cookies: string[], body: string, isBase64Encoded: boolean}}
  */
 function buildResponse(statusCode, body, contentType = "application/json", options = {}) {
   const { origin = null, headers = {}, allowlist = ALLOWED_ORIGINS } = options;
 
   const corsOrigin = getCorsOrigin(origin, allowlist);
 
-  const multiValueHeaders = {
-    "Content-Type": [contentType],
-    "Access-Control-Allow-Methods": ["GET, POST, PUT, DELETE, OPTIONS"],
-    "Access-Control-Allow-Headers": ["Content-Type, Authorization, X-Requested-With"],
-    "Access-Control-Max-Age": ["86400"],
-    "Cache-Control": ["no-cache"],
+  const merged = {
+    "Content-Type": contentType,
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
+    "Access-Control-Max-Age": "86400",
+    "Cache-Control": "no-cache",
     ...headers,
   };
 
   // Only include the CORS origin header when we resolved an allowed origin.
   if (corsOrigin) {
-    multiValueHeaders["Access-Control-Allow-Origin"] = [corsOrigin];
-    multiValueHeaders["Vary"] = ["Origin"];
+    merged["Access-Control-Allow-Origin"] = corsOrigin;
+    merged["Vary"] = "Origin";
   }
 
   // Hard invariant: credentials are never exposed to a wildcard origin. Header
   // names are compared case-insensitively because HTTP header names are.
   if (corsOrigin === "*") {
-    for (const name of Object.keys(multiValueHeaders)) {
+    for (const name of Object.keys(merged)) {
       if (name.toLowerCase() === CREDENTIALS_HEADER) {
-        delete multiValueHeaders[name];
+        delete merged[name];
         // Name only - never the value, which may be a credential elsewhere.
         logBasic(
           "[Calendar] Dropped",
@@ -300,10 +377,26 @@ function buildResponse(statusCode, body, contentType = "application/json", optio
     }
   }
 
+  // Split Set-Cookie out of the header map. This is not cosmetic: format 2.0
+  // has nowhere else to put a second cookie, and folding two Set-Cookie values
+  // onto one line with a comma produces one corrupt cookie rather than two.
+  const responseHeaders = {};
+  const cookies = [];
+  for (const [name, value] of Object.entries(merged)) {
+    if (name.toLowerCase() === SET_COOKIE_HEADER) {
+      for (const cookie of Array.isArray(value) ? value : [value]) {
+        if (cookie === undefined || cookie === null || String(cookie) === "") continue;
+        cookies.push(String(cookie));
+      }
+      continue;
+    }
+    responseHeaders[name] = flattenHeaderValue(value);
+  }
+
   return {
     statusCode,
-    statusDescription: `${statusCode} ${STATUS_TEXT[statusCode] || "Error"}`,
-    multiValueHeaders,
+    headers: responseHeaders,
+    cookies,
     body,
     isBase64Encoded: false,
   };
@@ -325,7 +418,7 @@ function jsonResponse(statusCode, payload, options = {}) {
  * through it, and every route in this file does route through it - so there
  * is no live bug today. But that guarantee is structural only for
  * `buildResponse`'s own callers: nothing stops a future route from returning
- * a hand-rolled `{ statusCode, multiValueHeaders, ... }` object instead of
+ * a hand-rolled `{ statusCode, headers, ... }` object instead of
  * calling `buildResponse`, which would bypass the strip entirely and could
  * re-introduce exactly the `*` + Allow-Credentials pairing TASK-020 exists to
  * prevent.
@@ -341,13 +434,18 @@ function jsonResponse(statusCode, payload, options = {}) {
  * test in isolation), while this one protects the router's output as a
  * whole.
  *
- * @param {object} response  An ALB-shaped response (multiValueHeaders keyed).
+ * Reads `response.headers` - the payload-format-2.0 header map (TASK-049).
+ * Values are normally plain strings there, but an array is tolerated for the
+ * same reason this function exists at all: a hand-rolled response is not
+ * obliged to have gone through `buildResponse`'s flattening.
+ *
+ * @param {object} response  A function-URL-shaped response (`headers` keyed).
  * @returns {object} The same response object, mutated in place if a strip was
  *   necessary.
  */
 function finalise(response) {
   if (!response || typeof response !== "object") return response;
-  const headers = response.multiValueHeaders;
+  const headers = response.headers;
   if (!headers || typeof headers !== "object") return response;
 
   let originIsWildcard = false;
@@ -403,6 +501,8 @@ const AUTH_DISCONNECT_PATH = "/calendar/api/auth/disconnect";
  * (base64url state, Google codes) can legitimately contain an encoded space, and
  * mangling one would break the exchange.
  *
+ * Applied ONLY to ALB-shaped events. See `isPayloadFormatV2`.
+ *
  * @param {string} value
  * @returns {string}
  */
@@ -415,14 +515,51 @@ function decodeQueryValue(value) {
 }
 
 /**
- * Read a query-string parameter from an ALB event, in either the single-value or
- * multi-value shape.
+ * Is this a Lambda function URL / API Gateway payload format 2.0 event, rather
+ * than an ALB one?
+ *
+ * This decides exactly one thing - whether query values still need decoding -
+ * and it matters more than it looks. Format 2.0 hands `queryStringParameters`
+ * over ALREADY decoded, so running `decodeQueryValue` over them a second time
+ * corrupts any value that legitimately contains a "%" and turns "%2F" inside a
+ * Google `code` into a literal "/". That breaks sign-in only for the subset of
+ * codes containing an escape, which looks intermittent rather than broken.
+ *
+ * `version` is the field AWS documents as the format marker; `rawPath` and
+ * `rawQueryString` are checked too so a hand-built event that omits `version`
+ * (a test fixture, say) is still classified by its shape rather than by the
+ * decoding it would silently receive.
+ *
+ * @param {object} event
+ * @returns {boolean}
+ */
+function isPayloadFormatV2(event) {
+  return (
+    event?.version === "2.0" || typeof event?.rawPath === "string" || typeof event?.rawQueryString === "string"
+  );
+}
+
+/**
+ * Read a query-string parameter, from either payload format.
+ *
+ * Format 2.0 supplies only the single-value `queryStringParameters` map (values
+ * decoded, repeated keys comma-joined); the ALB supplied
+ * `multiValueQueryStringParameters` as well, and left both encoded.
  *
  * @param {object} event
  * @param {string} name
  * @returns {string|null}
  */
 function getQueryParam(event, name) {
+  if (isPayloadFormatV2(event)) {
+    const params = event?.queryStringParameters;
+    if (params && params[name] !== undefined && params[name] !== null) {
+      // Deliberately NOT decoded - see isPayloadFormatV2.
+      return String(params[name]);
+    }
+    return null;
+  }
+
   const multi = event?.multiValueQueryStringParameters;
   if (multi && Array.isArray(multi[name]) && multi[name].length > 0) {
     return decodeQueryValue(String(multi[name][0]));
@@ -449,7 +586,7 @@ function getQueryParam(event, name) {
  * @param {string[]} [options.allowlist]
  * @param {Record<string, string|undefined>} [options.env]
  * @param {(size: number) => Buffer} [options.randomBytes] Injectable entropy.
- * @returns {Promise<object>} ALB response.
+ * @returns {Promise<object>} Function URL response (payload format 2.0).
  */
 export async function handleAuthStart(event, options = {}) {
   const { origin = null, allowlist, env = process.env, randomBytes } = options;
@@ -514,7 +651,7 @@ export async function handleAuthStart(event, options = {}) {
  * @param {(url: string, init: object) => Promise<any>} [options.fetchImpl] Injectable HTTP, if the real exchange is kept.
  * @param {string} [options.tokenEndpoint]
  * @param {typeof putConnection} [options.putConnection] Injectable storage.
- * @returns {Promise<object>} ALB response.
+ * @returns {Promise<object>} Function URL response (payload format 2.0).
  */
 export async function handleAuthCallback(event, options = {}) {
   const {
@@ -646,8 +783,10 @@ export async function handleAuthCallback(event, options = {}) {
 
   logBasic("[Calendar] Google sign-in completed for a connected account");
 
-  // Two Set-Cookie headers in one response - only possible because the target
-  // group has lambda_multi_value_headers_enabled.
+  // Two Set-Cookie headers in one response: `buildResponse` moves both into the
+  // response's `cookies` array, which is the only place payload format 2.0 can
+  // carry more than one (TASK-049; it used to be the ALB target group's
+  // lambda_multi_value_headers_enabled that made this possible).
   return buildResponse(302, "", "text/plain", {
     origin,
     allowlist,
@@ -668,7 +807,7 @@ export async function handleAuthCallback(event, options = {}) {
  *
  * @param {object} event
  * @param {object} [options]
- * @returns {Promise<object>} ALB response.
+ * @returns {Promise<object>} Function URL response (payload format 2.0).
  */
 export async function handleAuthLogout(event, options = {}) {
   const { origin = null, allowlist } = options;
@@ -771,7 +910,7 @@ function readDeleteEventsFlag(payload) {
  * @param {string|null} [options.tableName] Connections table override.
  * @param {string|null} [options.eventsTableName] Events table override.
  * @param {Function} [options.log]
- * @returns {Promise<object>} ALB response.
+ * @returns {Promise<object>} Function URL response (payload format 2.0).
  */
 export async function handleAuthDisconnect(event, options = {}) {
   const {
@@ -926,7 +1065,7 @@ export async function handleAuthDisconnect(event, options = {}) {
  * @param {Record<string, string|undefined>} [options.env]
  * @param {number} [options.nowSeconds]
  * @param {typeof getConnection} [options.getConnection] Injectable storage read.
- * @returns {Promise<object>} ALB response.
+ * @returns {Promise<object>} Function URL response (payload format 2.0).
  */
 export async function handleAuthMe(event, options = {}) {
   const {
@@ -1072,7 +1211,7 @@ function resolveSession(event, { env = process.env, nowSeconds = Math.floor(Date
  * @param {Record<string, string|undefined>} [options.env]
  * @param {number} [options.nowSeconds]
  * @param {typeof getConnection} [options.getConnection] Injectable storage read.
- * @returns {Promise<object>} ALB response.
+ * @returns {Promise<object>} Function URL response (payload format 2.0).
  */
 export async function handleGetSettings(event, options = {}) {
   const {
@@ -1127,7 +1266,7 @@ export async function handleGetSettings(event, options = {}) {
  * @param {typeof saveSettings} [options.saveSettings] Injectable persistence.
  * @param {Function} [options.updateConnection] Injectable connections-layer patch.
  * @param {Function} [options.updateItem] Injectable DynamoDB UpdateItem.
- * @returns {Promise<object>} ALB response.
+ * @returns {Promise<object>} Function URL response (payload format 2.0).
  */
 export async function handlePutSettings(event, options = {}) {
   const {
@@ -1228,6 +1367,19 @@ const SCAN_SCHEDULE_PATH = "/calendar/api/scan/schedule";
  * called in that case - `runScan` itself never even attempts the fetch when
  * its lock is held (see scan.mjs's concurrency note).
  *
+ * COST CONTROL, AND WHAT IS NO LONGER PROTECTING IT (TASK-049). This is the
+ * expensive route in the app: one scan fans out into Gmail API calls and one
+ * ANTHROPIC COMPLETION PER EMAIL, so its cost is measured in model tokens.
+ * Until TASK-049 a WAF rate-based rule capped it at 10 requests per 5 minutes
+ * per IP (var.calendar_scan_rate_limit). That rule group lived on the shared
+ * ALB's Web ACL, and moving this app to a Lambda function URL - which no AWS WAF
+ * regional Web ACL can be associated with - removed it. THE PER-IP CAP ON
+ * ANTHROPIC SPEND IS GONE. What is left is: a valid session is required, and
+ * `runScan`'s per-user lock stops one user's scans overlapping. Neither bounds
+ * how often a signed-in user may start a fresh scan, and neither bounds spend
+ * across users. If a cap is wanted again it has to be built here (per-user
+ * cooldown / quota in the connection row) or in front of the function URL.
+ *
  * @param {object} event
  * @param {object} [options]
  * @param {string|null} [options.origin]
@@ -1238,7 +1390,7 @@ const SCAN_SCHEDULE_PATH = "/calendar/api/scan/schedule";
  * @param {(() => number)|null} [options.getRemainingTimeInMillis] Real Lambda
  *   context method (wired by `handler`), for the deadline-aware extraction
  *   loop inside `runScan`.
- * @returns {Promise<object>} ALB response.
+ * @returns {Promise<object>} Function URL response (payload format 2.0).
  */
 export async function handleScanNow(event, options = {}) {
   const {
@@ -1287,7 +1439,7 @@ export async function handleScanNow(event, options = {}) {
  * @param {Record<string, string|undefined>} [options.env]
  * @param {number} [options.nowSeconds]
  * @param {typeof getConnection} [options.getConnection] Injectable storage read.
- * @returns {Promise<object>} ALB response.
+ * @returns {Promise<object>} Function URL response (payload format 2.0).
  */
 export async function handleScanStatus(event, options = {}) {
   const {
@@ -1343,7 +1495,7 @@ export async function handleScanStatus(event, options = {}) {
  * @param {Record<string, string|undefined>} [options.env]
  * @param {number} [options.nowSeconds]
  * @param {typeof getScanSchedule} [options.getScanSchedule]
- * @returns {Promise<object>} ALB response.
+ * @returns {Promise<object>} Function URL response (payload format 2.0).
  */
 export async function handleGetSchedule(event, options = {}) {
   const {
@@ -1385,7 +1537,7 @@ export async function handleGetSchedule(event, options = {}) {
  * @param {Record<string, string|undefined>} [options.env]
  * @param {number} [options.nowSeconds]
  * @param {typeof putScanSchedule} [options.putScanSchedule]
- * @returns {Promise<object>} ALB response.
+ * @returns {Promise<object>} Function URL response (payload format 2.0).
  */
 export async function handlePutSchedule(event, options = {}) {
   const {
@@ -1439,7 +1591,7 @@ export async function handlePutSchedule(event, options = {}) {
  * @param {Record<string, string|undefined>} [options.env]
  * @param {number} [options.nowSeconds]
  * @param {typeof deleteScanSchedule} [options.deleteScanSchedule]
- * @returns {Promise<object>} ALB response.
+ * @returns {Promise<object>} Function URL response (payload format 2.0).
  */
 export async function handleDeleteSchedule(event, options = {}) {
   const {
@@ -1541,7 +1693,8 @@ const EVENT_ACTIONS = Object.freeze({
  * Split an event mutation path into its id and its action, or null when the path
  * is not one.
  *
- * The captured id is percent-decoded (ALB delivers path text still encoded) and
+ * The captured id is percent-decoded (`rawPath` is the RAW request path, so it
+ * can still carry percent-escapes - as the ALB's `path` did before it) and
  * then handed to `requireEventId` unchanged - decoding here is what stops
  * `%2E%2E%2F` from looking like a plausible id, since the decoded value fails the
  * 64-hex test just as the raw one does.
@@ -1598,7 +1751,7 @@ function eventErrorResponse(err, responseOptions) {
  * @param {number} [options.maxPages]
  * @param {string|null} [options.tableName]
  * @param {Function} [options.log]
- * @returns {Promise<object>} ALB response.
+ * @returns {Promise<object>} Function URL response (payload format 2.0).
  */
 export async function handleGetEvents(event, options = {}) {
   const {
@@ -1649,7 +1802,7 @@ export async function handleGetEvents(event, options = {}) {
  * @param {object} event
  * @param {object} [options] As `handleGetEvents`, with
  *   `queryUpcomingEvents` in place of `queryEventsInRange`.
- * @returns {Promise<object>} ALB response.
+ * @returns {Promise<object>} Function URL response (payload format 2.0).
  */
 export async function handleGetUpcoming(event, options = {}) {
   const {
@@ -1700,7 +1853,7 @@ export async function handleGetUpcoming(event, options = {}) {
  * @param {object} event
  * @param {object} options
  * @param {string} action One of EVENT_ACTIONS.
- * @returns {Promise<object>} ALB response.
+ * @returns {Promise<object>} Function URL response (payload format 2.0).
  */
 async function handleEventMutation(event, options, action) {
   const {
@@ -1753,7 +1906,7 @@ async function handleEventMutation(event, options, action) {
  * POST /calendar/api/events/{eventId}/acknowledge
  * @param {object} event
  * @param {object} [options] Carries the path-derived `eventId`.
- * @returns {Promise<object>} ALB response.
+ * @returns {Promise<object>} Function URL response (payload format 2.0).
  */
 export async function handleAcknowledgeEvent(event, options = {}) {
   return handleEventMutation(event, options, EVENT_ACTIONS.ACKNOWLEDGE);
@@ -1763,7 +1916,7 @@ export async function handleAcknowledgeEvent(event, options = {}) {
  * POST /calendar/api/events/{eventId}/dismiss
  * @param {object} event
  * @param {object} [options] Carries the path-derived `eventId`.
- * @returns {Promise<object>} ALB response.
+ * @returns {Promise<object>} Function URL response (payload format 2.0).
  */
 export async function handleDismissEvent(event, options = {}) {
   return handleEventMutation(event, options, EVENT_ACTIONS.DISMISS);
@@ -1773,7 +1926,7 @@ export async function handleDismissEvent(event, options = {}) {
  * POST /calendar/api/events/{eventId}/restore
  * @param {object} event
  * @param {object} [options] Carries the path-derived `eventId`.
- * @returns {Promise<object>} ALB response.
+ * @returns {Promise<object>} Function URL response (payload format 2.0).
  */
 export async function handleRestoreEvent(event, options = {}) {
   return handleEventMutation(event, options, EVENT_ACTIONS.RESTORE);
@@ -1941,7 +2094,7 @@ export function readFrontendFile(filename, { readFile = readFileSync, cache = fi
  * @param {typeof readFileSync} [options.readFile] Injectable disk read.
  * @param {Map<string, string>} [options.fileCache] Injectable cache.
  * @param {string} [options.assetDir]
- * @returns {object|null} ALB response, or null.
+ * @returns {object|null} Function URL response (payload format 2.0), or null.
  */
 export function routeFrontendRequest(path, method, _event, options = {}) {
   const { origin = null, allowlist, readFile, fileCache: cache, assetDir } = options;
@@ -2014,13 +2167,15 @@ function asRouteDeps(value) {
 }
 
 /**
- * Lambda handler for the school calendar app, invoked by the shared web-app ALB
- * on the /calendar* path prefix.
+ * Lambda handler for the school calendar app, invoked through this function's
+ * own Lambda function URL (TASK-049) with a payload-format-2.0 event. Every
+ * route still lives under the /calendar* prefix - the function URL forwards the
+ * whole path space, so the prefix is now enforced only by this router.
  *
- * The health check is what the target group polls, so it answers first and stays
- * deliberately open. The Google sign-in routes follow, then settings, the scan/
- * schedule endpoints, the events API, and finally the frontend's static files -
- * last, so no static path can ever shadow an API route.
+ * The health check answers first and stays deliberately open. The Google sign-in
+ * routes follow, then settings, the scan/schedule endpoints, the events API, and
+ * finally the frontend's static files - last, so no static path can ever shadow
+ * an API route.
  *
  * The third parameter is an injection seam, not part of the Lambda contract: the
  * runtime calls `handler(event, context, callback)` and its callback is a
@@ -2042,10 +2197,12 @@ export async function handler(event, context = undefined, deps = {}) {
   const routeDeps = asRouteDeps(deps);
 
   // EventBridge Scheduler firing a recurring scan (TASK-008). Checked BEFORE
-  // any ALB routing below: this event shape carries no `path`/`httpMethod` at
-  // all, and the caller is EventBridge, not a browser, so the return value
-  // must be a plain result object, never the ALB response shape the rest of
-  // this handler builds. `getRemainingTimeInMillis` is threaded from the real
+  // any HTTP routing below: this event shape carries none of the fields an HTTP
+  // request arrives with (`rawPath`/`requestContext` under payload format 2.0,
+  // `path`/`httpMethod` under the ALB format that preceded it), and the caller
+  // is EventBridge, not a browser, so the return value must be a plain result
+  // object, never the HTTP response shape the rest of this handler builds.
+  // `getRemainingTimeInMillis` is threaded from the real
   // Lambda `context` (absent in a test, which then falls back to
   // scan.mjs's own DEFAULT_MAX_SCAN_DURATION_MS) so the extraction loop can
   // stay inside this invocation's actual remaining time.
@@ -2060,10 +2217,21 @@ export async function handler(event, context = undefined, deps = {}) {
     return runScheduledScan(event, scheduledDeps);
   }
 
-  const path = event?.path || "/";
-  const method = (event?.httpMethod || "GET").toUpperCase();
-  const headers = event?.multiValueHeaders || event?.headers || {};
+  // Payload format 2.0 (function URL) first, then the ALB fields, so an event in
+  // either shape routes to the same place and no route regresses: `rawPath` /
+  // `requestContext.http.method` are what a function URL sends, `path` /
+  // `httpMethod` are what the ALB sent. `rawPath` is the verbatim request path,
+  // which is what the frontend's exact-match allowlist below wants.
+  const path = event?.rawPath || event?.path || "/";
+  const method = (event?.requestContext?.http?.method || event?.httpMethod || "GET").toUpperCase();
+  const headers = event?.headers || event?.multiValueHeaders || {};
   const origin = getRequestOrigin(headers);
+
+  // The origin this request arrived on, used as PUBLIC_BASE_URL for the OAuth
+  // redirect_uri. Deployed environments leave the env var empty because the
+  // function URL's id is not knowable at apply time - see resolvePublicBaseUrl.
+  // Spread BEFORE routeDeps so a test-supplied `env` still wins.
+  const routeEnv = { ...process.env, PUBLIC_BASE_URL: resolvePublicBaseUrl(event) };
 
   logBasic("[Calendar] Request:", { method, path, origin: origin || "none" });
 
@@ -2077,8 +2245,11 @@ export async function handler(event, context = undefined, deps = {}) {
     return finalise(buildResponse(200, "", "application/json", { origin }));
   }
 
-  // Health check — deliberately open: ALB health checks send no Origin header
-  // and no credentials, and the body carries nothing sensitive.
+  // Health check — deliberately open: it carries nothing sensitive and needs no
+  // Origin or credentials. NOTE (TASK-049): nothing calls this route any more.
+  // The ALB health check that polled it every 300s went with the target group,
+  // and no replacement probe was built, so this is currently an endpoint with no
+  // caller rather than the liveness signal it was.
   if (path === "/calendar/api/health" && method === "GET") {
     return finalise(
       jsonResponse(
@@ -2097,7 +2268,7 @@ export async function handler(event, context = undefined, deps = {}) {
   // above; `allowlist` is left to buildResponse's default unless a caller
   // overrides it. A `null` or non-array allowlist now fails safe rather than
   // throwing (TASK-022; see coerceAllowlist).
-  const authResponse = await routeAuthRequest(path, method, event, { origin, ...routeDeps });
+  const authResponse = await routeAuthRequest(path, method, event, { origin, env: routeEnv, ...routeDeps });
   if (authResponse) {
     return finalise(authResponse);
   }
@@ -2165,6 +2336,7 @@ export {
   fileCache,
   ASSET_DIR,
   getQueryParam,
+  isPayloadFormatV2,
   AUTH_START_PATH,
   AUTH_CALLBACK_PATH,
   AUTH_LOGOUT_PATH,
