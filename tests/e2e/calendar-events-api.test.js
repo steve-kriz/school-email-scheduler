@@ -42,15 +42,31 @@ function cookieFor(sub) {
 }
 
 /**
- * Build an ALB event. `cookie` omitted means an unauthenticated request.
+ * Build a Lambda function URL event (payload format 2.0, TASK-049).
+ * `cookie` omitted means an unauthenticated request.
+ *
+ * Format 2.0 carries cookies in a top-level `cookies` ARRAY rather than in the
+ * header map, the path in `rawPath`, and the method in
+ * `requestContext.http.method` — none of `path`, `httpMethod` or
+ * `multiValueHeaders` exists any more.
  */
-function albEvent({ path, method = 'GET', cookie = null, query = null, body = null }) {
+function fnUrlEvent({ path, method = 'GET', cookie = null, query = null, body = null }) {
+  const rawQueryString = query
+    ? Object.entries(query)
+        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+        .join('&')
+    : '';
   return {
-    path,
-    httpMethod: method,
-    headers: {},
-    multiValueHeaders: cookie ? { cookie: [cookie] } : {},
+    version: '2.0',
+    rawPath: path,
+    rawQueryString,
+    headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+    cookies: cookie ? [cookie] : [],
     queryStringParameters: query || undefined,
+    requestContext: {
+      domainName: 'abc123.lambda-url.ap-southeast-2.on.aws',
+      http: { method, path },
+    },
     body: body === null ? null : JSON.stringify(body),
     isBase64Encoded: false,
   };
@@ -148,7 +164,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       ]);
 
       const { response, body } = await invoke(
-        albEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-09-01', to: '2026-09-30' } }),
+        fnUrlEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-09-01', to: '2026-09-30' } }),
         table
       );
 
@@ -177,7 +193,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       ]);
 
       const { body } = await invoke(
-        albEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-09-01', to: '2026-09-30' } }),
+        fnUrlEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-09-01', to: '2026-09-30' } }),
         table
       );
 
@@ -193,7 +209,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       const nowMs = Date.parse('2028-02-14T22:00:00.000Z');
 
       const { response, body } = await invoke(
-        albEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A) }),
+        fnUrlEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A) }),
         table,
         { now: () => nowMs }
       );
@@ -210,7 +226,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       const table = new FakeEventsTable([]);
 
       const { body } = await invoke(
-        albEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-11-09' } }),
+        fnUrlEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-11-09' } }),
         table
       );
 
@@ -231,7 +247,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
         const table = new FakeEventsTable([storedEvent()]);
 
         const { response, body } = await invoke(
-          albEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from, to } }),
+          fnUrlEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from, to } }),
           table
         );
 
@@ -247,7 +263,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       const table = new FakeEventsTable([]);
 
       const { response } = await invoke(
-        albEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-09-01', to: '2026-12-02' } }),
+        fnUrlEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-09-01', to: '2026-12-02' } }),
         table
       );
 
@@ -259,7 +275,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       const table = new FakeEventsTable([]);
 
       const { response, body } = await invoke(
-        albEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-09-01', to: '2026-12-03' } }),
+        fnUrlEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-09-01', to: '2026-12-03' } }),
         table
       );
 
@@ -272,7 +288,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       const table = new FakeEventsTable([]);
 
       const { response, body } = await invoke(
-        albEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-02-31', to: '2026-03-05' } }),
+        fnUrlEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-02-31', to: '2026-03-05' } }),
         table
       );
 
@@ -297,7 +313,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       for (const [from, to] of [['2026-02-28', '2026-03-05'], ['2026-03-01', '2026-03-05'], ['2028-02-29', '2028-03-05']]) {
         const table = new FakeEventsTable([]);
         const { response } = await invoke(
-          albEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from, to } }),
+          fnUrlEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from, to } }),
           table
         );
         assert.equal(response.statusCode, 200, `${from} is a real calendar day and must be accepted`);
@@ -317,7 +333,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       );
 
       const { response, body } = await invoke(
-        albEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-09-01', to: '2026-09-30' } }),
+        fnUrlEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-09-01', to: '2026-09-30' } }),
         table
       );
 
@@ -339,7 +355,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       const table = new FakeEventsTable(rows);
 
       const { body } = await invoke(
-        albEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-09-01', to: '2026-09-30' } }),
+        fnUrlEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-09-01', to: '2026-09-30' } }),
         table,
         { maxItems: 3 }
       );
@@ -357,7 +373,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       ]);
 
       const { body } = await invoke(
-        albEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-09-01', to: '2026-09-30' } }),
+        fnUrlEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-09-01', to: '2026-09-30' } }),
         table,
         { maxItems: 3 }
       );
@@ -375,7 +391,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       ]);
 
       const { response, body } = await invoke(
-        albEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }),
+        fnUrlEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }),
         table,
         { now: () => Date.parse('2026-08-18T00:00:00.000Z') }
       );
@@ -397,21 +413,21 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       const table = new FakeEventsTable([]);
 
       const { body: defaulted } = await invoke(
-        albEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }),
+        fnUrlEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }),
         table
       );
       assert.equal(defaulted.limit, 20);
       assert.equal(table.queries[0].Limit, 20);
 
       const { body: clamped } = await invoke(
-        albEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A), query: { limit: '500' } }),
+        fnUrlEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A), query: { limit: '500' } }),
         table
       );
       assert.equal(clamped.limit, 100, 'the cap is a cost bound and is never honoured above 100');
       assert.equal(table.queries[1].Limit, 100);
 
       const { body: honoured } = await invoke(
-        albEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A), query: { limit: '7' } }),
+        fnUrlEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A), query: { limit: '7' } }),
         table
       );
       assert.equal(honoured.limit, 7);
@@ -427,7 +443,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       ]);
 
       const { body } = await invoke(
-        albEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }),
+        fnUrlEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }),
         table,
         { now: () => nowMs }
       );
@@ -446,11 +462,11 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       ]);
       const stampMs = Date.parse('2026-08-20T05:00:00.000Z');
 
-      const before = await invoke(albEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }), table);
+      const before = await invoke(fnUrlEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }), table);
       assert.equal(before.body.count, 2);
 
       const { response, body } = await invoke(
-        albEvent({ path: `/calendar/api/events/${ID_A}/acknowledge`, method: 'POST', cookie: cookieFor(USER_A) }),
+        fnUrlEvent({ path: `/calendar/api/events/${ID_A}/acknowledge`, method: 'POST', cookie: cookieFor(USER_A) }),
         table,
         { now: () => stampMs }
       );
@@ -472,7 +488,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       assert.equal(update.ExpressionAttributeValues[':userId'], USER_A);
       assert.deepEqual(update.Key, { userId: USER_A, eventId: ID_A });
 
-      const after = await invoke(albEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }), table);
+      const after = await invoke(fnUrlEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }), table);
       assert.equal(after.body.count, 1);
       assert.deepEqual(after.body.events.map((e) => e.eventId), [ID_B]);
     });
@@ -482,7 +498,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       const stampMs = Date.parse('2026-08-20T06:30:00.000Z');
 
       const { response, body } = await invoke(
-        albEvent({ path: `/calendar/api/events/${ID_A}/dismiss`, method: 'POST', cookie: cookieFor(USER_A) }),
+        fnUrlEvent({ path: `/calendar/api/events/${ID_A}/dismiss`, method: 'POST', cookie: cookieFor(USER_A) }),
         table,
         { now: () => stampMs }
       );
@@ -495,7 +511,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       assert.equal(stored.acknowledgedAt, undefined, 'dismiss must not stamp an acknowledgement');
       assert.ok(!('attentionKey' in stored));
 
-      const after = await invoke(albEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }), table);
+      const after = await invoke(fnUrlEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }), table);
       assert.equal(after.body.count, 0);
     });
   });
@@ -513,11 +529,11 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       dismissed.dismissedAt = '2026-08-20T06:30:00.000Z';
       const table = new FakeEventsTable([dismissed]);
 
-      const empty = await invoke(albEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }), table);
+      const empty = await invoke(fnUrlEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }), table);
       assert.equal(empty.body.count, 0, 'a dismissed row starts outside the sparse index');
 
       const { response, body } = await invoke(
-        albEvent({ path: `/calendar/api/events/${ID_A}/restore`, method: 'POST', cookie: cookieFor(USER_A) }),
+        fnUrlEvent({ path: `/calendar/api/events/${ID_A}/restore`, method: 'POST', cookie: cookieFor(USER_A) }),
         table,
         { now: () => Date.parse('2026-08-21T00:00:00.000Z') }
       );
@@ -531,7 +547,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       assert.equal(stored.dueBy, '2026-08-22T00:00:00.000Z');
       assert.equal(stored.dismissedAt, undefined, 'the dismissal stamp must be cleared');
 
-      const after = await invoke(albEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }), table);
+      const after = await invoke(fnUrlEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }), table);
       assert.equal(after.body.count, 1);
       assert.equal(after.body.events[0].eventId, ID_A);
     });
@@ -542,7 +558,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       ]);
 
       const { response, body } = await invoke(
-        albEvent({ path: `/calendar/api/events/${ID_A}/restore`, method: 'POST', cookie: cookieFor(USER_A) }),
+        fnUrlEvent({ path: `/calendar/api/events/${ID_A}/restore`, method: 'POST', cookie: cookieFor(USER_A) }),
         table
       );
 
@@ -551,7 +567,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       const stored = table.read(USER_A, ID_A);
       assert.equal(stored.attentionKey, undefined, 'an informational event was never in the attention list');
 
-      const after = await invoke(albEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }), table);
+      const after = await invoke(fnUrlEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }), table);
       assert.equal(after.body.count, 0);
     });
 
@@ -559,7 +575,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       const table = new FakeEventsTable([]);
 
       const { response, body } = await invoke(
-        albEvent({ path: `/calendar/api/events/${ID_C}/restore`, method: 'POST', cookie: cookieFor(USER_A) }),
+        fnUrlEvent({ path: `/calendar/api/events/${ID_C}/restore`, method: 'POST', cookie: cookieFor(USER_A) }),
         table
       );
 
@@ -575,7 +591,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       const table = new FakeEventsTable([foreign]);
 
       const { response, body } = await invoke(
-        albEvent({ path: `/calendar/api/events/${ID_A}/acknowledge`, method: 'POST', cookie: cookieFor(USER_A) }),
+        fnUrlEvent({ path: `/calendar/api/events/${ID_A}/acknowledge`, method: 'POST', cookie: cookieFor(USER_A) }),
         table
       );
 
@@ -594,11 +610,11 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       const table = new FakeEventsTable([foreign]);
 
       const dismissed = await invoke(
-        albEvent({ path: `/calendar/api/events/${ID_A}/dismiss`, method: 'POST', cookie: cookieFor(USER_A) }),
+        fnUrlEvent({ path: `/calendar/api/events/${ID_A}/dismiss`, method: 'POST', cookie: cookieFor(USER_A) }),
         table
       );
       const restored = await invoke(
-        albEvent({ path: `/calendar/api/events/${ID_A}/restore`, method: 'POST', cookie: cookieFor(USER_A) }),
+        fnUrlEvent({ path: `/calendar/api/events/${ID_A}/restore`, method: 'POST', cookie: cookieFor(USER_A) }),
         table
       );
 
@@ -620,7 +636,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       ]);
 
       const { response, body } = await invoke(
-        albEvent({
+        fnUrlEvent({
           path: '/calendar/api/events',
           cookie: cookieFor(USER_A),
           query: { from: '2026-09-01', to: '2026-09-30', userId: USER_B },
@@ -639,12 +655,12 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
         attentionEvent({ userId: USER_B, eventId: ID_B, title: 'Theirs', dueBy: '2026-08-22T00:00:00.000Z' }),
       ]);
 
-      const event = albEvent({
+      const event = fnUrlEvent({
         path: '/calendar/api/events/upcoming',
         cookie: cookieFor(USER_A),
         query: { userId: USER_B, limit: '50' },
       });
-      event.multiValueHeaders['x-user-id'] = [USER_B];
+      event.headers['x-user-id'] = USER_B;
       event.body = JSON.stringify({ userId: USER_B });
 
       const { response, body } = await invoke(event, table);
@@ -660,7 +676,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       const table = new FakeEventsTable([storedEvent()]);
 
       const { response, body } = await invoke(
-        albEvent({ path: '/calendar/api/events/../../etc/passwd/acknowledge', method: 'POST', cookie: cookieFor(USER_A) }),
+        fnUrlEvent({ path: '/calendar/api/events/../../etc/passwd/acknowledge', method: 'POST', cookie: cookieFor(USER_A) }),
         table
       );
 
@@ -685,7 +701,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
         const table = new FakeEventsTable([storedEvent()]);
 
         const { response, body } = await invoke(
-          albEvent({ path: `/calendar/api/events/${id}/acknowledge`, method: 'POST', cookie: cookieFor(USER_A) }),
+          fnUrlEvent({ path: `/calendar/api/events/${id}/acknowledge`, method: 'POST', cookie: cookieFor(USER_A) }),
           table
         );
 
@@ -703,7 +719,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
         attentionEvent({ eventId: ID_B, dueBy: '2026-08-23T00:00:00.000Z' }),
       ]);
 
-      const event = albEvent({
+      const event = fnUrlEvent({
         path: `/calendar/api/events/${ID_A}/acknowledge`,
         method: 'POST',
         cookie: cookieFor(USER_A),
@@ -730,7 +746,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       const table = new FakeEventsTable([row]);
 
       const { response, body } = await invoke(
-        albEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-09-01', to: '2026-09-30' } }),
+        fnUrlEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-09-01', to: '2026-09-30' } }),
         table
       );
 
@@ -752,7 +768,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       const table = new FakeEventsTable([attentionEvent({ eventId: ID_A, dueBy: '2026-08-22T00:00:00.000Z' })]);
 
       const { response, body } = await invoke(
-        albEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }),
+        fnUrlEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }),
         table
       );
 
@@ -774,7 +790,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       it(`Given no session cookie, When ${method} ${path} is requested, Then 401 and no DynamoDB call`, async () => {
         const table = new FakeEventsTable([attentionEvent({ eventId: ID_A, dueBy: '2026-08-22T00:00:00.000Z' })]);
 
-        const { response, body } = await invoke(albEvent({ path, method }), table);
+        const { response, body } = await invoke(fnUrlEvent({ path, method }), table);
 
         assert.equal(response.statusCode, 401);
         assert.equal(body.error, 'Not signed in');
@@ -788,7 +804,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       const tampered = `${SESSION_COOKIE_NAME}=${valid.slice(0, -3)}xyz`;
 
       const { response } = await invoke(
-        albEvent({ path: '/calendar/api/events/upcoming', cookie: tampered }),
+        fnUrlEvent({ path: '/calendar/api/events/upcoming', cookie: tampered }),
         table
       );
 
@@ -800,7 +816,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       const table = new FakeEventsTable([]);
       const foreign = `${SESSION_COOKIE_NAME}=${createSessionToken({ sub: USER_A }, { secret: 'a-completely-different-secret-value-32b' })}`;
 
-      const { response } = await invoke(albEvent({ path: '/calendar/api/events', cookie: foreign }), table);
+      const { response } = await invoke(fnUrlEvent({ path: '/calendar/api/events', cookie: foreign }), table);
 
       assert.equal(response.statusCode, 401);
       assert.equal(table.callCount, 0);
@@ -839,13 +855,13 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
 
       // 1. First scan stores it as pending, in the attention list.
       await reScan(table);
-      const firstList = await invoke(albEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }), table);
+      const firstList = await invoke(fnUrlEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }), table);
       assert.equal(firstList.body.count, 1);
       assert.equal(firstList.body.events[0].eventId, eventId);
 
       // 2. The user acknowledges it through the real route.
       const ack = await invoke(
-        albEvent({ path: `/calendar/api/events/${eventId}/acknowledge`, method: 'POST', cookie: cookieFor(USER_A) }),
+        fnUrlEvent({ path: `/calendar/api/events/${eventId}/acknowledge`, method: 'POST', cookie: cookieFor(USER_A) }),
         table,
         { now: () => Date.parse('2026-08-19T00:00:00.000Z') }
       );
@@ -864,12 +880,12 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       assert.equal(stored.acknowledgedAt, '2026-08-19T00:00:00.000Z', 'the original acknowledgement stamp survives');
       assert.equal(stored.attentionKey, undefined);
 
-      const afterList = await invoke(albEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }), table);
+      const afterList = await invoke(fnUrlEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }), table);
       assert.equal(afterList.body.count, 0, 'a re-scan must not resurrect a handled event');
 
       // The month view still shows it, with the fresh content from the re-scan.
       const month = await invoke(
-        albEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-09-01', to: '2026-09-30' } }),
+        fnUrlEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-09-01', to: '2026-09-30' } }),
         table
       );
       assert.equal(month.body.count, 1);
@@ -883,13 +899,13 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
 
       await reScan(table);
       await invoke(
-        albEvent({ path: `/calendar/api/events/${eventId}/dismiss`, method: 'POST', cookie: cookieFor(USER_A) }),
+        fnUrlEvent({ path: `/calendar/api/events/${eventId}/dismiss`, method: 'POST', cookie: cookieFor(USER_A) }),
         table
       );
       await reScan(table);
 
       assert.equal(table.read(USER_A, eventId).status, 'dismissed');
-      const list = await invoke(albEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }), table);
+      const list = await invoke(fnUrlEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }), table);
       assert.equal(list.body.count, 0);
     });
 
@@ -900,7 +916,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       const rescan = await reScan(table);
 
       assert.equal(rescan.preserved, 0, 'a pending row has no decision to carry forward');
-      const list = await invoke(albEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }), table);
+      const list = await invoke(fnUrlEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }), table);
       assert.equal(list.body.count, 1, 'a pending event must still be actionable after a re-scan');
     });
 
@@ -929,8 +945,8 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
     it('Given any events route, When it is exercised, Then every DynamoDB read carries an index and a key condition', async () => {
       const table = new FakeEventsTable([attentionEvent({ eventId: ID_A, dueBy: '2026-08-22T00:00:00.000Z', startsAt: '2026-09-04T09:00:00.000Z' })]);
 
-      await invoke(albEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-09-01', to: '2026-09-30' } }), table);
-      await invoke(albEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }), table);
+      await invoke(fnUrlEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-09-01', to: '2026-09-30' } }), table);
+      await invoke(fnUrlEvent({ path: '/calendar/api/events/upcoming', cookie: cookieFor(USER_A) }), table);
 
       assert.equal(table.queries.length, 2);
       for (const params of table.queries) {
@@ -944,7 +960,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       const table = new FakeEventsTable([]);
 
       const { response } = await invoke(
-        albEvent({ path: '/calendar/api/events', method: 'DELETE', cookie: cookieFor(USER_A) }),
+        fnUrlEvent({ path: '/calendar/api/events', method: 'DELETE', cookie: cookieFor(USER_A) }),
         table
       );
 
@@ -956,7 +972,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       const table = new FakeEventsTable([attentionEvent({ eventId: ID_A, dueBy: '2026-08-22T00:00:00.000Z' })]);
 
       const { response } = await invoke(
-        albEvent({ path: `/calendar/api/events/${ID_A}/acknowledge`, method: 'GET', cookie: cookieFor(USER_A) }),
+        fnUrlEvent({ path: `/calendar/api/events/${ID_A}/acknowledge`, method: 'GET', cookie: cookieFor(USER_A) }),
         table
       );
 
@@ -968,7 +984,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       const table = new FakeEventsTable([]);
 
       const { response, body } = await invoke(
-        albEvent({ path: '/calendar/api/events/upcoming/acknowledge', method: 'POST', cookie: cookieFor(USER_A) }),
+        fnUrlEvent({ path: '/calendar/api/events/upcoming/acknowledge', method: 'POST', cookie: cookieFor(USER_A) }),
         table
       );
 
@@ -986,7 +1002,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       };
 
       const response = await handler(
-        albEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-09-01', to: '2026-09-30' } }),
+        fnUrlEvent({ path: '/calendar/api/events', cookie: cookieFor(USER_A), query: { from: '2026-09-01', to: '2026-09-30' } }),
         {},
         { env: ENV, query: exploding, tableName: TABLE }
       );
@@ -1004,7 +1020,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       };
 
       const response = await handler(
-        albEvent({ path: `/calendar/api/events/${ID_A}/acknowledge`, method: 'POST', cookie: cookieFor(USER_A) }),
+        fnUrlEvent({ path: `/calendar/api/events/${ID_A}/acknowledge`, method: 'POST', cookie: cookieFor(USER_A) }),
         {},
         { env: ENV, updateEvent: exploding, tableName: TABLE }
       );

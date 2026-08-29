@@ -78,18 +78,24 @@ describe('Calendar Settings Routes - E2E Tests', () => {
   }
 
   /**
-   * Helper: Create an ALB event with headers and/or body.
+   * Helper: Create a Lambda function URL event (payload format 2.0, TASK-049)
+   * with headers, cookies and/or body.
    */
   function makeEvent(method, path, body = null, cookie = null) {
     const event = {
-      path,
-      httpMethod: method,
-      headers: {},
-      multiValueHeaders: {},
+      version: '2.0',
+      rawPath: path,
+      rawQueryString: '',
+      headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+      cookies: [],
+      requestContext: {
+        domainName: 'abc123.lambda-url.ap-southeast-2.on.aws',
+        http: { method, path },
+      },
     };
 
     if (cookie) {
-      event.multiValueHeaders.cookie = [cookie];
+      event.cookies.push(cookie);
     }
 
     if (body !== null) {
@@ -798,12 +804,17 @@ describe('Calendar Settings Routes - E2E Tests', () => {
       assert.equal(response.statusCode, 500);
     });
 
-    it('should return 401 when multiValueHeaders is present but cookie array is empty', async () => {
+    it('should return 401 when the format 2.0 cookies array is present but empty', async () => {
       const event = {
-        path: '/calendar/api/settings',
-        httpMethod: 'GET',
-        headers: {},
-        multiValueHeaders: {},
+        version: '2.0',
+        rawPath: '/calendar/api/settings',
+        rawQueryString: '',
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [],
+        requestContext: {
+          domainName: 'abc123.lambda-url.ap-southeast-2.on.aws',
+          http: { method: 'GET', path: '/calendar/api/settings' },
+        },
       };
 
       const response = await handler(event, {}, { env: defaultEnv });

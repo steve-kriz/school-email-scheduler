@@ -91,15 +91,28 @@ describe('Calendar handler dependency seam - E2E Tests', () => {
     const codeVerifier = 'code-verifier-for-deps-test-0123456789abcdef';
     const cookie = Buffer.from(JSON.stringify({ state, codeVerifier }), 'utf8').toString('base64url');
     return {
-      path: '/calendar/api/auth/google/callback',
-      httpMethod: 'GET',
+      version: '2.0',
+      rawPath: '/calendar/api/auth/google/callback',
+      rawQueryString: '',
+      requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: 'GET', path: '/calendar/api/auth/google/callback' } },
+      headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
       queryStringParameters: { state, code: 'test-authorization-code' },
-      multiValueHeaders: { cookie: [`calendar_oauth_state=${cookie}`] },
+      cookies: [`calendar_oauth_state=${cookie}`],
     };
   }
 
   function startEvent() {
-    return { path: '/calendar/api/auth/google/start', httpMethod: 'GET', headers: {} };
+    return {
+      version: '2.0',
+      rawPath: '/calendar/api/auth/google/start',
+      rawQueryString: '',
+      headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+      cookies: [],
+      requestContext: {
+        domainName: 'abc123.lambda-url.ap-southeast-2.on.aws',
+        http: { method: 'GET', path: '/calendar/api/auth/google/start' },
+      },
+    };
   }
 
   describe('a function third argument (the Lambda runtime callback)', () => {
@@ -239,7 +252,7 @@ describe('Calendar handler dependency seam - E2E Tests', () => {
       });
 
       assert.equal(response.statusCode, 302);
-      assert.ok(response.multiValueHeaders.Location[0].startsWith('https://accounts.google.com/'));
+      assert.ok(response.headers.Location.startsWith('https://accounts.google.com/'));
     });
 
     it('should honour a null-prototype object of dependencies', async () => {
@@ -573,10 +586,15 @@ describe('Calendar handler dependency seam - E2E Tests', () => {
 
       let getConnectionCalls = 0;
       const meEvent = {
-        path: '/calendar/api/auth/me',
-        httpMethod: 'GET',
-        headers: {},
-        multiValueHeaders: { cookie: [`${SESSION_COOKIE_NAME}=${sessionToken}`] },
+        version: '2.0',
+        rawPath: '/calendar/api/auth/me',
+        rawQueryString: '',
+        headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+        cookies: [`${SESSION_COOKIE_NAME}=${sessionToken}`],
+        requestContext: {
+          domainName: 'abc123.lambda-url.ap-southeast-2.on.aws',
+          http: { method: 'GET', path: '/calendar/api/auth/me' },
+        },
       };
 
       const deps = {

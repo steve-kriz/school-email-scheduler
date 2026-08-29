@@ -71,16 +71,19 @@ async function drain(turns = 8) {
 }
 
 const albEvent = (requestPath, method = 'GET') => ({
-  path: requestPath,
-  httpMethod: method,
-  headers: {},
+  version: '2.0',
+  rawPath: requestPath,
+  rawQueryString: '',
+  requestContext: { domainName: 'abc123.lambda-url.ap-southeast-2.on.aws', http: { method: method, path: requestPath } },
+  headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+  cookies: [],
   queryStringParameters: {},
   body: null,
   isBase64Encoded: false,
 });
 
 const headerOf = (response, name) => {
-  const value = response.multiValueHeaders?.[name];
+  const value = response.headers?.[name];
   return Array.isArray(value) ? value[0] : value;
 };
 

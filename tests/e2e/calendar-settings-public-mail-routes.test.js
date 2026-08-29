@@ -57,12 +57,18 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
     return `${SESSION_COOKIE_NAME}=${token}`;
   }
 
+  /** A Lambda function URL event (payload format 2.0, TASK-049). */
   function makeEvent(body, cookie) {
     return {
-      path: '/calendar/api/settings',
-      httpMethod: 'PUT',
-      headers: {},
-      multiValueHeaders: cookie ? { cookie: [cookie] } : {},
+      version: '2.0',
+      rawPath: '/calendar/api/settings',
+      rawQueryString: '',
+      headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+      cookies: cookie ? [cookie] : [],
+      requestContext: {
+        domainName: 'abc123.lambda-url.ap-southeast-2.on.aws',
+        http: { method: 'PUT', path: '/calendar/api/settings' },
+      },
       body: JSON.stringify(body),
       isBase64Encoded: false,
     };

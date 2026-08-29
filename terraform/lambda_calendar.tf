@@ -1,10 +1,20 @@
 # =============================================================================
-# School Calendar Lambda - Gmail scanner + calendar UI behind the shared ALB
+# School Calendar Lambda - Gmail scanner + calendar UI on a Lambda function URL
 # =============================================================================
 # This Lambda serves dual purpose:
 #   1. Frontend: serves the calendar SPA (month view, needs-attention list)
 #   2. Backend: Google OAuth callback, Gmail scan, Anthropic extraction and the
 #      events API, all under the /calendar* path prefix
+#
+# INGRESS (TASK-049): a Lambda function URL, NOT the shared basestack ALB. The
+# ALB target group / listener rule / target-group attachment / ALB invoke
+# permission this file used to declare are gone, and with them the custom
+# hostname, its Route53 A-ALIAS record and the WAF rule group that the shared
+# ALB's basestack-owned Web ACL referenced. See the function URL resource at the
+# bottom of this file for exactly what that gives up and why it was accepted.
+#
+# The ALB itself is untouched: it is basestack-owned and shared with the chatbot
+# (listener rule priority 119), and was never ours to remove.
 # =============================================================================
 
 
@@ -202,9 +212,24 @@ locals {
   # function's own environment block.
   calendar_function_arn = "arn:aws:lambda:${var.region}:${var.account_id}:function:${local.name_prefix}-school-calendar"
 
-  # Public origin of the calendar app. Google OAuth redirect URIs and the
-  # frontend's own fetch() calls are both derived from this.
-  calendar_public_base_url = "https://${var.sub_domain}.${data.terraform_remote_state.basestack.outputs.domain_name}"
+  # Public origin of the calendar app - the value of PUBLIC_BASE_URL, from which
+  # the Google OAuth redirect_uri is built server-side.
+  #
+  # Since TASK-049 the app is served from aws_lambda_function_url.calendar, whose
+  # host contains a URL id AWS generates at create time. That id cannot be
+  # constructed the way local.calendar_function_arn above is, and it cannot be
+  # referenced here either: the function URL depends on the function, so reading
+  # it from the function's OWN environment block is a Terraform dependency cycle.
+  #
+  # So this is an opt-in override and it is EMPTY by default. Empty means "derive
+  # the origin from the incoming request" (resolvePublicBaseUrl in index.mjs): a
+  # function-URL invocation always carries the function URL's own host in
+  # `requestContext.domainName`, over HTTPS, so the derived origin is by
+  # construction the origin the app is actually being served from - and it
+  # follows the URL id automatically if the function URL is ever destroyed and
+  # recreated. Set var.public_base_url only if something else is ever put in
+  # front (a CDN or a custom domain); nothing is today.
+  calendar_public_base_url = var.public_base_url
 }
 
 # --- CloudWatch Log Group (new environments only) ---
@@ -273,7 +298,9 @@ resource "aws_lambda_function" "calendar" {
       # must never be left on in prod (email subjects are personal data).
       CALENDAR_LOG_LEVEL = var.calendar_log_level
 
-      # Public origin, used to build the Google OAuth redirect_uri.
+      # Public origin, used to build the Google OAuth redirect_uri. Empty unless
+      # var.public_base_url is set, in which case the handler derives it from the
+      # request's own function-URL host - see the local's comment above.
       PUBLIC_BASE_URL = local.calendar_public_base_url
 
       # Its own ARN, derived from locals (never from the resource) so the
@@ -415,9 +442,11 @@ resource "aws_iam_role_policy_attachment" "calendar_policy_attach" {
 }
 
 # --- Security Group ---
-# Egress-only. No ingress rule is needed or wanted: the ALB reaches a Lambda
-# target through the Lambda service API, not over the network, so nothing ever
-# opens a connection to this ENI.
+# Egress-only. No ingress rule is needed or wanted: a request arriving at the
+# function URL is delivered by the Lambda service as an INVOCATION, not as a
+# network connection to this ENI - exactly as the ALB used to deliver it before
+# TASK-049. Nothing outside ever opens a socket to this function, so an ingress
+# rule would grant reachability that does not exist and cannot be used.
 resource "aws_security_group" "calendar_sg" {
   name        = "${local.name_prefix}-school-calendar-sg"
   description = "Security group for school calendar Lambda"
@@ -433,70 +462,63 @@ resource "aws_security_group" "calendar_sg" {
   tags = var.tags
 }
 
-# --- ALB Target Group ---
-# AWS caps target-group names at 32 characters, so this uses
-# local.name_prefix_short (e.g. "au-dev-rhq-cal-tg") rather than the full
-# name_prefix, which would overflow for every tenant.
-resource "aws_lb_target_group" "calendar_lambda_tg" {
-  name        = "${local.name_prefix_short}-cal-tg"
-  target_type = "lambda"
-  vpc_id      = data.terraform_remote_state.basestack.outputs.vpc_id
-
-  health_check {
-    enabled             = true
-    interval            = 300
-    path                = "/calendar/api/health"
-    matcher             = "200-299"
-    timeout             = 10
-    healthy_threshold   = 3
-    unhealthy_threshold = 3
-  }
-
-  lambda_multi_value_headers_enabled = true
-
-  tags = var.tags
+# --- Function URL (the ingress, TASK-049) ---
+#
+# THIS ENDPOINT IS DELIBERATELY PUBLIC AND HAS NO WAF IN FRONT OF IT. Anyone on
+# the internet can reach every route this Lambda serves; the app's own signed
+# session cookie (backend/session.mjs, enforced by requireSession in each route)
+# is the ONLY guard on the data routes. There is no network-layer filtering, no
+# rate limiting and no IP-based control anywhere in front of this function.
+#
+# `authorization_type = "NONE"` is not a default that was left alone - it is the
+# only value a browser can use. "AWS_IAM" requires a SigV4 signature on every
+# request, so it only works behind something that signs (CloudFront with OAC, or
+# a client with credentials); a browser has neither.
+#
+# What TASK-049 knowingly gave up by moving off the shared ALB, so that nobody
+# later reads this as an oversight and "fixes" it:
+#   * The WAF. terraform/waf_calendar.tf published a REGIONAL rule group that the
+#     basestack's ALB Web ACL referenced. AWS WAF regional ACLs associate with
+#     ALB / API Gateway / AppSync / Cognito and NEVER with a Lambda function URL,
+#     so the rule group could not follow this app and was deleted. That took with
+#     it the per-IP rate limit on /calendar/api/scan (which capped Anthropic
+#     spend per IP), the baseline /calendar* rate limit, and the OAuth-callback
+#     allow rule. CloudFront was considered as a way to keep a WAF and declined.
+#   * The unhealthy-target alarm (alerting.tf) and the ALB health check, which
+#     was the only thing calling /calendar/api/health every 300s. NOTHING probes
+#     that route now.
+#   * The custom hostname. The app is served from the URL below, on an AWS-owned
+#     *.lambda-url.<region>.on.aws certificate. The Route53 A-ALIAS to the ALB is
+#     gone from main.tf.
+#
+# OPERATIONAL: the function-URL origin is part of the Google OAuth redirect_uri,
+# so `<function_url>calendar/api/auth/google/callback` MUST be registered by hand
+# on the OAuth client in the Google Cloud console or every sign-in fails with
+# redirect_uri_mismatch. The URL id is stable for the life of THIS resource but
+# changes if it is destroyed and recreated - a recreate therefore breaks sign-in
+# until the console is updated. See docs/google-oauth-setup.md section 3.
+resource "aws_lambda_function_url" "calendar" {
+  function_name      = aws_lambda_function.calendar.function_name
+  authorization_type = "NONE"
 }
 
-# --- ALB Permission ---
-resource "aws_lambda_permission" "calendar_allow_alb" {
-  statement_id  = "AllowExecutionFromALB"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.calendar.function_name
-  principal     = "elasticloadbalancing.amazonaws.com"
-  source_arn    = aws_lb_target_group.calendar_lambda_tg.arn
+# The resource policy statement that makes an unauthenticated function URL
+# actually invokable. Declared explicitly rather than relied upon: the AWS
+# console and `aws lambda create-function-url-config` add an equivalent
+# statement implicitly (as "FunctionURLAllowPublicAccess"), the Terraform
+# resource above does not, and ending up with NEITHER is a 403 on every request
+# while the URL exists and looks correct. The statement_id is deliberately
+# distinct from the console's so that an environment which already has the
+# implicit statement does not collide on apply.
+resource "aws_lambda_permission" "calendar_allow_function_url" {
+  statement_id           = "AllowPublicInvokeFunctionUrl"
+  action                 = "lambda:InvokeFunctionUrl"
+  function_name          = aws_lambda_function.calendar.function_name
+  principal              = "*"
+  function_url_auth_type = "NONE"
 }
 
-# --- ALB Listener Rule ---
-# Priority 121: this ALB is shared with the chatbot, which already owns 119.
-# Duplicate priorities on the same listener fail at apply time.
-resource "aws_lb_listener_rule" "calendar_listener_rule" {
-  listener_arn = data.aws_lb_listener.web_app_alb_listener_443.arn
-  priority     = 121
-
-  action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.calendar_lambda_tg.arn
-  }
-
-  condition {
-    host_header {
-      values = ["${var.sub_domain}.${data.terraform_remote_state.basestack.outputs.domain_name}"]
-    }
-  }
-
-  condition {
-    path_pattern {
-      values = ["/calendar*"]
-    }
-  }
-}
-
-# --- Target Group Attachment ---
-resource "aws_lb_target_group_attachment" "calendar_lambda_attachment" {
-  target_group_arn = aws_lb_target_group.calendar_lambda_tg.arn
-  target_id        = aws_lambda_function.calendar.arn
-
-  # The permission must exist before the attachment, otherwise the
-  # registration call is rejected with "does not have permission".
-  depends_on = [aws_lambda_permission.calendar_allow_alb]
+output "calendar_function_url" {
+  description = "Public HTTPS origin the calendar app is served from. The app itself lives under /calendar; the Google OAuth redirect URI to register is this value + 'calendar/api/auth/google/callback'"
+  value       = aws_lambda_function_url.calendar.function_url
 }

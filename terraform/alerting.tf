@@ -94,8 +94,9 @@ resource "aws_cloudwatch_metric_alarm" "calendar_lambda_errors" {
 
 # --- Throttles ---
 # Concurrency exhaustion. A throttled scheduled scan is never run at all, and a
-# throttled interactive request is a 502 at the ALB, so any throttle is a real
-# fault - never a normal operating condition for this workload.
+# throttled interactive request is a 429 from the function URL (it was a 502 at
+# the ALB before TASK-049), so any throttle is a real fault - never a normal
+# operating condition for this workload.
 resource "aws_cloudwatch_metric_alarm" "calendar_lambda_throttles" {
   count = var.Alert_SNS_ARN == "" ? 0 : 1
 
@@ -234,44 +235,22 @@ resource "aws_cloudwatch_metric_alarm" "calendar_reauth_required" {
 }
 
 # -----------------------------------------------------------------------------
-# ALB target-group health
+# Removed: ALB target-group health (TASK-049)
 # -----------------------------------------------------------------------------
-# The calendar target group is a Lambda target health-checked against
-# /calendar/api/health every 300s (see lambda_calendar.tf). An unhealthy target
-# means the ALB has stopped forwarding: the app is down from a browser's point
-# of view even though the Lambda itself may publish no Errors datapoint at all
-# (a bad handler path, a packaging failure, or an env var the health route
-# rejects all look like this).
+# aws_cloudwatch_metric_alarm.calendar_target_group_unhealthy_hosts used to
+# alarm on AWS/ApplicationELB UnHealthyHostCount, dimensioned on the calendar
+# target group and the shared ALB. TASK-049 moved the app onto a Lambda function
+# URL and deleted the target group, so neither dimension can report a datapoint
+# ever again.
 #
-# Both ALB dimensions are required, and both must be the metric-friendly
-# arn_suffix - not the ARN.
-resource "aws_cloudwatch_metric_alarm" "calendar_target_group_unhealthy_hosts" {
-  count = var.Alert_SNS_ARN == "" ? 0 : 1
-
-  alarm_name          = "${local.name_prefix}-school-calendar-tg-unhealthy-hosts"
-  namespace           = "AWS/ApplicationELB"
-  metric_name         = "UnHealthyHostCount"
-  comparison_operator = "GreaterThanThreshold"
-  threshold           = 0
-  # Two consecutive periods: the health-check interval is 300s, so one
-  # breaching period is a single failed probe. Two in a row is an outage.
-  period              = 300
-  evaluation_periods  = 2
-  datapoints_to_alarm = 2
-  statistic           = "Maximum"
-  # A Lambda target group publishes this metric only while the ALB is actively
-  # health-checking it, so gaps are normal and must not alarm.
-  treat_missing_data = "notBreaching"
-
-  dimensions = {
-    TargetGroup  = aws_lb_target_group.calendar_lambda_tg.arn_suffix
-    LoadBalancer = data.aws_lb.web_app_alb.arn_suffix
-  }
-
-  alarm_description = "The school calendar ALB target group has an unhealthy target - /calendar/api/health is failing and the app is unreachable"
-
-  alarm_actions = [var.Alert_SNS_ARN]
-  ok_actions    = [var.Alert_SNS_ARN]
-
-  tags = var.tags
-}
+# It was DELETED rather than re-pointed or left in place: an alarm on a metric
+# that never reports never fires, so it sits green forever and looks like
+# coverage. That is worse than the honest gap.
+#
+# KNOWN GAP, recorded here on purpose: the ALB health check was the only thing
+# calling /calendar/api/health (every 300s). Nothing calls it now, so there is
+# no synthetic probe of this app's liveness at all - the alarms above only fire
+# on activity the Lambda itself generates (errors, throttles, log patterns), so
+# a function that is broken AND idle is invisible. Restoring a probe needs
+# something that polls the function URL on a schedule (a CloudWatch Synthetics
+# canary or an EventBridge-driven checker), which TASK-049 did not build.

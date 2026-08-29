@@ -17,7 +17,7 @@ variable "project_name" {
 
 
 variable "project_name_short" {
-  description = "Name of Project abbreviated, mainly so the target group can be created"
+  description = "Name of Project abbreviated, for resource names with a short length limit"
   type        = string
 }
 
@@ -97,8 +97,13 @@ variable "hosted_zone" {
   type        = string
 }
 
+# NOT USED BY THIS CONFIGURATION SINCE TASK-049, like alb_name/hosted_zone/
+# hosted_zone_id below and above: the app is served from a Lambda function URL,
+# so there is no ALB listener rule host condition and no Route53 record built
+# from this any more. It stays declared because all four config/*.tfvars set it
+# and an undeclared variable in a .tfvars file warns on every plan.
 variable "sub_domain" {
-  description = "the sub domain to be created for the web app"
+  description = "the sub domain to be created for the web app (unused since TASK-049 - the calendar is served from aws_lambda_function_url.calendar, see lambda_calendar.tf)"
   type        = string
 }
 
@@ -162,46 +167,33 @@ variable "tags" {
   }
 }
 
-variable "calendar_waf_rate_limit" {
+# var.calendar_waf_rate_limit and var.calendar_scan_rate_limit were removed by
+# TASK-049 along with aws_wafv2_rule_group.calendar_protection. The app is served
+# from a Lambda function URL, which no AWS WAF regional Web ACL can be associated
+# with, so there is no longer anything for a rate limit to be configured ON. They
+# were deleted rather than left declared because a variable that names a path it
+# no longer protects reads like live protection to the next person.
+
+variable "public_base_url" {
   description = <<-EOT
-    Maximum requests per 5-minute period per IP for the /calendar* paths.
+    Override for PUBLIC_BASE_URL, the public origin the calendar app is served
+    from, with NO trailing slash (e.g. https://example.com).
 
-    300 matches the chatbot's own var.chatbot_waf_rate_limit. Applied by
-    aws_wafv2_rule_group.calendar_protection in waf_calendar.tf, and NOT
-    applied to the Google OAuth callback, which is explicitly allowed first -
-    see the callback rule's comment for why (schools NAT their whole staff
-    behind one egress IP, so sign-in arrives as a single-IP burst).
+    Leave empty - the default - unless something is put in front of the Lambda
+    function URL. Empty makes the handler derive the origin from each incoming
+    request's own function-URL host, which is always the origin the app is
+    actually being served from and needs no update if the function URL is ever
+    recreated with a new URL id.
 
-    AWS WAF rejects a rate-based limit below 10.
+    Whatever this resolves to, the Google OAuth redirect_uri is built from it as
+    <origin>/calendar/api/auth/google/callback and that exact string must be
+    registered on the OAuth client in the Google Cloud console.
   EOT
-  type        = number
-  default     = 300
+  type        = string
+  default     = ""
 
   validation {
-    condition     = var.calendar_waf_rate_limit >= 10
-    error_message = "calendar_waf_rate_limit must be at least 10 (the AWS WAF rate-based rule minimum)."
-  }
-}
-
-variable "calendar_scan_rate_limit" {
-  description = <<-EOT
-    Maximum requests per 5-minute period per IP for /calendar/api/scan.
-
-    Deliberately much tighter than calendar_waf_rate_limit: one scan fans out
-    into Gmail API calls and one Anthropic completion PER EMAIL, so its cost is
-    measured in model tokens rather than CPU. Keep this BELOW
-    calendar_waf_rate_limit - Terraform 1.8 cannot express that as a variable
-    validation (cross-variable references need 1.9+), so it is an invariant the
-    defaults satisfy (10 < 300) and an override must preserve.
-
-    10 is also the AWS WAF floor for a rate-based rule limit; lower values are
-    rejected by the API.
-  EOT
-  type        = number
-  default     = 10
-
-  validation {
-    condition     = var.calendar_scan_rate_limit >= 10
-    error_message = "calendar_scan_rate_limit must be at least 10 (the AWS WAF rate-based rule minimum)."
+    condition     = var.public_base_url == "" || can(regex("^https?://[^/]+$", var.public_base_url))
+    error_message = "public_base_url must be empty, or a scheme + host with no path and no trailing slash (e.g. https://example.com)."
   }
 }

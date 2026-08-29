@@ -223,21 +223,31 @@ describe('Terraform Scaffold Unit Tests', () => {
       assert.ok(mainContent.length > 0, 'main.tf is empty');
     });
 
-    it('should create aws_route53_record resource', () => {
-      assert.ok(mainContent.includes('resource "aws_route53_record"'),
-        'aws_route53_record resource not found');
+    // TASK-049: the app is served from a Lambda function URL, not from the
+    // shared ALB. The A-ALIAS record pointed a custom hostname at that load
+    // balancer; once the listener rule for /calendar* went, the record would
+    // have resolved to an ALB with no matching rule - a hostname that answers
+    // but serves nothing. It was removed rather than left dangling.
+    it('should NOT create an aws_route53_record: stale DNS must not silently serve nothing', () => {
+      assert.ok(!mainContent.includes('resource "aws_route53_record"'),
+        'aws_route53_record still declared; with the listener rule gone it would resolve to an ALB that has no rule for this app');
     });
 
-    it('should alias to the shared ALB with sub_domain prefix', () => {
-      assert.ok(mainContent.includes('var.sub_domain'),
-        'var.sub_domain not referenced in route53 record name');
-      assert.ok(mainContent.includes('${var.sub_domain}.'),
-        'route53 record name does not use var.sub_domain prefix');
+    it('should not alias anything to the shared ALB any more', () => {
+      assert.ok(!mainContent.includes('data "aws_lb"'),
+        'the shared ALB data source is still looked up in main.tf');
+      assert.ok(!mainContent.includes('data "aws_lb_listener"'),
+        'the shared ALB listener data source is still looked up in main.tf');
+      assert.ok(!mainContent.includes('alias {'),
+        'an alias block survives in main.tf with no load balancer to point at');
     });
 
-    it('should alias to basestack domain_name', () => {
-      assert.ok(mainContent.includes('data.terraform_remote_state.basestack.outputs.domain_name'),
-        'basestack domain_name not referenced');
+    it('should publish the function URL as the public origin instead', () => {
+      const lambdaTf = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
+      assert.ok(lambdaTf.includes('resource "aws_lambda_function_url" "calendar"'),
+        'aws_lambda_function_url.calendar not found - nothing serves the app');
+      assert.ok(lambdaTf.includes('output "calendar_function_url"'),
+        'the public origin is not published as an output');
     });
 
     it('should expose local.secrets from Secrets Manager lookup', () => {

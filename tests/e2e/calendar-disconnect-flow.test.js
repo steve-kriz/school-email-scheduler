@@ -307,16 +307,25 @@ function makeDeps(world, { revoke = 'ok', ...extra } = {}) {
   };
 }
 
-/** GIVEN an authenticated user: an ALB event carrying a valid session cookie. */
+/**
+ * GIVEN an authenticated user: a Lambda function URL event (payload format 2.0,
+ * TASK-049) carrying a valid session cookie in the `cookies` array.
+ */
 function givenAuthenticatedDisconnectRequest(sub, body = undefined) {
   const token = createSessionToken(
     { sub, email: `${sub}@example.test` },
     { secret: SESSION_SECRET, nowSeconds: Math.floor(Date.now() / 1000) }
   );
   return {
-    path: '/calendar/api/auth/disconnect',
-    httpMethod: 'POST',
-    multiValueHeaders: { cookie: [`${SESSION_COOKIE_NAME}=${token}`] },
+    version: '2.0',
+    rawPath: '/calendar/api/auth/disconnect',
+    rawQueryString: '',
+    headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+    cookies: [`${SESSION_COOKIE_NAME}=${token}`],
+    requestContext: {
+      domainName: 'abc123.lambda-url.ap-southeast-2.on.aws',
+      http: { method: 'POST', path: '/calendar/api/auth/disconnect' },
+    },
     body: body === undefined ? undefined : JSON.stringify(body),
   };
 }
@@ -327,8 +336,13 @@ async function whenTheyPostDisconnect(event, deps) {
   return { response, body: response.body ? JSON.parse(response.body) : null };
 }
 
+/**
+ * The cookies a response sets. Under payload format 2.0 these live in the
+ * top-level `cookies` array, never in the header map (TASK-049).
+ */
 function setCookieHeader(response) {
-  return response?.multiValueHeaders?.['Set-Cookie'] || null;
+  const cookies = response?.cookies;
+  return Array.isArray(cookies) && cookies.length > 0 ? cookies : null;
 }
 
 /* =========================================================================
@@ -366,7 +380,18 @@ describe('Feature: Disconnecting a Google account (E2E)', () => {
   it('Scenario: An unauthenticated caller is refused before anything is read', async () => {
     // Given a request with no session cookie
     const world = makeWorld();
-    const event = { path: '/calendar/api/auth/disconnect', httpMethod: 'POST', multiValueHeaders: {}, body: '{"deleteEvents":true}' };
+    const event = {
+      version: '2.0',
+      rawPath: '/calendar/api/auth/disconnect',
+      rawQueryString: '',
+      headers: { host: 'abc123.lambda-url.ap-southeast-2.on.aws' },
+      cookies: [],
+      requestContext: {
+        domainName: 'abc123.lambda-url.ap-southeast-2.on.aws',
+        http: { method: 'POST', path: '/calendar/api/auth/disconnect' },
+      },
+      body: '{"deleteEvents":true}',
+    };
     world.seedConnection('google#1');
     world.seedEvents('google#1', 3);
 

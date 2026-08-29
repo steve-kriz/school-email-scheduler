@@ -893,9 +893,7 @@ describe('Session Functions', () => {
   describe('getCookies and getCookie', () => {
     it('should get cookies from multiValueHeaders', () => {
       const event = {
-        multiValueHeaders: {
-          cookie: ['session=abc123; other=xyz'],
-        },
+        cookies: ['session=abc123; other=xyz'],
       };
       const cookies = getCookies(event);
       assert.equal(cookies.session, 'abc123');
@@ -923,9 +921,7 @@ describe('Session Functions', () => {
 
     it('should get a specific cookie by name', () => {
       const event = {
-        multiValueHeaders: {
-          cookie: ['session=abc123; other=xyz'],
-        },
+        cookies: ['session=abc123; other=xyz'],
       };
       const value = getCookie(event, 'session');
       assert.equal(value, 'abc123');

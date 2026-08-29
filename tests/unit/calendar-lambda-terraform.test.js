@@ -467,128 +467,83 @@ describe('Calendar Lambda Terraform Unit Tests', () => {
       });
     });
 
-    describe('Scenario: ALB target group configuration', () => {
-      it('Given aws_lb_target_group, Then target_type is "lambda"', () => {
+    // TASK-049 replaced the shared-ALB ingress (target group + listener rule +
+    // target group attachment + elasticloadbalancing invoke permission) with the
+    // function's own Lambda function URL. These scenarios assert the NEW ingress
+    // and that none of the old wiring survives.
+    describe('Scenario: The function URL is the ingress', () => {
+      it('Given lambda_calendar.tf, Then aws_lambda_function_url.calendar is declared for the calendar function', () => {
         const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
-        assert.ok(tfContent.includes('target_type = "lambda"'),
-          'target_type not set to lambda');
+        const urlMatch = tfContent.match(/resource "aws_lambda_function_url" "calendar" \{[\s\S]*?\n\}/);
+        assert.ok(urlMatch, 'aws_lambda_function_url.calendar resource not found');
+        assert.ok(urlMatch[0].includes('aws_lambda_function.calendar.function_name'),
+          'the function URL is not attached to the calendar Lambda');
       });
 
-      it('When target group is configured, Then lambda_multi_value_headers_enabled is true', () => {
+      it('When the function URL is configured, Then authorization_type is "NONE" so a browser can reach it', () => {
         const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
-        assert.ok(tfContent.includes('lambda_multi_value_headers_enabled = true'),
-          'lambda_multi_value_headers_enabled not set to true');
+        const urlMatch = tfContent.match(/resource "aws_lambda_function_url" "calendar" \{[\s\S]*?\n\}/);
+        assert.ok(urlMatch, 'aws_lambda_function_url.calendar resource not found');
+        assert.ok(/authorization_type\s*=\s*"NONE"/.test(urlMatch[0]),
+          'authorization_type is not "NONE" - AWS_IAM requires a SigV4 signature a browser cannot produce');
       });
 
-      it('When health_check is configured, Then path is /calendar/api/health', () => {
+      it('And an explicit aws_lambda_permission allows lambda:InvokeFunctionUrl, or every request is a 403', () => {
         const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
-        assert.ok(tfContent.includes('path                = "/calendar/api/health"'),
-          'health check path not correctly set');
+        const permMatch = tfContent.match(
+          /resource "aws_lambda_permission" "calendar_allow_function_url" \{[\s\S]*?\n\}/
+        );
+        assert.ok(permMatch, 'aws_lambda_permission.calendar_allow_function_url not found');
+        const perm = permMatch[0];
+        assert.ok(/action\s*=\s*"lambda:InvokeFunctionUrl"/.test(perm),
+          'the permission does not grant lambda:InvokeFunctionUrl');
+        assert.ok(/principal\s*=\s*"\*"/.test(perm), 'the permission principal is not "*"');
+        assert.ok(/function_url_auth_type\s*=\s*"NONE"/.test(perm),
+          'function_url_auth_type is not "NONE", so it does not match the URL it is meant to open');
       });
 
-      it('When health_check is configured, Then matcher is 200-299', () => {
+      it('And the public origin is published as output "calendar_function_url"', () => {
         const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
-        assert.ok(tfContent.includes('matcher             = "200-299"'),
-          'health check matcher not correctly set');
-      });
-
-      it('When target group name is set, Then it is ${local.name_prefix_short}-cal-tg', () => {
-        const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
-        assert.ok(tfContent.includes('name        = "${local.name_prefix_short}-cal-tg"'),
-          'target group name not correctly set');
+        const outMatch = tfContent.match(/output "calendar_function_url" \{[\s\S]*?\n\}/);
+        assert.ok(outMatch, 'output "calendar_function_url" not found');
+        assert.ok(outMatch[0].includes('aws_lambda_function_url.calendar.function_url'),
+          'the output does not expose the function URL');
       });
     });
 
-    describe('Scenario: Target group name fits the AWS limit', () => {
-      it('When target group name is rendered for dev/au, Then its length is at most 32 characters', () => {
-        // dev/au: au-dev-rhq-cal-tg = 17 chars
-        const namePrefix = 'au-dev-rhq';
-        const tgName = `${namePrefix}-cal-tg`;
-        assert.ok(tgName.length <= 32,
-          `Target group name "${tgName}" exceeds 32 character limit (${tgName.length} chars)`);
-      });
+    describe('Scenario: No ALB wiring is left behind', () => {
+      // Each of these resources only makes sense with a load balancer in front.
+      // Leaving any of them would keep an ALB target pointed at this function
+      // while nothing routes to it.
+      const goneResources = [
+        'aws_lb_target_group" "calendar_lambda_tg',
+        'aws_lb_listener_rule" "calendar_listener_rule',
+        'aws_lb_target_group_attachment" "calendar_lambda_attachment',
+        'aws_lambda_permission" "calendar_allow_alb'
+      ];
 
-      it('For every tenant/environment combination, target group name fits 32 character limit', () => {
-        const tfvarsFiles = [
-          { path: 'config/dev/au.tfvars', tenant: 'au', env: 'dev' },
-          { path: 'config/prod/au.tfvars', tenant: 'au', env: 'prod' },
-          { path: 'config/prod/uk.tfvars', tenant: 'uk', env: 'prod' },
-          { path: 'config/prod/us.tfvars', tenant: 'us', env: 'prod' }
-        ];
-
-        tfvarsFiles.forEach(file => {
-          const tfvarsPath = path.join(TERRAFORM_DIR, file.path);
-          assert.ok(fs.existsSync(tfvarsPath), `tfvars file not found: ${file.path}`);
-
-          const content = fs.readFileSync(tfvarsPath, 'utf-8');
-          const projShortMatch = content.match(/project_name_short\s*=\s*"([^"]+)"/);
-          assert.ok(projShortMatch, `project_name_short not found in ${file.path}`);
-
-          const projShort = projShortMatch[1];
-          const namePrefix = `${file.tenant}-${file.env}-${projShort}`;
-          const tgName = `${namePrefix}-cal-tg`;
-
-          assert.ok(tgName.length <= 32,
-            `Target group name "${tgName}" for ${file.tenant}/${file.env} exceeds 32 character limit (${tgName.length} chars)`);
+      for (const resource of goneResources) {
+        it(`When terraform is applied, Then ${resource.replace('" "', '.')} no longer exists`, () => {
+          const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
+          assert.ok(!tfContent.includes(resource),
+            `${resource} is still declared - the ALB ingress was meant to be removed by TASK-049`);
         });
-      });
-    });
+      }
 
-    describe('Scenario: ALB listener rule configuration', () => {
-      it('Given aws_lb_listener_rule, Then priority is 121', () => {
+      it('And no ALB-only settings survive (lambda_multi_value_headers_enabled, health_check, elasticloadbalancing principal)', () => {
         const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
-        assert.ok(tfContent.includes('priority     = 121'),
-          'listener rule priority not set to 121');
-      });
-
-      it('When listener rule is configured, Then its priority is not 119 (chatbot collision)', () => {
-        const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
-        assert.ok(tfContent.includes('priority     = 121'),
-          'priority should be 121, not 119');
-        assert.ok(!tfContent.match(/priority\s*=\s*119/),
-          'priority must not be 119 (chatbot uses that priority)');
+        assert.ok(!tfContent.includes('lambda_multi_value_headers_enabled'),
+          'lambda_multi_value_headers_enabled survives; a function URL ignores multiValueHeaders entirely');
+        assert.ok(!tfContent.includes('elasticloadbalancing.amazonaws.com'),
+          'the ELB invoke principal survives with no load balancer to use it');
+        assert.ok(!/health_check\s*\{/.test(tfContent),
+          'an ALB health_check block survives with no target group to own it');
       });
 
-      it('When listener rule is configured, Then it has a host_header condition', () => {
+      it('And no listener rule priority is declared, so it cannot collide with the chatbot on the shared ALB', () => {
         const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
-        assert.ok(tfContent.includes('host_header {'),
-          'host_header condition not found');
-        assert.ok(tfContent.includes('${var.sub_domain}.${data.terraform_remote_state.basestack.outputs.domain_name}'),
-          'host_header values not correctly set');
-      });
-
-      it('When listener rule is configured, Then it has a path_pattern condition for /calendar*', () => {
-        const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
-        assert.ok(tfContent.includes('path_pattern {'),
-          'path_pattern condition not found');
-        assert.ok(tfContent.includes('"/calendar*"'),
-          'path_pattern value not set to /calendar*');
-      });
-    });
-
-    describe('Scenario: Lambda permission and attachment dependencies', () => {
-      it('Given aws_lambda_permission, Then principal is elasticloadbalancing.amazonaws.com', () => {
-        const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
-        assert.ok(tfContent.includes('principal     = "elasticloadbalancing.amazonaws.com"'),
-          'permission principal not correctly set');
-      });
-
-      it('When lambda_permission is configured, Then source_arn is the target group ARN', () => {
-        const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
-        assert.ok(tfContent.includes('source_arn    = aws_lb_target_group.calendar_lambda_tg.arn'),
-          'permission source_arn not correctly set');
-      });
-
-      it('When aws_lb_target_group_attachment is configured, Then it depends_on aws_lambda_permission', () => {
-        const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
-        assert.ok(tfContent.includes('depends_on = [aws_lambda_permission.calendar_allow_alb]'),
-          'target_group_attachment does not depend on lambda_permission');
-      });
-
-      it('When aws_lb_target_group_attachment is configured, Then target_id is the lambda ARN', () => {
-        const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
-        assert.ok(tfContent.includes('target_id        = aws_lambda_function.calendar.arn'),
-          'target_id not set to lambda ARN');
+        assert.ok(!/\n\s*priority\s*=\s*\d+/.test(tfContent),
+          'a listener rule priority is still declared in lambda_calendar.tf');
       });
     });
 

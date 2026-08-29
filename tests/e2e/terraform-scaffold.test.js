@@ -395,8 +395,13 @@ describe('Terraform Scaffold E2E Tests', () => {
       });
     });
 
-    describe('Scenario: The calendar sub-domain is used, not the chatbot\'s', () => {
-      it('Given the dev/au tfvars are loaded, Then sub_domain equals "calendar" And the route53 record name starts with "calendar."', () => {
+    describe('Scenario: Stale DNS does not silently serve nothing (TASK-049)', () => {
+      it('Given the Route53 A-ALIAS previously pointed at the shared ALB, When the listener rule for this app is removed, Then the record is removed too', () => {
+        // sub_domain is still a real variable other things may use, so it is
+        // still asserted; what must NOT survive is the A-ALIAS built from it,
+        // because the /calendar* listener rule it depended on is gone. Leaving
+        // it would hand users a hostname that resolves to a load balancer with
+        // no matching rule.
         const tfvarsPath = path.join(CONFIG_DIR, 'dev', 'au.tfvars');
         assert.ok(fs.existsSync(tfvarsPath), 'dev/au.tfvars not found');
         const tfvarsContent = fs.readFileSync(tfvarsPath, 'utf-8');
@@ -406,16 +411,35 @@ describe('Terraform Scaffold E2E Tests', () => {
         assert.equal(subDomainMatch[1], 'calendar',
           `Expected sub_domain to be "calendar", got "${subDomainMatch[1]}"`);
 
-        // Check route53 record in main.tf
         const mainTfPath = path.join(TERRAFORM_DIR, 'main.tf');
         const mainTfContent = fs.readFileSync(mainTfPath, 'utf-8');
 
-        assert.ok(mainTfContent.includes('var.sub_domain'),
-          'var.sub_domain reference not found in main.tf');
-        assert.ok(mainTfContent.includes('aws_route53_record'),
-          'aws_route53_record resource not found in main.tf');
-        assert.ok(mainTfContent.includes('${var.sub_domain}.'),
-          'Route53 record name does not use var.sub_domain');
+        // Declarations only: main.tf carries a comment explaining WHY these were
+        // removed, and that comment is exactly what should survive.
+        assert.ok(!/^\s*resource\s+"aws_route53_record"/m.test(mainTfContent),
+          'aws_route53_record still declared in main.tf; it would resolve to an ALB with no rule for this app');
+        assert.ok(!/^\s*data\s+"aws_lb_listener"/m.test(mainTfContent),
+          'the ALB listener data source still exists, but no listener rule is attached to it any more');
+        assert.ok(!/^\s*data\s+"aws_lb"/m.test(mainTfContent),
+          'the shared ALB is still looked up, but nothing routes to this app through it');
+      });
+
+      it('And the hostname the app is advertised on is the function URL, whose TLS name AWS owns', () => {
+        // TLS name matches the advertised hostname: the app is served from
+        // *.lambda-url.<region>.on.aws, which AWS presents a valid certificate
+        // for. No custom hostname is advertised, so no certificate has to be
+        // provisioned or matched by this repo.
+        const lambdaTfPath = path.join(TERRAFORM_DIR, 'lambda_calendar.tf');
+        const lambdaTfContent = fs.readFileSync(lambdaTfPath, 'utf-8');
+
+        assert.ok(lambdaTfContent.includes('resource "aws_lambda_function_url" "calendar"'),
+          'no function URL declared, so the app has no advertised hostname at all');
+        const outputMatch = lambdaTfContent.match(/output "calendar_function_url" \{[\s\S]*?\n\}/);
+        assert.ok(outputMatch, 'output "calendar_function_url" not found');
+        assert.ok(outputMatch[0].includes('aws_lambda_function_url.calendar.function_url'),
+          'the advertised origin is not taken from the function URL resource itself');
+        assert.ok(!lambdaTfContent.includes('aws_acm_certificate'),
+          'a custom certificate is declared, but the function URL uses the AWS-owned on.aws certificate');
       });
     });
 

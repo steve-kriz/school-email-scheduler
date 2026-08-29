@@ -681,7 +681,10 @@ export function requireValidSettings(payload) {
  * reports the missing FIELD ("School name is required"), which is what the user
  * can act on, instead of a generic complaint about the body.
  *
- * @param {object} event ALB event.
+ * `isBase64Encoded` is set by payload format 2.0 exactly as it was by the ALB
+ * format, so a base64 body still decodes after TASK-049.
+ *
+ * @param {object} event Request event (function URL payload format 2.0).
  * @returns {object}
  * @throws {SettingsValidationError} When the body is not parseable JSON.
  */
