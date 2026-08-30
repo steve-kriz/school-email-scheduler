@@ -1,5 +1,10 @@
 
 terraform {
+  # S3-native state locking (use_lockfile) landed in Terraform 1.10. Pinning the
+  # floor here makes an older binary fail fast at init instead of quietly
+  # initialising a backend with no locking at all.
+  required_version = ">= 1.10"
+
   required_providers {
     aws = {
       source = "hashicorp/aws"
@@ -9,8 +14,11 @@ terraform {
     }
   }
   backend "s3" {
-    encrypt        = true
-    dynamodb_table = "tfstate-table"
+    encrypt = true
+    # State and lock both live in S3: the lock is a <key>.tflock object beside
+    # the state object. The shared DynamoDB lock table is upstream-owned and is
+    # deliberately left in place for the other stacks that still use it.
+    use_lockfile = true
   }
 }
 
@@ -53,19 +61,17 @@ data "aws_default_tags" "current" {}
 data "terraform_remote_state" "basestack" {
   backend = "s3"
   config = {
-    bucket         = var.terraform_remote_state_basestack_config["bucket"]
-    key            = var.terraform_remote_state_basestack_config["key"]
-    region         = var.terraform_remote_state_basestack_config["region"]
-    dynamodb_table = var.terraform_remote_state_basestack_config["dynamodb_table"]
+    bucket = var.terraform_remote_state_basestack_config["bucket"]
+    key    = var.terraform_remote_state_basestack_config["key"]
+    region = var.terraform_remote_state_basestack_config["region"]
   }
 }
 
 data "terraform_remote_state" "legacystack" {
   backend = "s3"
   config = {
-    bucket         = var.terraform_remote_state_legacystack_config["bucket"]
-    key            = var.terraform_remote_state_legacystack_config["key"]
-    region         = var.terraform_remote_state_legacystack_config["region"]
-    dynamodb_table = var.terraform_remote_state_legacystack_config["dynamodb_table"]
+    bucket = var.terraform_remote_state_legacystack_config["bucket"]
+    key    = var.terraform_remote_state_legacystack_config["key"]
+    region = var.terraform_remote_state_legacystack_config["region"]
   }
 }

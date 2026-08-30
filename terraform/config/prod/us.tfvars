@@ -14,15 +14,13 @@ hosted_zone_id     = "Z00749931KSSIZKW2JZ3N"
 ##############################################
 
 terraform_remote_state_basestack_config = {
-  region         = "ap-southeast-2"
-  bucket         = "ap-southeast-2-824320358416-officehq-tfstate-bucket"
-  key            = "env:/prod-us/terraform_prod_us_basestack.tfstate"
-  dynamodb_table = "tfstate-table"
+  region = "ap-southeast-2"
+  bucket = "ap-southeast-2-824320358416-officehq-tfstate-bucket"
+  key    = "env:/prod-us/terraform_prod_us_basestack.tfstate"
 }
 
 terraform_remote_state_legacystack_config = {
-  region         = "ap-southeast-2"
-  bucket         = "ap-southeast-2-824320358416-officehq-tfstate-bucket"
-  key            = "env:/prod-us/terraform_prod_us_legacystack.tfstate"
-  dynamodb_table = "tfstate-table"
+  region = "ap-southeast-2"
+  bucket = "ap-southeast-2-824320358416-officehq-tfstate-bucket"
+  key    = "env:/prod-us/terraform_prod_us_legacystack.tfstate"
 }
