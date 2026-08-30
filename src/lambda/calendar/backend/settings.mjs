@@ -1,50 +1,70 @@
 /**
  * settings.mjs - what the user asked us to watch for, and how it is validated.
  *
- * One or more school display names plus one or more sender domains. These two
- * values are the whole input to the Gmail search query (TASK-006) and the
- * extraction prompt (TASK-007), which is why the validation here is not cosmetic:
- * a domain list that is wrong in the wrong direction decides how much of the
- * user's mailbox is read and how much of it is sent to a model.
+ * A list of named PROCESSING JOBS (TASK-055). Each job is one independent
+ * "search + extract" configuration: a display `name`, one `schoolName`, one
+ * sender `domain`, and zero or more free-text `searchTerms`. A job is the whole
+ * input to the Gmail search query (TASK-056) and the extraction prompt
+ * (TASK-007), which is why the validation here is not cosmetic: a domain that is
+ * wrong in the wrong direction decides how much of the user's mailbox is read
+ * and how much of it is sent to a model.
  *
- * STORAGE: `schoolNames` and `searchDomains` are both DynamoDB string sets (see
- * terraform/dynamodb_calendar_connections.tf). The document client marshals a JS
- * `Set` to SS, so that is what the patch carries. DynamoDB rejects an EMPTY
- * string set outright, so "this user now has no domains" cannot be written as
- * `new Set()` - it has to REMOVE the attribute, which is what
- * `REMOVE_ATTRIBUTE` from connections.mjs expresses. `buildConnectionPatch`
- * handles that case explicitly; do not simplify it back into writing an empty
- * set, which fails the write with a ValidationException.
+ * Each job carries a server-owned `id` (a UUID) that never changes once created,
+ * because TASK-056 attributes extracted events to it and the id must survive a
+ * rename. A PUT is a WHOLE-LIST REPLACE - it never reads the stored row - so the
+ * only way an id survives is for the client to echo it back; see
+ * `validateProcessingJobs`. A job left out of the submitted list is deleted.
  *
- * LEGACY `schoolName` (TASK-053). The field used to be a single scalar string.
- * A row written before that change still carries it, so `toPublicJson` reads a
- * lone scalar back as a one-element list and `buildConnectionPatch` REMOVEs the
- * scalar in the same UpdateItem that SETs `schoolNames` - a row migrates on its
- * owner's next save and no row ever carries both. The PUT still ACCEPTS a legacy
- * `schoolName` string on the way in (a browser tab loaded before the deploy), but
- * nothing emits one on the way out.
+ * STORAGE: `processingJobs` is a DynamoDB LIST OF MAPS (see
+ * terraform/dynamodb_calendar_connections.tf). The document client marshals a
+ * plain JS array of plain objects to `L` of `M` on its own, so the patch carries
+ * exactly that - NOT a `Set` (this attribute is not a string set) and not a JSON
+ * string. `JSON.stringify(new Set())` is `"{}"`, so a Set that escaped into a
+ * response body would silently become an empty object. A job's `searchTerms` is
+ * likewise a plain array, and an EMPTY one is stored AS an empty list: the
+ * empty-set write error that `REMOVE_ATTRIBUTE` exists for applies to `SS`, not
+ * to `L`.
  *
- * NO SANITISATION, DELIBERATELY. Each school name and each domain are stored exactly
- * as validated - raw, unescaped text. Stripping or escaping characters at the
- * storage layer corrupts legitimate values ("St Mary's Primary", "École") and
- * hides the corruption in the database, where it can never be undone. Escaping is
- * the job of the boundary that renders:
- *   - the frontend (TASK-010) escapes on render, so the text cannot become
+ * LEGACY `schoolNames` (SS), `searchDomains` (SS) and `schoolName` (S). These are
+ * the pre-TASK-055 shape and are no longer part of the read or write contract: no
+ * route accepts them and no response body emits them. A row that has not been
+ * saved since is MIGRATED ON READ in `toPublicJson` (connections.mjs), which
+ * synthesises exactly one "Default" job from them, and all three attributes are
+ * REMOVEd by `buildConnectionPatch` in the same UpdateItem that SETs
+ * `processingJobs` - so a row migrates on its owner's next save and no row ever
+ * carries both shapes. There is no batch migration.
+ *
+ * `validateSchoolNames` and `validateSearchDomains` are still exported (other
+ * modules and tests import them, and they remain the reference for this file's
+ * count-then-normalise-then-dedup shape) but they are NO LONGER part of the
+ * settings request path - `requireValidSettings` calls neither. `MAX_SCHOOL_NAMES`
+ * and `MAX_SEARCH_DOMAINS` exist only to bound those two retained functions.
+ *
+ * NO SANITISATION, DELIBERATELY. Job names, school names, domains and search
+ * terms are stored exactly as validated - raw, unescaped text. Stripping or
+ * escaping characters at the storage layer corrupts legitimate values ("St Mary's
+ * Primary", "École") and hides the corruption in the database, where it can never
+ * be undone. Escaping is the job of the boundary that renders:
+ *   - the frontend (TASK-057) escapes on render, so the text cannot become
  *     markup in the page;
  *   - the prompt builder (TASK-007) wraps these values in a delimited block, so
  *     the text cannot become instructions to the model.
- * What IS enforced here is SHAPE: a length bound on each name, and a strict
- * hostname grammar on each domain, so neither field can carry an arbitrary
- * payload in the first place.
+ * What IS enforced here is SHAPE: a length bound on each free-text field, a cap
+ * on how many jobs and how many terms, and a strict hostname grammar on each
+ * domain, so no field can carry an arbitrary payload in the first place.
  *
  * VALIDATION IS SERVER-SIDE. The frontend will validate too, for the error
  * messages, but nothing here trusts that: every rule below is re-checked on the
  * request.
  *
  * TESTABILITY: every I/O function takes its dependencies as parameters with real
- * defaults, exactly as connections.mjs does. Nothing in this module imports the
- * AWS SDK, and every branch is reachable with no AWS credentials and no network.
+ * defaults, exactly as connections.mjs does. That includes the id generator -
+ * `validateProcessingJobs` takes `newId` so every branch is reachable with a
+ * stubbed generator. Nothing in this module imports the AWS SDK, and every branch
+ * is reachable with no AWS credentials and no network.
  */
+
+import { randomUUID } from "node:crypto";
 
 import {
   connectionUserId,
@@ -65,8 +85,7 @@ export const SETTINGS_PATH = "/calendar/api/settings";
  */
 export const SETTINGS_FIELDS = [
   "email",
-  "schoolNames",
-  "searchDomains",
+  "processingJobs",
   "scheduleEnabled",
   "scheduleFrequency",
   "scheduleHour",
@@ -75,21 +94,62 @@ export const SETTINGS_FIELDS = [
   "lastScanStatus",
 ];
 
-/** Display name bound, per name, counted in code points (see `countCodePoints`). */
+/**
+ * Display name bound, counted in code points (see `countCodePoints`). Bounds a
+ * single job's `schoolName`, and - unchanged since TASK-053 - each entry of the
+ * retained `validateSchoolNames`.
+ */
 export const MAX_SCHOOL_NAME_LENGTH = 120;
 
 /**
- * How many school names one user may list. Ten matches `MAX_SEARCH_DOMAINS`, and
- * the bound is not cosmetic: every name is copied into the prompt for EVERY
- * message of a scan, so the cap is what keeps the per-message token cost of this
- * field bounded.
+ * How many processing jobs one user may configure.
+ *
+ * A settings row is ONE DynamoDB item and must stay well inside the 400KB item
+ * limit: twenty jobs each carrying twenty ~80-character search terms is roughly
+ * 44KB, so this cap has two orders of magnitude of headroom. It is also what
+ * keeps the number of Gmail queries per scan bounded (TASK-056 runs one search
+ * per job).
+ */
+export const MAX_PROCESSING_JOBS = 20;
+
+/**
+ * Job display-name bound, in code points. Matches `MAX_SCHOOL_NAME_LENGTH`: both
+ * are free-text labels a person types, so there is no reason for them to differ.
+ */
+export const MAX_PROCESSING_JOB_NAME_LENGTH = 120;
+
+/**
+ * How many search terms one job may carry. Every term is OR'd into that job's
+ * Gmail query (TASK-056), so the cap is what keeps the generated query inside
+ * Google's own length limits.
+ */
+export const MAX_SEARCH_TERMS_PER_JOB = 20;
+
+/**
+ * Search term bound, in code points. Deliberately SHORTER than
+ * `MAX_SCHOOL_NAME_LENGTH`: a search term is bounded by Gmail QUERY length, not
+ * by prompt token cost. Twenty terms of ~86 characters quoted and OR-joined is
+ * about 1.7KB, which leaves TASK-056 headroom under the ~2KB practical query
+ * limit; a 120-character bound would put the generated query over it.
+ */
+export const MAX_SEARCH_TERM_LENGTH = 80;
+
+/**
+ * How many school names one user may list.
+ *
+ * RETAINED FOR `validateSchoolNames` ONLY (TASK-055). Nothing on the settings
+ * request path references this any more - a processing job carries exactly one
+ * school name, bounded by `MAX_SCHOOL_NAME_LENGTH`, and the count cap that
+ * matters now is `MAX_PROCESSING_JOBS`. Kept because that function is still
+ * exported and imported outside this file.
  */
 export const MAX_SCHOOL_NAMES = 10;
 
 /**
- * How many domains one user may watch. Ten is generous for a real school (the
- * school itself, a P&C, a newsletter platform, a sports association) and low
- * enough that the generated Gmail query stays inside Google's own query limits.
+ * How many domains one user may watch.
+ *
+ * RETAINED FOR `validateSearchDomains` ONLY (TASK-055), for the same reason as
+ * `MAX_SCHOOL_NAMES`: a processing job carries exactly one domain.
  */
 export const MAX_SEARCH_DOMAINS = 10;
 
@@ -381,8 +441,16 @@ const ECHO_LENGTH = 64;
  * rather than being re-derived by each route, so the two routes below cannot
  * disagree about what a validation failure is worth.
  *
- * `field` is one of the SETTINGS_FIELDS names, or null when the whole body was
- * unusable.
+ * `field` is one of:
+ *   - a SETTINGS_FIELDS name, e.g. "processingJobs" or "scheduleHour", for a
+ *     failure that belongs to the whole field (not an array, empty, too many,
+ *     a duplicate job name, a duplicate job id);
+ *   - an INDEXED per-job name of the form `processingJobs[<index>].<key>`, e.g.
+ *     "processingJobs[2].domain", where `<index>` is the zero-based position in
+ *     the SUBMITTED array and `<key>` is one of `name`, `schoolName`, `domain`,
+ *     `searchTerms` (TASK-055). The index is the submitted one so the form can
+ *     point at the row the user is looking at;
+ *   - null when the whole body was unusable.
  */
 export class SettingsValidationError extends Error {
   /**
@@ -505,6 +573,12 @@ export function isValidDomain(value) {
 /**
  * Validate and normalise the school display names.
  *
+ * NO LONGER ON THE SETTINGS REQUEST PATH (TASK-055). `requireValidSettings` does
+ * not call this - a processing job carries exactly one school name, validated by
+ * `validateProcessingJobs`. Retained and still exported because it is imported
+ * outside this file, and because its structure is what the per-job validator
+ * mirrors.
+ *
  * Mirrors `validateSearchDomains` - count first, normalise each entry, then
  * de-duplicate with input order preserved - with three deliberate differences,
  * because these are display text rather than hostnames:
@@ -572,6 +646,11 @@ export function validateSchoolNames(raw) {
 /**
  * Validate and normalise the domain list.
  *
+ * NO LONGER ON THE SETTINGS REQUEST PATH (TASK-055), for the same reason as
+ * `validateSchoolNames`: a processing job carries exactly one domain, validated
+ * by `validateProcessingJobs` through the same `normalizeDomain` ->
+ * `isValidDomain` -> `isPublicMailDomain` sequence.
+ *
  * Rule order is chosen so the message names the real problem:
  *  1. Is it a non-empty array at all, and within MAX_SEARCH_DOMAINS? The count is
  *     checked on what the user SUBMITTED, before de-duplication, so pasting
@@ -625,6 +704,230 @@ export function validateSearchDomains(raw) {
   }
 
   return domains;
+}
+
+/**
+ * The canonical UUID shape, which is the ONLY id a client may keep.
+ *
+ * Anything else is replaced rather than refused (see `validateProcessingJobs`),
+ * so this pattern is a filter, not a validation rule.
+ */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Validate one required free-text field of a processing job.
+ *
+ * Shared by `name` and `schoolName` so the two cannot drift. An ARRAY is refused
+ * rather than having its first element taken: a job carries exactly one of each,
+ * and silently keeping element zero would store something the user did not send.
+ *
+ * @param {unknown} raw
+ * @param {{ field: string, label: string, max: number }} spec
+ * @returns {string} Trimmed, case and characters untouched.
+ * @throws {SettingsValidationError}
+ */
+function requiredJobText(raw, { field, label, max }) {
+  if (raw === undefined || raw === null) {
+    throw new SettingsValidationError(field, `${label} is required`);
+  }
+  if (typeof raw !== "string") {
+    throw new SettingsValidationError(field, `${label} must be text`);
+  }
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) {
+    // Covers both "missing" and "spaces only": to the user they are one mistake.
+    throw new SettingsValidationError(field, `${label} is required`);
+  }
+  if (countCodePoints(trimmed) > max) {
+    throw new SettingsValidationError(field, `"${echo(trimmed)}" is longer than ${max} characters`);
+  }
+  return trimmed;
+}
+
+/**
+ * Validate one job's free-text search terms.
+ *
+ * @param {unknown} raw
+ * @param {string} field Indexed field name for any error.
+ * @returns {string[]} Trimmed, exactly de-duplicated, order preserved.
+ * @throws {SettingsValidationError}
+ */
+function validateSearchTerms(raw, field) {
+  // Absent is not a mistake - a job may legitimately match on its school name and
+  // domain alone - so null/undefined normalise to "no terms".
+  if (raw === undefined || raw === null) return [];
+
+  // A BARE STRING IS NOT ONE TERM AND IS NEVER COMMA-SPLIT. A search term may
+  // legitimately contain a comma ("canteen, roster"), so guessing at a delimiter
+  // would store terms the user never typed; the same reasoning that stops
+  // `validateSchoolNames` splitting a name. The client sends a list or nothing.
+  if (!Array.isArray(raw)) {
+    throw new SettingsValidationError(field, "Search terms must be a list");
+  }
+  // Counted on what was SUBMITTED, before de-duplication, so twenty-one entries
+  // with a duplicate among them is reported as "too many" rather than silently
+  // collapsing to a number that happens to fit.
+  if (raw.length > MAX_SEARCH_TERMS_PER_JOB) {
+    throw new SettingsValidationError(
+      field,
+      `Enter at most ${MAX_SEARCH_TERMS_PER_JOB} search terms for one processing job`
+    );
+  }
+
+  const seen = new Set();
+  const terms = [];
+
+  for (const entry of raw) {
+    if (typeof entry !== "string") {
+      throw new SettingsValidationError(field, "Each search term must be text");
+    }
+    const trimmed = entry.trim();
+    if (trimmed.length === 0) {
+      throw new SettingsValidationError(field, "A search term cannot be blank");
+    }
+    if (countCodePoints(trimmed) > MAX_SEARCH_TERM_LENGTH) {
+      throw new SettingsValidationError(
+        field,
+        `"${echo(trimmed)}" is longer than ${MAX_SEARCH_TERM_LENGTH} characters`
+      );
+    }
+    // De-duplication is EXACT and case-sensitive, matching `validateSchoolNames`:
+    // two casings are two spellings the user may have meant, and duplicates are
+    // one intent rather than a mistake worth blocking a save for.
+    if (seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    terms.push(trimmed);
+  }
+
+  return terms;
+}
+
+/**
+ * Validate the whole processing-job list (TASK-055).
+ *
+ * Rule order is chosen so the message names the real problem, and mirrors
+ * `validateSearchDomains`: shape and count of the COLLECTION first (counted on
+ * what was submitted, before any de-duplication), then each job in submitted
+ * order.
+ *
+ * DUPLICATE NAMES ERROR; they do NOT collapse. This is deliberately the OPPOSITE
+ * of `validateSearchDomains`' collapse-duplicates rule. Two spellings of one
+ * domain are one intent, but a job name is an IDENTITY the user picked and that
+ * TASK-058's filter UI matches on, so two jobs that read the same in a list are a
+ * mistake worth reporting. The compare is case-insensitive on a trimmed copy; the
+ * STORED casing is the user's own, exactly as typed - lower-casing display text
+ * is not this layer's decision (see `validateSchoolNames`).
+ *
+ * Two jobs MAY share a `domain`, a `schoolName`, or both, as long as their names
+ * differ - "Newsletters" and "Sport" on one school domain is an ordinary setup,
+ * and TASK-056 documents the duplicate events that follow as expected.
+ *
+ * IDS ARE PRESERVED, NOT RE-MINTED, when the client echoes a canonical UUID back.
+ * The PUT is a whole-list replace and never reads the stored row, so echoing is
+ * the ONLY way an id survives a rename - and TASK-056 attributes events to it.
+ * Any other id (absent, empty, non-string, malformed, or the synthesised literal
+ * "default" that migrate-on-read hands out) is REPLACED with a fresh one rather
+ * than refused: a migrated user's very first save legitimately echoes "default"
+ * back, and 400ing that would block every one of them.
+ *
+ * @param {unknown} raw
+ * @param {object} [deps]
+ * @param {() => string} [deps.newId] Id generator; injectable so every branch is
+ *   reachable with a stub and no randomness.
+ * @returns {Array<{ id: string, name: string, schoolName: string, domain: string, searchTerms: string[] }>}
+ *   Exactly those five keys per job - an unknown key in the payload is DROPPED,
+ *   so the stored item cannot grow a field nobody validated. Input order preserved.
+ * @throws {SettingsValidationError}
+ */
+export function validateProcessingJobs(raw, { newId = randomUUID } = {}) {
+  if (!Array.isArray(raw)) {
+    throw new SettingsValidationError("processingJobs", "processingJobs must be a list of processing jobs");
+  }
+  if (raw.length === 0) {
+    throw new SettingsValidationError("processingJobs", "At least one processing job is required");
+  }
+  if (raw.length > MAX_PROCESSING_JOBS) {
+    throw new SettingsValidationError("processingJobs", `Enter at most ${MAX_PROCESSING_JOBS} processing jobs`);
+  }
+
+  // Lower-cased name -> the casing the user actually typed, so the clash message
+  // can quote both spellings. The stored value is always the typed one.
+  const seenNames = new Map();
+  const seenIds = new Set();
+  const jobs = [];
+
+  for (let index = 0; index < raw.length; index += 1) {
+    const entry = raw[index];
+    // A non-object entry is not a separate error class: it has no usable fields,
+    // so it falls through to the required-field messages below and is reported as
+    // the missing name it is.
+    const source = entry && typeof entry === "object" && !Array.isArray(entry) ? entry : {};
+    const at = (key) => `processingJobs[${index}].${key}`;
+
+    const name = requiredJobText(source.name, {
+      field: at("name"),
+      label: "Processing job name",
+      max: MAX_PROCESSING_JOB_NAME_LENGTH,
+    });
+    const nameKey = name.toLowerCase();
+    if (seenNames.has(nameKey)) {
+      // BOTH spellings are named: the compare is case-insensitive, so a user
+      // looking at "St Mary's" and "ST MARY'S" needs to be told those two are the
+      // clash rather than left to find it.
+      throw new SettingsValidationError(
+        "processingJobs",
+        `"${echo(name)}" is the same processing job name as "${echo(seenNames.get(nameKey))}" - give each job a different name`
+      );
+    }
+    seenNames.set(nameKey, name);
+
+    const schoolName = requiredJobText(source.schoolName, {
+      field: at("schoolName"),
+      label: "School name",
+      max: MAX_SCHOOL_NAME_LENGTH,
+    });
+
+    if (source.domain !== undefined && source.domain !== null && typeof source.domain !== "string") {
+      // An array is refused rather than having its first element taken, for the
+      // same reason as `name`/`schoolName`: a job watches exactly one domain.
+      throw new SettingsValidationError(at("domain"), "School email domain must be text");
+    }
+    if (source.domain === undefined || source.domain === null || source.domain.trim() === "") {
+      throw new SettingsValidationError(at("domain"), "School email domain is required");
+    }
+    const domain = normalizeDomain(source.domain);
+    if (!isValidDomain(domain)) {
+      throw new SettingsValidationError(at("domain"), `"${echo(source.domain)}" is not a valid email domain`);
+    }
+    if (isPublicMailDomain(domain)) {
+      throw new SettingsValidationError(
+        at("domain"),
+        `${domain} is a public email provider, not a school domain - use the school's own domain`
+      );
+    }
+
+    const searchTerms = validateSearchTerms(source.searchTerms, at("searchTerms"));
+
+    const keepsId = typeof source.id === "string" && UUID_PATTERN.test(source.id);
+    const id = keepsId ? source.id : newId();
+    if (keepsId) {
+      // Only a CLIENT-SUPPLIED id can collide - a generated one is fresh by
+      // construction, and checking those too would only make an injected stub
+      // generator that returns a constant look like a duplicate. Two jobs sharing
+      // one id would make TASK-056's event attribution ambiguous, so this is
+      // refused rather than quietly repaired. Compared case-insensitively: two
+      // casings of one UUID are one id, however they were typed.
+      const idKey = id.toLowerCase();
+      if (seenIds.has(idKey)) {
+        throw new SettingsValidationError("processingJobs", "Each processing job must have its own id");
+      }
+      seenIds.add(idKey);
+    }
+
+    jobs.push({ id, name, schoolName, domain, searchTerms });
+  }
+
+  return jobs;
 }
 
 /**
@@ -695,12 +998,16 @@ export function validateSchedule(payload) {
  * `requireSession`: a caller that wants a verdict gets one, a caller that wants
  * to fail fast throws.
  *
+ * The `field` it reports carries whatever `requireValidSettings` threw, including
+ * the indexed `processingJobs[<index>].<key>` form (TASK-055).
+ *
  * @param {unknown} payload
+ * @param {object} [options] Forwarded to `requireValidSettings` (`newId`).
  * @returns {{ valid: true, settings: object } | { valid: false, field: string|null, error: string }}
  */
-export function validateSettingsPayload(payload) {
+export function validateSettingsPayload(payload, options = {}) {
   try {
-    return { valid: true, settings: requireValidSettings(payload) };
+    return { valid: true, settings: requireValidSettings(payload, options) };
   } catch (err) {
     if (err instanceof SettingsValidationError) {
       return { valid: false, field: err.field, error: err.message };
@@ -712,24 +1019,29 @@ export function validateSettingsPayload(payload) {
 /**
  * Validate a whole settings payload, or throw a 400-shaped error.
  *
- * BOTH REQUEST SHAPES ARE ACCEPTED for the school (TASK-053): `schoolNames` wins
- * when it is present, and a legacy `schoolName` scalar is read as a one-element
- * list when it is not, so a browser tab loaded before the deploy still saves. The
- * RESULT is always `schoolNames`, so everything downstream of here - the patch,
- * the response, the log line - has one shape to handle.
+ * ONE REQUEST SHAPE (TASK-055): `processingJobs`, and only `processingJobs`. The
+ * legacy `schoolNames`/`searchDomains`/`schoolName` keys are no longer read here
+ * at all, so a body carrying only those is a 400 naming `processingJobs`. The
+ * legacy shape survives only on the READ side, where `toPublicJson` migrates a
+ * stored row into one synthesised job; there is no request-side alias. That makes
+ * this ticket's frontend (TASK-057) a required co-deploy - an older settings page
+ * cannot save against this contract.
+ *
+ * The schedule fields are unchanged and still optional: a key the caller omitted
+ * means "leave whatever is stored alone", never "reset it".
  *
  * @param {unknown} payload
- * @returns {{ schoolNames: string[], searchDomains: string[] } & Record<string, unknown>}
+ * @param {object} [options] Forwarded to `validateProcessingJobs` (`newId`).
+ * @returns {{ processingJobs: Array<object> } & Record<string, unknown>}
  * @throws {SettingsValidationError}
  */
-export function requireValidSettings(payload) {
+export function requireValidSettings(payload, options = {}) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new SettingsValidationError(null, "Expected a JSON object");
   }
 
   return {
-    schoolNames: validateSchoolNames(payload.schoolNames !== undefined ? payload.schoolNames : payload.schoolName),
-    searchDomains: validateSearchDomains(payload.searchDomains),
+    processingJobs: validateProcessingJobs(payload.processingJobs, options),
     ...validateSchedule(payload),
   };
 }
@@ -771,20 +1083,29 @@ export function parseJsonBody(event) {
 /**
  * Turn validated settings into a DynamoDB patch.
  *
- * `schoolNames` and `searchDomains` each become a JS `Set`, which the document
- * client marshals to a string set (SS). An EMPTY list becomes `REMOVE_ATTRIBUTE`
- * instead: DynamoDB refuses to store an empty string set and fails the whole
- * write with a ValidationException, so the only way to represent "no domains" is
- * to delete the attribute. The PUT route never reaches those branches (it
- * requires at least one of each), but any other caller that clears a list must
- * not blow up the write - hence the explicit branches here rather than at the
- * route.
+ * `processingJobs` is written as a PLAIN ARRAY OF PLAIN OBJECTS. The document
+ * client marshals that to a List of Maps (`L` of `M`) on its own, which is the
+ * stored shape - NOT a `Set` (this is not a string set, and a `Set` that escaped
+ * into a response body would `JSON.stringify` to `{}`) and NOT a JSON string. A
+ * job's `searchTerms` is likewise a plain array, and an EMPTY one is written AS an
+ * empty list: DynamoDB accepts an empty `L`, so there is nothing to work around.
  *
- * THE LEGACY SCALAR IS CLEARED IN THE SAME PATCH (TASK-053). Writing
- * `schoolNames` always also REMOVEs `schoolName`, so a row can never carry both
- * and `toPublicJson`'s read fallback stops applying to it the moment its owner
- * saves. `buildUpdateParams` compiles the mixed SET + REMOVE into one
- * UpdateExpression, so this costs no extra write and needs no migration job.
+ * The WHOLE-LIST-empty case writes `REMOVE_ATTRIBUTE` instead of an empty list.
+ * That is a CONSISTENCY choice with the string-set attributes elsewhere - "unset"
+ * has one representation on this row - and not a DynamoDB constraint: unlike an
+ * empty `SS`, an empty `L` would store fine. The PUT route never reaches the
+ * branch (it requires at least one job); any other caller that clears the list
+ * gets the same "attribute absent" shape a never-configured row has.
+ *
+ * EVERY LEGACY ATTRIBUTE IS CLEARED IN THE SAME PATCH (TASK-055). Writing
+ * `processingJobs` always also REMOVEs `schoolNames`, `searchDomains` AND the
+ * pre-TASK-053 `schoolName` scalar, so a row can never carry both shapes and
+ * `toPublicJson`'s migrate-on-read stops applying to it the moment its owner
+ * saves. `schoolName` is in that list because a row that never saved since
+ * TASK-053 still carries the scalar, and nothing writes `schoolNames` any more, so
+ * nothing else would ever clear it. `buildUpdateParams` compiles the mixed
+ * SET + REMOVE into one UpdateExpression, so this costs no extra write and needs
+ * no migration job.
  *
  * @param {object} settings Output of `requireValidSettings`, or any subset of it.
  * @returns {Record<string, unknown>} Patch for `updateConnection`.
@@ -792,16 +1113,24 @@ export function parseJsonBody(event) {
 export function buildConnectionPatch(settings = {}) {
   const patch = {};
 
-  if (settings.schoolNames !== undefined) {
+  if (settings.processingJobs !== undefined) {
     // Stored raw. See the module docblock: escaping happens on render.
-    const names = Array.isArray(settings.schoolNames) ? settings.schoolNames : [];
-    patch.schoolNames = names.length > 0 ? new Set(names) : REMOVE_ATTRIBUTE;
+    const jobs = Array.isArray(settings.processingJobs) ? settings.processingJobs : [];
+    patch.processingJobs =
+      jobs.length > 0
+        ? jobs.map((job) => ({
+            // Rebuilt key by key rather than spread, so nothing that was not
+            // validated can reach the stored item.
+            id: job.id,
+            name: job.name,
+            schoolName: job.schoolName,
+            domain: job.domain,
+            searchTerms: Array.isArray(job.searchTerms) ? [...job.searchTerms] : [],
+          }))
+        : REMOVE_ATTRIBUTE;
+    patch.schoolNames = REMOVE_ATTRIBUTE;
+    patch.searchDomains = REMOVE_ATTRIBUTE;
     patch.schoolName = REMOVE_ATTRIBUTE;
-  }
-
-  if (settings.searchDomains !== undefined) {
-    const domains = Array.isArray(settings.searchDomains) ? settings.searchDomains : [];
-    patch.searchDomains = domains.length > 0 ? new Set(domains) : REMOVE_ATTRIBUTE;
   }
 
   for (const key of ["scheduleEnabled", "scheduleFrequency", "scheduleHour", "timezone"]) {
@@ -820,9 +1149,10 @@ export function buildConnectionPatch(settings = {}) {
  * The body therefore carries the SETTINGS_FIELDS plus `connected` /
  * `connectionStatus`, and no token material of any kind.
  *
- * `schoolNames` and `searchDomains` are reported as `[]` rather than null when
- * unset, because every consumer treats them as lists and a null would just move
- * that check into the frontend.
+ * `processingJobs` is reported as `[]` rather than null when unset, because every
+ * consumer of THIS route treats it as a list and a null would just move that check
+ * into the frontend. `/auth/me`, which projects through `toPublicJson` directly,
+ * still reports null there - the same null-vs-empty split TASK-053 settled.
  *
  * @param {object|null} connection Row from `getConnection`/`updateConnection`.
  * @param {object} [fallback] Values to use when the row has none (the session's
@@ -834,8 +1164,7 @@ export function toSettingsJson(connection, fallback = {}, options = {}) {
   const projection = toPublicJson(connection, fallback, options);
   return {
     ...projection,
-    schoolNames: Array.isArray(projection.schoolNames) ? projection.schoolNames : [],
-    searchDomains: Array.isArray(projection.searchDomains) ? projection.searchDomains : [],
+    processingJobs: Array.isArray(projection.processingJobs) ? projection.processingJobs : [],
   };
 }
 

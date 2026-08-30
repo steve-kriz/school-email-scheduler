@@ -7,8 +7,9 @@
 #
 # The table is schemaless beyond the `userId` hash key, so the attribute list
 # below is documentation rather than a declaration: adding, renaming or retyping
-# an attribute (as TASK-053 did for schoolName -> schoolNames) is an application
-# change and needs no change to this resource.
+# an attribute (as TASK-053 did for schoolName -> schoolNames, and TASK-055 did
+# for schoolNames/searchDomains -> processingJobs) is an application change and
+# needs no change to this resource.
 #
 # Every access path is a GetItem or PutItem by `userId`, so there is deliberately
 # no GSI and no range key - adding one would only add write cost.
@@ -16,21 +17,44 @@
 # Schema (all fields are strings unless noted):
 #   userId (PK)         : "google#<google sub claim>"
 #   email               : the connected Google account address
-#   schoolNames (SS)    : free-text school names entered by the user (up to 10),
-#                         e.g. ["St Mary's Primary", "St Mary's P&C"]. Used only
-#                         as descriptive context in the extraction prompt - the
-#                         Gmail query and the watched-sender check are built from
-#                         searchDomains alone.
-#                         LEGACY: before TASK-053 this was a single scalar string
-#                         attribute `schoolName`. A row whose owner has not saved
-#                         their settings since may still carry that scalar and no
-#                         schoolNames set; connections.mjs's toPublicJson reads it
-#                         back as a one-element list, and the next settings save
-#                         SETs schoolNames and REMOVEs schoolName in the same
-#                         UpdateItem. No row carries both, and there is no batch
-#                         migration - rows convert one at a time as they are saved.
-#   searchDomains (SS)  : domains to match senders against, e.g.
+#   processingJobs (L of M) : the user's named "search + extract" configurations
+#                         (up to 20, TASK-055). Stored as a LIST OF MAPS - the
+#                         first nested attribute on this table; every other one is
+#                         a scalar or a string set. List order is the user's own
+#                         and is preserved (a List is ordered, unlike an SS).
+#                         Each map has exactly these five keys:
+#                           id (S)          : server-generated UUID, stable across
+#                                             a rename. Extracted events are
+#                                             attributed to it (TASK-056), so it is
+#                                             never re-minted once assigned; a PUT
+#                                             is a whole-list replace and keeps an
+#                                             id only when the client echoes it.
+#                           name (S)        : display name, unique per user
+#                                             (case-insensitively), <= 120 code
+#                                             points, stored exactly as typed.
+#                           schoolName (S)  : one school name, <= 120 code points.
+#                           domain (S)      : one sender domain, normalised and
+#                                             lower-cased, e.g. "stmarys.edu.au".
+#                           searchTerms (L of S) : 0-20 free-text terms, each <= 80
+#                                             code points. An EMPTY list is stored
+#                                             as an empty L - legal, unlike an
+#                                             empty SS.
+#                         All text is stored RAW/unescaped; escaping happens on
+#                         render and in the prompt builder.
+#   schoolNames (SS)    : LEGACY (pre-TASK-055), free-text school names, up to 10.
+#   searchDomains (SS)  : LEGACY (pre-TASK-055), sender domains, e.g.
 #                         ["stmarys.nsw.edu.au", "schoolbytes.education"]
+#   schoolName (S)      : LEGACY (pre-TASK-053), a single school name; superseded
+#                         first by schoolNames and now by processingJobs.
+#                         All three legacy attributes are READ-MIGRATED, not
+#                         batch-migrated: a row that still carries them projects
+#                         through connections.mjs's toPublicJson as ONE synthesised
+#                         "Default" processing job (first sorted school name and
+#                         domain, every remaining entry folded in as a search
+#                         term), and the owner's next settings save SETs
+#                         processingJobs and REMOVEs all three in the same
+#                         UpdateItem. No row carries both shapes; rows convert one
+#                         at a time as they are saved.
 #   refreshTokenEnc     : base64 KMS ciphertext of the Gmail refresh token. The
 #                         PLAINTEXT TOKEN IS NEVER WRITTEN TO THIS TABLE - there
 #                         is intentionally no `refreshToken` attribute anywhere
