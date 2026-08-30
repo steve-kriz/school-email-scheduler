@@ -120,49 +120,105 @@ async function putSettings(body, { updateItem } = {}) {
   return { response, body: JSON.parse(response.body) };
 }
 
+/**
+ * TASK-055 SUPERSEDED THE REQUEST AND RESPONSE SHAPE that TASK-053 introduced.
+ * "More than one school" is now expressed as more than one PROCESSING JOB, each
+ * carrying exactly one `schoolName` and one `domain`. The scenarios below are the
+ * processing-job equivalents of TASK-053's, kept rather than deleted so the
+ * behaviour TASK-053 bought (multiple schools, exact character preservation,
+ * code-point bounds, nothing written on a refusal, counts-only logging) stays
+ * pinned across the migration. TASK-055's own files cover the new rules in full.
+ *
+ * Three deliberate reversals to keep straight:
+ *  - order is PRESERVED, not sorted: a List keeps the user's order, a Set did not;
+ *  - duplicate job names ERROR, where duplicate school names used to collapse;
+ *  - the legacy singular/plural request keys are no longer read at all, so a body
+ *    carrying only those is a 400 naming `processingJobs`.
+ */
+
+/** One valid processing job, overridable field by field. */
+function job(overrides = {}) {
+  return {
+    name: 'Newsletters',
+    schoolName: 'Ashfield Public School',
+    domain: 'ashfield.nsw.edu.au',
+    searchTerms: [],
+    ...overrides,
+  };
+}
+
 /* =========================================================================
  * Feature: A user can watch mail for more than one school
  * ========================================================================= */
 
-describe('Feature: A user can watch mail for more than one school', () => {
-  describe('Scenario: Saving several school names', () => {
-    it('When they PUT settings with two names, Then the status is 200 and both come back', async () => {
-      const { response, body } = await putSettings({
-        schoolNames: ['Ashfield Public School', "St Mary's Primary"],
-        searchDomains: ['ashfield.nsw.edu.au'],
-      });
+describe('Feature: A user can watch mail for more than one school (TASK-055 shape)', () => {
+  describe('Scenario: Saving several schools as several jobs', () => {
+    const jobs = [
+      job({ name: 'Ashfield', schoolName: 'Ashfield Public School' }),
+      job({ name: 'St Marys', schoolName: "St Mary's Primary", domain: 'stmarys.edu.au' }),
+    ];
+
+    it('When they PUT settings with two jobs, Then the status is 200 and both come back', async () => {
+      const { response, body } = await putSettings({ processingJobs: jobs });
       assert.equal(response.statusCode, 200);
-      assert.deepEqual(body.schoolNames, ['Ashfield Public School', "St Mary's Primary"]);
+      assert.deepEqual(
+        body.processingJobs.map((entry) => entry.schoolName),
+        ['Ashfield Public School', "St Mary's Primary"]
+      );
     });
 
-    it('And the response body has no schoolName key', async () => {
-      const { body } = await putSettings({
-        schoolNames: ['Ashfield Public School', "St Mary's Primary"],
-        searchDomains: ['ashfield.nsw.edu.au'],
-      });
+    it('And the response body has no schoolName, schoolNames or searchDomains key', async () => {
+      const { body } = await putSettings({ processingJobs: jobs });
       assert.ok(!('schoolName' in body), 'the superseded singular key leaked into the response');
+      assert.ok(!('schoolNames' in body), 'the superseded plural key leaked into the response');
+      assert.ok(!('searchDomains' in body), 'the superseded domain key leaked into the response');
     });
   });
 
-  describe('Scenario: Names are returned in a stable sorted order', () => {
-    it('When they PUT ["Zeta College", "Alpha School"], Then the body is sorted', async () => {
+  describe('Scenario: Jobs are returned in SUBMITTED order, not sorted', () => {
+    it('When they PUT jobs named ["Zeta", "Alpha"], Then the body keeps that order', async () => {
       const { response, body } = await putSettings({
-        schoolNames: ['Zeta College', 'Alpha School'],
-        searchDomains: ['zeta.edu.au'],
+        processingJobs: [
+          job({ name: 'Zeta', schoolName: 'Zeta College', domain: 'zeta.edu.au' }),
+          job({ name: 'Alpha', schoolName: 'Alpha School', domain: 'alpha.edu.au' }),
+        ],
       });
       assert.equal(response.statusCode, 200);
-      assert.deepEqual(body.schoolNames, ['Alpha School', 'Zeta College']);
+      assert.deepEqual(
+        body.processingJobs.map((entry) => entry.name),
+        ['Zeta', 'Alpha'],
+        'a List preserves the user order - only the old string SET was sorted'
+      );
     });
   });
 
-  describe('Scenario: Duplicate names collapse rather than failing the save', () => {
-    it('When they PUT ["Alpha School", "  Alpha School  "], Then one entry comes back', async () => {
+  describe('Scenario: Duplicate job names ERROR rather than collapsing', () => {
+    it('When they PUT ["Alpha School", "  ALPHA SCHOOL  "], Then it is a 400 naming the clash', async () => {
+      const spy = makeUpdateItemSpy();
+      const { response, body } = await putSettings(
+        {
+          processingJobs: [
+            job({ name: 'Alpha School', domain: 'alpha.edu.au' }),
+            job({ name: '  ALPHA SCHOOL  ', domain: 'alpha.edu.au' }),
+          ],
+        },
+        { updateItem: spy.updateItem }
+      );
+      assert.equal(response.statusCode, 400);
+      assert.equal(body.field, 'processingJobs');
+      assert.ok(body.error.includes('ALPHA SCHOOL'), `error did not name the clash: ${body.error}`);
+      assert.deepEqual(spy.calls, [], 'a refused save still wrote to the table');
+    });
+
+    it('But two jobs sharing a domain and a school name with DIFFERENT names are fine', async () => {
       const { response, body } = await putSettings({
-        schoolNames: ['Alpha School', '  Alpha School  '],
-        searchDomains: ['alpha.edu.au'],
+        processingJobs: [
+          job({ name: 'Newsletters' }),
+          job({ name: 'Sport' }),
+        ],
       });
       assert.equal(response.statusCode, 200);
-      assert.deepEqual(body.schoolNames, ['Alpha School']);
+      assert.equal(body.processingJobs.length, 2);
     });
   });
 
@@ -174,94 +230,94 @@ describe('Feature: A user can watch mail for more than one school', () => {
       'Newtown High, Annexe Campus',
     ];
     for (const name of names) {
-      it(`When they PUT schoolNames ["${name}"], Then it comes back byte-for-byte`, async () => {
+      it(`When they PUT a job whose schoolName is "${name}", Then it comes back byte-for-byte`, async () => {
         const { response, body } = await putSettings({
-          schoolNames: [name],
-          searchDomains: ['school.edu.au'],
+          processingJobs: [job({ name, schoolName: name, domain: 'school.edu.au' })],
         });
         assert.equal(response.statusCode, 200);
-        assert.deepEqual(body.schoolNames, [name]);
+        assert.equal(body.processingJobs[0].schoolName, name);
+        assert.equal(body.processingJobs[0].name, name);
       });
     }
 
     it('And a name containing a comma is ONE entry, never split', async () => {
       const { body } = await putSettings({
-        schoolNames: ['Newtown High, Annexe Campus'],
-        searchDomains: ['school.edu.au'],
+        processingJobs: [job({ schoolName: 'Newtown High, Annexe Campus', domain: 'school.edu.au' })],
       });
-      assert.equal(body.schoolNames.length, 1);
+      assert.equal(body.processingJobs.length, 1);
+      assert.equal(body.processingJobs[0].schoolName, 'Newtown High, Annexe Campus');
     });
   });
 
-  describe('Scenario: Ten names are accepted, eleven are not', () => {
-    const ten = Array.from({ length: 10 }, (_, i) => `School Number ${i}`);
+  describe('Scenario: Twenty jobs are accepted, twenty-one are not', () => {
+    const twenty = Array.from({ length: 20 }, (_, i) =>
+      job({ name: `Job Number ${i}`, schoolName: `School Number ${i}`, domain: 'school.edu.au' })
+    );
 
-    it('Then the 10-name request returns 200 with 10 entries', async () => {
-      const { response, body } = await putSettings({
-        schoolNames: ten,
-        searchDomains: ['school.edu.au'],
-      });
+    it('Then the 20-job request returns 200 with 20 entries', async () => {
+      const { response, body } = await putSettings({ processingJobs: twenty });
       assert.equal(response.statusCode, 200);
-      assert.equal(body.schoolNames.length, 10);
+      assert.equal(body.processingJobs.length, 20);
     });
 
-    it('And the 11-name request returns 400 with field "schoolNames" mentioning 10', async () => {
+    it('And the 21-job request returns 400 with field "processingJobs" mentioning 20', async () => {
       const spy = makeUpdateItemSpy();
       const { response, body } = await putSettings(
-        { schoolNames: [...ten, 'School Number 10'], searchDomains: ['school.edu.au'] },
+        { processingJobs: [...twenty, job({ name: 'Job Number 20', schoolName: 'School Number 20' })] },
         { updateItem: spy.updateItem }
       );
       assert.equal(response.statusCode, 400);
-      assert.equal(body.field, 'schoolNames');
-      assert.ok(body.error.includes('10'), `error did not mention the cap: ${body.error}`);
+      assert.equal(body.field, 'processingJobs');
+      assert.ok(body.error.includes('20'), `error did not mention the cap: ${body.error}`);
       assert.deepEqual(spy.calls, [], 'a refused save still wrote to the table');
     });
   });
 
-  describe('Scenario: A name over 120 code points is refused, counted by code point not UTF-16 length', () => {
+  describe('Scenario: A school name over 120 code points is refused, counted by code point not UTF-16 length', () => {
     it('Given a 4-byte emoji repeated 113 times (226 UTF-16 units, 113 code points), Then it is ACCEPTED', async () => {
       const within = '👍'.repeat(113);
       assert.ok(within.length > 120, 'fixture is not over 120 UTF-16 units');
       assert.equal([...within].length, 113);
       const { response, body } = await putSettings({
-        schoolNames: [within],
-        searchDomains: ['school.edu.au'],
+        processingJobs: [job({ schoolName: within, domain: 'school.edu.au' })],
       });
       assert.equal(response.statusCode, 200, 'a .length bound would have refused this');
-      assert.deepEqual(body.schoolNames, [within]);
+      assert.equal(body.processingJobs[0].schoolName, within);
     });
 
-    it('And the same emoji repeated 121 times is refused with field "schoolNames" mentioning 120', async () => {
+    it('And the same emoji repeated 121 times is refused with field "processingJobs[0].schoolName" mentioning 120', async () => {
       const spy = makeUpdateItemSpy();
       const over = '👍'.repeat(121);
       assert.equal([...over].length, 121);
       const { response, body } = await putSettings(
-        { schoolNames: [over], searchDomains: ['school.edu.au'] },
+        { processingJobs: [job({ schoolName: over, domain: 'school.edu.au' })] },
         { updateItem: spy.updateItem }
       );
       assert.equal(response.statusCode, 400);
-      assert.equal(body.field, 'schoolNames');
+      assert.equal(body.field, 'processingJobs[0].schoolName');
       assert.ok(body.error.includes('120'), `error did not mention the bound: ${body.error}`);
       assert.deepEqual(spy.calls, [], 'a refused save still wrote to the table');
     });
   });
 
-  describe('Scenario: An empty list, a whitespace-only entry, and a non-string entry are all refused', () => {
+  describe('Scenario: An empty list, a whitespace-only entry, and a non-array value are all refused', () => {
     const cases = [
-      ['an empty list', []],
-      ['a whitespace-only entry', ['   ']],
-      ['a non-string entry', ['Real School', 42]],
-      ['a non-array, non-string value', { name: 'nope' }],
+      ['an empty list', [], 'processingJobs'],
+      ['a whitespace-only school name', [job({ schoolName: '   ' })], 'processingJobs[0].schoolName'],
+      ['a non-string school name', [job({ schoolName: 42 })], 'processingJobs[0].schoolName'],
+      ['an ARRAY school name (never silently first-elemented)', [job({ schoolName: ['A', 'B'] })], 'processingJobs[0].schoolName'],
+      ['a non-array processingJobs value', { 0: {} }, 'processingJobs'],
+      ['a bare string processingJobs value', "St Mary's", 'processingJobs'],
     ];
-    for (const [label, value] of cases) {
-      it(`Given ${label}, Then it returns 400 with field "schoolNames" and nothing is written`, async () => {
+    for (const [label, value, field] of cases) {
+      it(`Given ${label}, Then it returns 400 with field "${field}" and nothing is written`, async () => {
         const spy = makeUpdateItemSpy();
         const { response, body } = await putSettings(
-          { schoolNames: value, searchDomains: ['school.edu.au'] },
+          { processingJobs: value },
           { updateItem: spy.updateItem }
         );
         assert.equal(response.statusCode, 400);
-        assert.equal(body.field, 'schoolNames');
+        assert.equal(body.field, field);
         assert.deepEqual(spy.calls, [], 'a refused save still wrote to the table');
       });
     }
@@ -279,20 +335,28 @@ describe('Feature: A user can watch mail for more than one school', () => {
       console.log = originalLog;
     });
 
-    it('Then the log line has schoolNameCount and not the name text', async () => {
+    it('Then the log line has jobCount and not the name, school, domain or term text', async () => {
       const response = await handler(
         makeEvent('PUT', '/calendar/api/settings', {
-          schoolNames: ['Highly Identifying School Name', 'Second Secret School'],
-          searchDomains: ['school.edu.au'],
+          processingJobs: [
+            job({
+              name: 'Highly Identifying Job Name',
+              schoolName: 'Highly Identifying School Name',
+              domain: 'secretschool.edu.au',
+              searchTerms: ['Second Secret Term'],
+            }),
+          ],
         }),
         {},
         { env: { ...defaultEnv, CALENDAR_LOG_LEVEL: 'basic' }, updateItem: makeUpdateItemSpy().updateItem }
       );
       assert.equal(response.statusCode, 200);
       const logs = JSON.stringify(captured);
-      assert.ok(logs.includes('schoolNameCount'), 'no schoolNameCount in the success log');
+      assert.ok(logs.includes('jobCount'), 'no jobCount in the success log');
+      assert.ok(!logs.includes('Highly Identifying Job Name'), 'the log leaked a job name');
       assert.ok(!logs.includes('Highly Identifying School Name'), 'the log leaked a school name');
-      assert.ok(!logs.includes('Second Secret School'), 'the log leaked a school name');
+      assert.ok(!logs.includes('secretschool.edu.au'), 'the log leaked a domain');
+      assert.ok(!logs.includes('Second Secret Term'), 'the log leaked a search term');
     });
   });
 });
@@ -301,7 +365,7 @@ describe('Feature: A user can watch mail for more than one school', () => {
  * Feature: Existing single-name rows keep working
  * ========================================================================= */
 
-describe('Feature: Existing single-name rows keep working', () => {
+describe('Feature: Existing single-name rows keep working (TASK-055 migrate-on-read)', () => {
   const legacyRow = {
     userId: connectionUserId(testGoogleSub),
     email: testEmail,
@@ -310,35 +374,42 @@ describe('Feature: Existing single-name rows keep working', () => {
     hasRefreshToken: true,
   };
 
-  describe('Scenario: A legacy row is read as a one-element list by both routes', () => {
-    it('When they GET settings, Then schoolNames is ["Ashfield Public School"]', async () => {
+  describe('Scenario: A legacy row is read as one synthesised job by both routes', () => {
+    it('When they GET settings, Then one "Default" job carries the legacy school name', async () => {
       const response = await handler(makeEvent('GET', '/calendar/api/settings'), {}, {
         env: defaultEnv,
         getConnection: async () => legacyRow,
       });
       assert.equal(response.statusCode, 200);
       const body = JSON.parse(response.body);
-      assert.deepEqual(body.schoolNames, ['Ashfield Public School']);
+      assert.equal(body.processingJobs.length, 1);
+      assert.equal(body.processingJobs[0].name, 'Default');
+      assert.equal(body.processingJobs[0].schoolName, 'Ashfield Public School');
+      assert.equal(body.processingJobs[0].domain, 'ashfield.nsw.edu.au');
       assert.ok(!('schoolName' in body), 'GET /settings leaked the legacy key');
+      assert.ok(!('searchDomains' in body), 'GET /settings leaked the legacy key');
     });
 
-    it('And when they GET auth/me, Then it reports the same one-element list', async () => {
+    it('And when they GET auth/me, Then it reports the same synthesised job', async () => {
       const response = await handleAuthMe(makeEvent('GET', '/calendar/api/auth/me'), {
         env: defaultEnv,
         getConnection: async () => legacyRow,
       });
       assert.equal(response.statusCode, 200);
       const body = JSON.parse(response.body);
-      assert.deepEqual(body.schoolNames, ['Ashfield Public School']);
+      assert.equal(body.processingJobs.length, 1);
+      assert.equal(body.processingJobs[0].schoolName, 'Ashfield Public School');
       assert.ok(!('schoolName' in body), '/auth/me leaked the legacy key');
     });
   });
 
-  describe('Scenario: Saving migrates the row and clears the legacy attribute', () => {
-    it('Then the compiled UpdateItem SETs schoolNames and REMOVEs schoolName in one expression', () => {
+  describe('Scenario: Saving migrates the row and clears every legacy attribute', () => {
+    it('Then the compiled UpdateItem SETs processingJobs and REMOVEs all three legacy keys', () => {
       const settings = requireValidSettings({
-        schoolNames: ['Ashfield Public School', 'Ashfield P&C'],
-        searchDomains: ['ashfield.nsw.edu.au'],
+        processingJobs: [
+          job({ name: 'Ashfield' }),
+          job({ name: 'Ashfield P&C', schoolName: 'Ashfield P&C' }),
+        ],
       });
       const params = buildUpdateParams({
         tableName: 'test-connections-table',
@@ -350,120 +421,158 @@ describe('Feature: Existing single-name rows keep working', () => {
       const keyFor = (attribute) =>
         Object.keys(names).find((nameKey) => names[nameKey] === attribute);
 
-      const schoolNamesKey = keyFor('schoolNames');
-      const schoolNameKey = keyFor('schoolName');
-      assert.ok(schoolNamesKey, 'schoolNames is not in the expression at all');
-      assert.ok(schoolNameKey, 'the legacy schoolName is not retired by this patch');
+      const jobsKey = keyFor('processingJobs');
+      assert.ok(jobsKey, 'processingJobs is not in the expression at all');
+      for (const legacy of ['schoolNames', 'searchDomains', 'schoolName']) {
+        assert.ok(keyFor(legacy), `the legacy ${legacy} is not retired by this patch`);
+      }
 
       assert.match(params.UpdateExpression, /^SET /, 'no SET clause');
       assert.match(params.UpdateExpression, / REMOVE /, 'no REMOVE clause');
 
       const [setClause, removeClause] = params.UpdateExpression.split(' REMOVE ');
-      assert.ok(setClause.includes(`${schoolNamesKey} = `), 'schoolNames is not SET');
-      assert.ok(removeClause.includes(schoolNameKey), 'schoolName is not REMOVEd');
-      assert.ok(!removeClause.includes(schoolNamesKey), 'schoolNames was REMOVEd rather than SET');
+      assert.ok(setClause.includes(`${jobsKey} = `), 'processingJobs is not SET');
+      for (const legacy of ['schoolNames', 'searchDomains', 'schoolName']) {
+        assert.ok(removeClause.includes(keyFor(legacy)), `${legacy} is not REMOVEd`);
+      }
+      assert.ok(!removeClause.includes(`${jobsKey},`) && !removeClause.endsWith(jobsKey),
+        'processingJobs was REMOVEd rather than SET');
     });
 
     it('And ExpressionAttributeValues is present (this is a mixed patch, not all-removals)', () => {
       const params = buildUpdateParams({
         tableName: 'test-connections-table',
         key: { userId: connectionUserId(testGoogleSub) },
-        updates: buildConnectionPatch({
-          schoolNames: ['Ashfield Public School'],
-          searchDomains: ['ashfield.nsw.edu.au'],
-        }),
+        updates: buildConnectionPatch(requireValidSettings({ processingJobs: [job()] })),
       });
       assert.ok(params.ExpressionAttributeValues, 'ExpressionAttributeValues is missing');
-      const stored = Object.values(params.ExpressionAttributeValues).find((v) => v instanceof Set);
-      assert.ok(stored instanceof Set, 'schoolNames was not marshalled as a Set (SS)');
-      assert.deepEqual([...stored], ['Ashfield Public School']);
+      const stored = Object.values(params.ExpressionAttributeValues).find((v) => Array.isArray(v));
+      assert.ok(Array.isArray(stored), 'processingJobs was not marshalled as a plain array (L of M)');
+      assert.ok(!(stored instanceof Set), 'processingJobs must never be written as a Set');
+      assert.equal(stored[0].schoolName, 'Ashfield Public School');
     });
 
-    it('And a real save against a legacy row leaves the row with no schoolName at all', async () => {
-      const spy = makeUpdateItemSpy({ schoolName: 'Ashfield Public School' });
+    it('And a real save against a legacy row leaves the row with none of the three', async () => {
+      const spy = makeUpdateItemSpy({
+        schoolName: 'Ashfield Public School',
+        schoolNames: new Set(['Ashfield Public School']),
+        searchDomains: new Set(['ashfield.nsw.edu.au']),
+      });
       const { response, body } = await putSettings(
-        { schoolNames: ['Ashfield Public School', 'Ashfield P&C'], searchDomains: ['ashfield.nsw.edu.au'] },
+        {
+          processingJobs: [
+            job({ name: 'Ashfield' }),
+            job({ name: 'Ashfield P&C', schoolName: 'Ashfield P&C' }),
+          ],
+        },
         { updateItem: spy.updateItem }
       );
 
       assert.equal(response.statusCode, 200);
       assert.equal(spy.calls.length, 1, 'the save did not reach the table exactly once');
-      assert.equal(spy.calls[0].updates.schoolName, REMOVE_ATTRIBUTE, 'the legacy scalar was not retired');
-      assert.ok(spy.calls[0].updates.schoolNames instanceof Set, 'schoolNames was not written as a Set');
-      assert.deepEqual(body.schoolNames, ['Ashfield P&C', 'Ashfield Public School']);
+      for (const legacy of ['schoolName', 'schoolNames', 'searchDomains']) {
+        assert.equal(spy.calls[0].updates[legacy], REMOVE_ATTRIBUTE, `the legacy ${legacy} was not retired`);
+      }
+      assert.ok(Array.isArray(spy.calls[0].updates.processingJobs), 'processingJobs was not written as an array');
+      assert.deepEqual(
+        body.processingJobs.map((entry) => entry.schoolName),
+        ['Ashfield Public School', 'Ashfield P&C']
+      );
       assert.ok(!('schoolName' in body));
+      assert.ok(!('schoolNames' in body));
+      assert.ok(!('searchDomains' in body));
     });
 
-    it('And an EMPTY list still removes both attributes rather than writing an empty set', () => {
-      const patch = buildConnectionPatch({ schoolNames: [] });
+    it('And an EMPTY list still removes every attribute rather than writing an empty list', () => {
+      const patch = buildConnectionPatch({ processingJobs: [] });
+      assert.equal(patch.processingJobs, REMOVE_ATTRIBUTE);
       assert.equal(patch.schoolNames, REMOVE_ATTRIBUTE);
+      assert.equal(patch.searchDomains, REMOVE_ATTRIBUTE);
       assert.equal(patch.schoolName, REMOVE_ATTRIBUTE);
     });
   });
 
-  describe('Scenario: A stale browser tab sending the old singular field still saves', () => {
-    it('When they PUT the legacy body shape, Then 200 and schoolNames is the one name', async () => {
-      const { response, body } = await putSettings({
-        schoolName: 'Ashfield Public School',
-        searchDomains: ['ashfield.nsw.edu.au'],
-      });
-      assert.equal(response.statusCode, 200);
-      assert.deepEqual(body.schoolNames, ['Ashfield Public School']);
-      assert.ok(!('schoolName' in body));
+  describe('Scenario: A stale browser tab sending the old fields is now REFUSED', () => {
+    // TASK-055 took the strict default recorded in the ticket's `question` field:
+    // the legacy keys are gone from the request contract entirely, which is why
+    // TASK-055/056/057 must ship in one deploy.
+    it('When they PUT the legacy plural body shape, Then 400 with field "processingJobs"', async () => {
+      const spy = makeUpdateItemSpy();
+      const { response, body } = await putSettings(
+        { schoolNames: ['Ashfield Public School'], searchDomains: ['ashfield.nsw.edu.au'] },
+        { updateItem: spy.updateItem }
+      );
+      assert.equal(response.statusCode, 400);
+      assert.equal(body.field, 'processingJobs');
+      assert.deepEqual(spy.calls, [], 'a refused save still wrote to the table');
     });
 
-    it('And a legacy scalar containing a comma is still ONE name', async () => {
-      const { body } = await putSettings({
-        schoolName: "St Mary's Primary, Manly",
-        searchDomains: ['stmarys.edu.au'],
-      });
-      assert.deepEqual(body.schoolNames, ["St Mary's Primary, Manly"]);
+    it('And the older singular scalar shape is refused the same way', async () => {
+      const spy = makeUpdateItemSpy();
+      const { response, body } = await putSettings(
+        { schoolName: "St Mary's Primary, Manly", searchDomains: ['stmarys.edu.au'] },
+        { updateItem: spy.updateItem }
+      );
+      assert.equal(response.statusCode, 400);
+      assert.equal(body.field, 'processingJobs');
+      assert.deepEqual(spy.calls, [], 'a refused save still wrote to the table');
     });
   });
 
-  describe('Scenario: schoolNames wins when a request carries both shapes', () => {
-    it('When both keys are sent, Then the list is used and the scalar is ignored', async () => {
+  describe('Scenario: processingJobs wins when a row carries both shapes', () => {
+    it('When a body carries both, Then only processingJobs is read', async () => {
       const { response, body } = await putSettings({
-        schoolNames: ['New Shape School'],
-        schoolName: 'Old Shape School',
-        searchDomains: ['school.edu.au'],
+        processingJobs: [job({ name: 'New Shape', schoolName: 'New Shape School', domain: 'school.edu.au' })],
+        schoolNames: ['Old Shape School'],
+        schoolName: 'Older Shape School',
+        searchDomains: ['old.edu.au'],
       });
       assert.equal(response.statusCode, 200);
-      assert.deepEqual(body.schoolNames, ['New Shape School']);
+      assert.equal(body.processingJobs.length, 1);
+      assert.equal(body.processingJobs[0].schoolName, 'New Shape School');
     });
 
-    it('And a row carrying both attributes projects the SET, not the scalar', () => {
+    it('And a row carrying both attributes projects the STORED jobs, not a synthesised one', () => {
+      const stored = {
+        id: '6f1d2c1e-1c2a-4a3b-8c4d-9e0f1a2b3c4d',
+        name: 'New Shape',
+        schoolName: 'New Shape School',
+        domain: 'school.edu.au',
+        searchTerms: [],
+      };
       const projected = toPublicJson({
         email: testEmail,
-        schoolNames: new Set(['New Shape School']),
-        schoolName: 'Old Shape School',
+        processingJobs: [stored],
+        schoolNames: new Set(['Old Shape School']),
+        schoolName: 'Older Shape School',
       });
-      assert.deepEqual(projected.schoolNames, ['New Shape School']);
+      assert.deepEqual(projected.processingJobs, [stored]);
       assert.ok(!('schoolName' in projected));
+      assert.ok(!('schoolNames' in projected));
     });
   });
 
-  describe('Scenario: /auth/me reports null and /settings reports [] for a row with no school at all', () => {
+  describe('Scenario: /auth/me reports null and /settings reports [] for a row with nothing at all', () => {
     const bareRow = { userId: connectionUserId(testGoogleSub), email: testEmail, hasRefreshToken: true };
 
     it('Then raw toPublicJson (which /auth/me returns) reports null', async () => {
-      assert.equal(toPublicJson(bareRow).schoolNames, null);
+      assert.equal(toPublicJson(bareRow).processingJobs, null);
 
       const response = await handleAuthMe(makeEvent('GET', '/calendar/api/auth/me'), {
         env: defaultEnv,
         getConnection: async () => bareRow,
       });
-      assert.equal(JSON.parse(response.body).schoolNames, null);
+      assert.equal(JSON.parse(response.body).processingJobs, null);
     });
 
     it('And GET /settings (via toSettingsJson) reports [] - the difference is intentional', async () => {
-      assert.deepEqual(toSettingsJson(bareRow).schoolNames, []);
+      assert.deepEqual(toSettingsJson(bareRow).processingJobs, []);
 
       const response = await handler(makeEvent('GET', '/calendar/api/settings'), {}, {
         env: defaultEnv,
         getConnection: async () => bareRow,
       });
-      assert.deepEqual(JSON.parse(response.body).schoolNames, []);
+      assert.deepEqual(JSON.parse(response.body).processingJobs, []);
     });
   });
 });

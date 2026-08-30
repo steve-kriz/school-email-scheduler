@@ -731,14 +731,26 @@ describe('Settings Module - Unit Tests', () => {
     });
   });
 
+  // TASK-055 replaced the `schoolNames`/`searchDomains` request contract with a
+  // list of named processing jobs. Every assertion below is the processing-job
+  // equivalent of the one it replaced.
+  const validJob = {
+    name: 'Test Job',
+    schoolName: 'Test School',
+    domain: 'example.edu.au',
+    searchTerms: ['canteen roster'],
+  };
+
   describe('requireValidSettings', () => {
     it('should validate and return settings', () => {
-      const result = requireValidSettings({
-        schoolNames: ['Test School'],
-        searchDomains: ['example.edu.au'],
-      });
-      assert.deepEqual(result.schoolNames, ['Test School']);
-      assert.deepEqual(result.searchDomains, ['example.edu.au']);
+      const result = requireValidSettings({ processingJobs: [validJob] });
+      assert.equal(result.processingJobs.length, 1);
+      assert.equal(result.processingJobs[0].name, 'Test Job');
+      assert.equal(result.processingJobs[0].schoolName, 'Test School');
+      assert.equal(result.processingJobs[0].domain, 'example.edu.au');
+      assert.deepEqual(result.processingJobs[0].searchTerms, ['canteen roster']);
+      assert.ok(!('schoolNames' in result));
+      assert.ok(!('searchDomains' in result));
     });
 
     it('should reject non-object input', () => {
@@ -773,8 +785,7 @@ describe('Settings Module - Unit Tests', () => {
 
     it('should include optional schedule fields if present', () => {
       const result = requireValidSettings({
-        schoolNames: ['Test School'],
-        searchDomains: ['example.edu.au'],
+        processingJobs: [validJob],
         scheduleEnabled: true,
         scheduleFrequency: 'daily',
       });
@@ -783,78 +794,94 @@ describe('Settings Module - Unit Tests', () => {
     });
 
     it('should not include optional fields that are not present', () => {
-      const result = requireValidSettings({
-        schoolNames: ['Test School'],
-        searchDomains: ['example.edu.au'],
-      });
+      const result = requireValidSettings({ processingJobs: [validJob] });
       assert.equal(result.scheduleEnabled, undefined);
       assert.equal(result.scheduleFrequency, undefined);
+    });
+
+    it('should reject a legacy-only body with field processingJobs', () => {
+      try {
+        requireValidSettings({ schoolNames: ['Test School'], searchDomains: ['example.edu.au'] });
+        assert.fail('Should have thrown');
+      } catch (err) {
+        assert.ok(err instanceof SettingsValidationError);
+        assert.equal(err.field, 'processingJobs');
+      }
     });
   });
 
   describe('validateSettingsPayload', () => {
     it('should return valid: true for valid payload', () => {
-      const result = validateSettingsPayload({
-        schoolNames: ['Test School'],
-        searchDomains: ['example.edu.au'],
-      });
+      const result = validateSettingsPayload({ processingJobs: [validJob] });
       assert.equal(result.valid, true);
       assert.ok(result.settings);
     });
 
     it('should return valid: false for invalid payload', () => {
+      const result = validateSettingsPayload({ processingJobs: [] }); // Invalid
+      assert.equal(result.valid, false);
+      assert.equal(result.field, 'processingJobs');
+    });
+
+    it('should carry the INDEXED field name for a per-job failure', () => {
       const result = validateSettingsPayload({
-        schoolNames: ['Test School'],
-        searchDomains: [], // Invalid
+        processingJobs: [validJob, { ...validJob, name: 'Second', domain: 'stmarys' }],
       });
       assert.equal(result.valid, false);
-      assert.equal(result.field, 'searchDomains');
+      assert.equal(result.field, 'processingJobs[1].domain');
     });
 
     it('should not throw on invalid payload', () => {
-      const result = validateSettingsPayload({ schoolNames: ['   '] });
+      const result = validateSettingsPayload({ processingJobs: [{ name: '   ' }] });
       assert.equal(result.valid, false);
     });
   });
 
   describe('buildConnectionPatch', () => {
-    it('should build patch with schoolNames as a Set', () => {
-      const patch = buildConnectionPatch({ schoolNames: ['Test School'] });
-      assert.ok(patch.schoolNames instanceof Set);
-      assert.deepEqual(Array.from(patch.schoolNames), ['Test School']);
+    const storedJob = {
+      id: '6f1d2c1e-1c2a-4a3b-8c4d-9e0f1a2b3c4d',
+      name: 'Test Job',
+      schoolName: 'Test School',
+      domain: 'example.edu.au',
+      searchTerms: ['canteen roster'],
+    };
+
+    it('should build patch with processingJobs as a plain array, never a Set', () => {
+      const patch = buildConnectionPatch({ processingJobs: [storedJob] });
+      assert.ok(Array.isArray(patch.processingJobs));
+      assert.ok(!(patch.processingJobs instanceof Set));
+      assert.deepEqual(patch.processingJobs, [storedJob]);
     });
 
-    it('should use REMOVE_ATTRIBUTE for an empty schoolNames list', () => {
-      const patch = buildConnectionPatch({ schoolNames: [] });
-      assert.equal(patch.schoolNames, REMOVE_ATTRIBUTE);
+    it('should use REMOVE_ATTRIBUTE for an empty processingJobs list', () => {
+      const patch = buildConnectionPatch({ processingJobs: [] });
+      assert.equal(patch.processingJobs, REMOVE_ATTRIBUTE);
     });
 
-    it('should ALWAYS also REMOVE the legacy schoolName scalar', () => {
-      assert.equal(buildConnectionPatch({ schoolNames: ['Test School'] }).schoolName, REMOVE_ATTRIBUTE);
-      assert.equal(buildConnectionPatch({ schoolNames: [] }).schoolName, REMOVE_ATTRIBUTE);
+    it('should ALWAYS also REMOVE every legacy settings attribute', () => {
+      for (const jobs of [[storedJob], []]) {
+        const patch = buildConnectionPatch({ processingJobs: jobs });
+        assert.equal(patch.schoolName, REMOVE_ATTRIBUTE);
+        assert.equal(patch.schoolNames, REMOVE_ATTRIBUTE);
+        assert.equal(patch.searchDomains, REMOVE_ATTRIBUTE);
+      }
     });
 
-    it('should build patch with searchDomains as Set', () => {
-      const patch = buildConnectionPatch({ searchDomains: ['example.edu.au'] });
-      assert.ok(patch.searchDomains instanceof Set);
-      assert.deepEqual(Array.from(patch.searchDomains), ['example.edu.au']);
-    });
-
-    it('should use REMOVE_ATTRIBUTE for empty searchDomains', () => {
-      const patch = buildConnectionPatch({ searchDomains: [] });
-      assert.equal(patch.searchDomains, REMOVE_ATTRIBUTE);
+    it('should write an EMPTY searchTerms as an empty list, not a removal', () => {
+      const patch = buildConnectionPatch({ processingJobs: [{ ...storedJob, searchTerms: [] }] });
+      assert.deepEqual(patch.processingJobs[0].searchTerms, []);
+      assert.notEqual(patch.processingJobs[0].searchTerms, REMOVE_ATTRIBUTE);
     });
 
     it('should not include undefined fields in patch', () => {
-      const patch = buildConnectionPatch({ schoolNames: ['Test'] });
-      assert.ok(patch.schoolNames instanceof Set);
-      assert.equal(patch.searchDomains, undefined);
+      const patch = buildConnectionPatch({ processingJobs: [storedJob] });
+      assert.ok(Array.isArray(patch.processingJobs));
+      assert.equal(patch.scheduleEnabled, undefined);
     });
 
     it('should include schedule fields if present', () => {
       const patch = buildConnectionPatch({
-        schoolNames: ['Test'],
-        searchDomains: ['example.edu.au'],
+        processingJobs: [storedJob],
         scheduleEnabled: true,
         scheduleFrequency: 'daily',
         scheduleHour: 7,
@@ -868,8 +895,7 @@ describe('Settings Module - Unit Tests', () => {
 
     it('should not include undefined schedule fields', () => {
       const patch = buildConnectionPatch({
-        schoolNames: ['Test'],
-        searchDomains: ['example.edu.au'],
+        processingJobs: [storedJob],
         scheduleEnabled: true,
       });
       assert.equal(patch.scheduleEnabled, true);
@@ -883,17 +909,23 @@ describe('Settings Module - Unit Tests', () => {
   });
 
   describe('toSettingsJson', () => {
+    const projectedJob = {
+      id: '6f1d2c1e-1c2a-4a3b-8c4d-9e0f1a2b3c4d',
+      name: 'Test Job',
+      schoolName: 'Test School',
+      domain: 'example.edu.au',
+      searchTerms: [],
+    };
+
     it('should project connection to settings JSON', () => {
       const connection = {
         email: 'test@example.com',
-        schoolNames: ['Test School'],
-        searchDomains: new Set(['example.edu.au']),
+        processingJobs: [projectedJob],
         hasRefreshToken: true,
       };
       const result = toSettingsJson(connection);
       assert.equal(result.email, 'test@example.com');
-      assert.deepEqual(result.schoolNames, ['Test School']);
-      assert.deepEqual(result.searchDomains, ['example.edu.au']);
+      assert.deepEqual(result.processingJobs, [projectedJob]);
       // toPublicJson sets connected based on hasRefreshToken
       assert.ok(result.connected === null || typeof result.connected === 'boolean');
     });
@@ -901,33 +933,36 @@ describe('Settings Module - Unit Tests', () => {
     it('should use fallback values when connection is null', () => {
       const result = toSettingsJson(null, { email: 'fallback@example.com' });
       assert.equal(result.email, 'fallback@example.com');
-      assert.deepEqual(result.searchDomains, []);
+      assert.deepEqual(result.processingJobs, []);
     });
 
-    it('should always report searchDomains as array, never null', () => {
+    it('should always report processingJobs as array, never null', () => {
       const connection = {
         email: 'test@example.com',
-        // searchDomains is absent
+        // processingJobs is absent, and there is no legacy attribute to migrate
       };
       const result = toSettingsJson(connection);
-      assert.ok(Array.isArray(result.searchDomains));
-      assert.deepEqual(result.searchDomains, []);
+      assert.ok(Array.isArray(result.processingJobs));
+      assert.deepEqual(result.processingJobs, []);
     });
 
-    it('should convert Set to array in output', () => {
+    it('should migrate a legacy Set-valued row into one synthesised job', () => {
       const connection = {
         email: 'test@example.com',
         searchDomains: new Set(['domain1.edu.au', 'domain2.edu.au']),
       };
       const result = toSettingsJson(connection);
-      assert.ok(Array.isArray(result.searchDomains));
-      assert.equal(result.searchDomains.length, 2);
+      assert.ok(Array.isArray(result.processingJobs));
+      assert.equal(result.processingJobs.length, 1);
+      assert.equal(result.processingJobs[0].domain, 'domain1.edu.au');
+      assert.deepEqual(result.processingJobs[0].searchTerms, ['domain2.edu.au']);
+      assert.ok(!('searchDomains' in result));
     });
 
     it('should never include refreshTokenEnc or secrets', () => {
       const connection = {
         email: 'test@example.com',
-        schoolNames: ['Test'],
+        processingJobs: [projectedJob],
         refreshTokenEnc: 'secret-token',
         refreshTokenKeyId: 'secret-key',
       };
@@ -940,32 +975,30 @@ describe('Settings Module - Unit Tests', () => {
       const connection = {
         userId: 'should-not-appear',
         email: 'test@example.com',
-        schoolNames: ['Test School'],
-        searchDomains: new Set([]),
+        processingJobs: [projectedJob],
         unknown_field: 'should-not-appear',
       };
       const result = toSettingsJson(connection);
       assert.equal(result.userId, undefined);
       assert.equal(result.unknown_field, undefined);
       assert.ok('email' in result);
-      assert.ok('schoolNames' in result);
+      assert.ok('processingJobs' in result);
       assert.ok(!('schoolName' in result));
+      assert.ok(!('schoolNames' in result));
+      assert.ok(!('searchDomains' in result));
     });
 
     it('should merge fallback with projected values', () => {
-      const connection = {
-        email: 'original@example.com',
-        schoolNames: ['Test School'],
-      };
+      const connection = { email: 'original@example.com' };
       const fallback = {
         email: 'fallback@example.com',
-        searchDomains: ['fallback.edu.au'],
+        processingJobs: [projectedJob],
       };
       const result = toSettingsJson(connection, fallback);
       // Connection's email takes precedence
       assert.equal(result.email, 'original@example.com');
-      // Fallback's searchDomains is used if connection has none
-      assert.deepEqual(result.searchDomains, ['fallback.edu.au']);
+      // Fallback's processingJobs is used if connection has none
+      assert.deepEqual(result.processingJobs, [projectedJob]);
     });
   });
 
@@ -988,9 +1021,10 @@ describe('Settings Module - Unit Tests', () => {
     it('should export expected SETTINGS_FIELDS', () => {
       assert.ok(Array.isArray(SETTINGS_FIELDS));
       assert.ok(SETTINGS_FIELDS.includes('email'));
-      assert.ok(SETTINGS_FIELDS.includes('schoolNames'));
+      assert.ok(SETTINGS_FIELDS.includes('processingJobs'));
       assert.ok(!SETTINGS_FIELDS.includes('schoolName'));
-      assert.ok(SETTINGS_FIELDS.includes('searchDomains'));
+      assert.ok(!SETTINGS_FIELDS.includes('schoolNames'));
+      assert.ok(!SETTINGS_FIELDS.includes('searchDomains'));
     });
 
     it('should export MAX_SCHOOL_NAME_LENGTH as 120', () => {

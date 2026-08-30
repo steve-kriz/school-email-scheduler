@@ -13,6 +13,8 @@ import * as assert from 'node:assert';
 
 import { handler } from '../../src/lambda/calendar/index.mjs';
 
+import { REMOVE_ATTRIBUTE } from '../../src/lambda/calendar/backend/connections.mjs';
+
 import {
   SESSION_COOKIE_NAME,
   createSessionToken,
@@ -74,10 +76,28 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
     };
   }
 
+  /**
+   * TASK-055 moved the request contract to `processingJobs`: one domain now lives
+   * on one job, so a refused domain is reported under the INDEXED field name
+   * `processingJobs[<index>].domain` rather than the collection name.
+   */
+  const DOMAIN_FIELD = 'processingJobs[0].domain';
+
+  /** One valid processing job carrying the domain under test. */
+  function jobWith(domain, overrides = {}) {
+    return {
+      name: 'Newsletters',
+      schoolName: 'St Marys Primary',
+      domain,
+      searchTerms: [],
+      ...overrides,
+    };
+  }
+
   /** PUT a single domain and return the parsed response. */
   async function putDomain(domain) {
     const response = await handler(
-      makeEvent({ schoolNames: ['St Marys Primary'], searchDomains: [domain] }, makeSessionCookie()),
+      makeEvent({ processingJobs: [jobWith(domain)] }, makeSessionCookie()),
       {},
       { env: defaultEnv }
     );
@@ -101,7 +121,7 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
     for (const host of hosts) {
       const { response, body } = await putDomain(host);
       assert.equal(response.statusCode, 400, `${host} should be refused`);
-      assert.equal(body.field, 'searchDomains');
+      assert.equal(body.field, DOMAIN_FIELD);
       assert.ok(body.error.includes(host), `body should name ${host}, got "${body.error}"`);
     }
   });
@@ -121,7 +141,7 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
     for (const host of hosts) {
       const { response, body } = await putDomain(host);
       assert.equal(response.statusCode, 400, `${host} should be refused`);
-      assert.equal(body.field, 'searchDomains');
+      assert.equal(body.field, DOMAIN_FIELD);
       assert.ok(body.error.includes(host), `body should name ${host}, got "${body.error}"`);
     }
   });
@@ -130,7 +150,7 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
     for (const host of ['gmail.com', 'googlemail.com', 'outlook.com', 'hotmail.com', 'yahoo.com', 'icloud.com']) {
       const { response, body } = await putDomain(host);
       assert.equal(response.statusCode, 400, `${host} should be refused`);
-      assert.equal(body.field, 'searchDomains');
+      assert.equal(body.field, DOMAIN_FIELD);
       assert.ok(body.error.includes(host), `body should name ${host}, got "${body.error}"`);
     }
   });
@@ -139,98 +159,71 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
     for (const host of ['hotmail.com.br', 'yahoo.example']) {
       const { response, body } = await putDomain(host);
       assert.equal(response.statusCode, 400, `${host} should be refused`);
-      assert.equal(body.field, 'searchDomains');
+      assert.equal(body.field, DOMAIN_FIELD);
       assert.ok(body.error.includes(host), `body should name ${host}, got "${body.error}"`);
     }
   });
 
-  it('should not refuse a school domain with a "mail" subdomain', async () => {
+  /**
+   * Drive an ACCEPTED PUT. The injected `updateItem` is the ONLY database seam
+   * and never opens a connection: it decodes the compiled UpdateExpression's
+   * value map and echoes the SET attributes back as the stored row.
+   */
+  async function putJobs(jobs) {
     const captured = [];
     const response = await handler(
-      makeEvent(
-        { schoolNames: ['St Marys Primary'], searchDomains: ['mail.stmarys.edu.au'] },
-        makeSessionCookie()
-      ),
+      makeEvent({ processingJobs: jobs }, makeSessionCookie()),
       {},
       {
         env: defaultEnv,
-        updateItem: async (params) => {
-          captured.push(params);
-          return {
-            Attributes: {
-              userId: `google:${testGoogleSub}`,
-              email: testEmail,
-              schoolNames: ['St Marys Primary'],
-              searchDomains: new Set(['mail.stmarys.edu.au']),
-            },
-          };
+        updateItem: async ({ tableName, key, updates }) => {
+          captured.push({ tableName, key, updates });
+          const row = { userId: `google:${testGoogleSub}`, email: testEmail };
+          for (const [attribute, value] of Object.entries(updates || {})) {
+            if (value === REMOVE_ATTRIBUTE) delete row[attribute];
+            else row[attribute] = value;
+          }
+          return row;
         },
       }
     );
+    return { response, body: JSON.parse(response.body), captured };
+  }
+
+  it('should not refuse a school domain with a "mail" subdomain', async () => {
+    const { response, body, captured } = await putJobs([jobWith('mail.stmarys.edu.au')]);
 
     assert.equal(response.statusCode, 200);
-    const body = JSON.parse(response.body);
-    assert.deepEqual(body.searchDomains, ['mail.stmarys.edu.au']);
+    assert.deepEqual(
+      body.processingJobs.map((job) => job.domain),
+      ['mail.stmarys.edu.au']
+    );
     assert.equal(captured.length, 1);
   });
 
   it('should accept an Australian school domain unaffected by the ISP/portal entries (TASK-046)', async () => {
-    const captured = [];
-    const response = await handler(
-      makeEvent(
-        { schoolNames: ['St Bedes College'], searchDomains: ['stbedes.vic.edu.au'] },
-        makeSessionCookie()
-      ),
-      {},
-      {
-        env: defaultEnv,
-        updateItem: async (params) => {
-          captured.push(params);
-          return {
-            Attributes: {
-              userId: `google:${testGoogleSub}`,
-              email: testEmail,
-              schoolNames: ['St Bedes College'],
-              searchDomains: new Set(['stbedes.vic.edu.au']),
-            },
-          };
-        },
-      }
-    );
+    const { response, body, captured } = await putJobs([
+      jobWith('stbedes.vic.edu.au', { schoolName: 'St Bedes College' }),
+    ]);
 
     assert.equal(response.statusCode, 200);
-    const body = JSON.parse(response.body);
-    assert.deepEqual(body.searchDomains, ['stbedes.vic.edu.au']);
+    assert.deepEqual(
+      body.processingJobs.map((job) => job.domain),
+      ['stbedes.vic.edu.au']
+    );
     assert.equal(captured.length, 1);
   });
 
   it('should accept a qld.edu.au school domain (TASK-046: AC scope)', async () => {
-    const captured = [];
-    const response = await handler(
-      makeEvent(
-        { schoolNames: ['Sunshine State School'], searchDomains: ['example.qld.edu.au'] },
-        makeSessionCookie()
-      ),
-      {},
-      {
-        env: defaultEnv,
-        updateItem: async (params) => {
-          captured.push(params);
-          return {
-            Attributes: {
-              userId: `google:${testGoogleSub}`,
-              email: testEmail,
-              schoolNames: ['Sunshine State School'],
-              searchDomains: new Set(['example.qld.edu.au']),
-            },
-          };
-        },
-      }
-    );
+    const { response, body, captured } = await putJobs([
+      jobWith('example.qld.edu.au', { schoolName: 'Sunshine State School' }),
+    ]);
 
     assert.equal(response.statusCode, 200);
-    const body = JSON.parse(response.body);
-    assert.deepEqual(body.searchDomains, ['example.qld.edu.au']);
+    assert.deepEqual(
+      body.processingJobs.map((job) => job.domain),
+      ['example.qld.edu.au']
+    );
     assert.equal(captured.length, 1);
   });
 
@@ -247,57 +240,39 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
   it('should refuse mixed-case blocked domains and report the normalised form', async () => {
     const { response, body } = await putDomain('OUTLOOK.COM.AU');
     assert.equal(response.statusCode, 400);
-    assert.equal(body.field, 'searchDomains');
+    assert.equal(body.field, DOMAIN_FIELD);
     assert.ok(body.error.includes('outlook.com.au'), 'should name normalised form, not the input');
   });
 
   it('should refuse email address form and report normalised domain', async () => {
     const { response, body } = await putDomain('user@yahoo.com.au');
     assert.equal(response.statusCode, 400);
-    assert.equal(body.field, 'searchDomains');
+    assert.equal(body.field, DOMAIN_FIELD);
     assert.ok(body.error.includes('yahoo.com.au'), 'should name the domain extracted from address');
   });
 
   it('should refuse URL form and report normalised domain', async () => {
     const { response, body } = await putDomain('https://gmail.com/login');
     assert.equal(response.statusCode, 400);
-    assert.equal(body.field, 'searchDomains');
+    assert.equal(body.field, DOMAIN_FIELD);
     assert.ok(body.error.includes('gmail.com'), 'should name the domain extracted from URL');
   });
 
   it('should accept school domains with brand-like names in subdomain', async () => {
-    const captured = [];
-    const response = await handler(
-      makeEvent(
-        {
-          schoolNames: ['School Districts'],
-          searchDomains: ['livewire.edu.au', 'mailroom.vic.edu.au', 'live.qld.edu.au'],
-        },
-        makeSessionCookie()
-      ),
-      {},
-      {
-        env: defaultEnv,
-        updateItem: async (params) => {
-          captured.push(params);
-          return {
-            Attributes: {
-              userId: `google:${testGoogleSub}`,
-              email: testEmail,
-              schoolNames: ['School Districts'],
-              searchDomains: new Set(['livewire.edu.au', 'mailroom.vic.edu.au', 'live.qld.edu.au']),
-            },
-          };
-        },
-      }
-    );
+    // One domain per job now (TASK-055), so three domains are three jobs - which
+    // is the shape a multi-domain user saves in from here on.
+    const { response, body } = await putJobs([
+      jobWith('livewire.edu.au', { name: 'Livewire', schoolName: 'School Districts' }),
+      jobWith('mailroom.vic.edu.au', { name: 'Mailroom', schoolName: 'School Districts' }),
+      jobWith('live.qld.edu.au', { name: 'Live QLD', schoolName: 'School Districts' }),
+    ]);
 
     assert.equal(response.statusCode, 200, 'should accept school domains with brand-like words');
-    const body = JSON.parse(response.body);
-    assert.equal(body.searchDomains.length, 3);
-    assert.ok(body.searchDomains.includes('livewire.edu.au'));
-    assert.ok(body.searchDomains.includes('mailroom.vic.edu.au'));
-    assert.ok(body.searchDomains.includes('live.qld.edu.au'));
+    const domains = body.processingJobs.map((job) => job.domain);
+    assert.equal(domains.length, 3);
+    assert.ok(domains.includes('livewire.edu.au'));
+    assert.ok(domains.includes('mailroom.vic.edu.au'));
+    assert.ok(domains.includes('live.qld.edu.au'));
   });
 
   it('should refuse brand-only domains under uncommon suffixes', async () => {
@@ -311,7 +286,7 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
     for (const host of hosts) {
       const { response, body } = await putDomain(host);
       assert.equal(response.statusCode, 400, `${host} should be refused by brand check`);
-      assert.equal(body.field, 'searchDomains');
+      assert.equal(body.field, DOMAIN_FIELD);
       assert.ok(body.error.includes(host), `should name ${host} in error message`);
     }
   });
@@ -319,14 +294,14 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
   it('should refuse wildcard patterns after normalisation', async () => {
     const { response, body } = await putDomain('*.hotmail.com');
     assert.equal(response.statusCode, 400);
-    assert.equal(body.field, 'searchDomains');
+    assert.equal(body.field, DOMAIN_FIELD);
     assert.ok(body.error.includes('hotmail.com'), 'should name the normalised domain');
   });
 
   it('should normalise whitespace around domains', async () => {
     const { response, body } = await putDomain('  gmail.com  ');
     assert.equal(response.statusCode, 400);
-    assert.equal(body.field, 'searchDomains');
+    assert.equal(body.field, DOMAIN_FIELD);
     assert.ok(body.error.includes('gmail.com'));
   });
 });

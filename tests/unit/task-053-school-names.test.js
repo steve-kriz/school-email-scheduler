@@ -137,57 +137,90 @@ describe('TASK-053 unit: validateSchoolNames', () => {
  * requireValidSettings / buildConnectionPatch
  * ========================================================================= */
 
-describe('TASK-053 unit: requireValidSettings', () => {
-  it('returns schoolNames and never schoolName', () => {
-    const result = requireValidSettings({
-      schoolNames: ['Alpha School'],
-      searchDomains: ['alpha.edu.au'],
-    });
-    assert.deepEqual(result.schoolNames, ['Alpha School']);
+// TASK-055 SUPERSEDED THE REQUEST SHAPE. `schoolNames`/`searchDomains` are no
+// longer read or written by the settings request path; the coverage below is the
+// processing-job equivalent of the assertions TASK-053 made, kept rather than
+// deleted so the "one school name per row" -> "one school name per job" move
+// stays pinned. TASK-055's own files cover the new rules in full.
+describe('TASK-053 unit (TASK-055 shape): requireValidSettings', () => {
+  const job = {
+    name: 'Alpha',
+    schoolName: 'Alpha School',
+    domain: 'alpha.edu.au',
+  };
+
+  it('returns processingJobs and never schoolName/schoolNames', () => {
+    const result = requireValidSettings({ processingJobs: [job] });
+    assert.equal(result.processingJobs.length, 1);
+    assert.equal(result.processingJobs[0].schoolName, 'Alpha School');
     assert.ok(!('schoolName' in result));
+    assert.ok(!('schoolNames' in result));
+    assert.ok(!('searchDomains' in result));
   });
 
-  it('falls back to a legacy payload.schoolName when schoolNames is absent', () => {
+  it('refuses a legacy-only body: the superseded keys are not read at all', () => {
+    assert.throws(
+      () => requireValidSettings({ schoolNames: ['Alpha School'], searchDomains: ['alpha.edu.au'] }),
+      (err) => err instanceof SettingsValidationError && err.field === 'processingJobs'
+    );
+    assert.throws(
+      () => requireValidSettings({ schoolName: 'Alpha School', searchDomains: ['alpha.edu.au'] }),
+      (err) => err instanceof SettingsValidationError && err.field === 'processingJobs'
+    );
+  });
+
+  it('ignores legacy keys entirely when processingJobs is present', () => {
     const result = requireValidSettings({
-      schoolName: 'Alpha School',
-      searchDomains: ['alpha.edu.au'],
+      processingJobs: [job],
+      schoolNames: ['Old Shape'],
+      schoolName: 'Older Shape',
+      searchDomains: ['old.edu.au'],
     });
-    assert.deepEqual(result.schoolNames, ['Alpha School']);
+    assert.equal(result.processingJobs[0].schoolName, 'Alpha School');
+    assert.ok(!('schoolNames' in result));
   });
 
-  it('prefers payload.schoolNames when both shapes are present', () => {
-    const result = requireValidSettings({
-      schoolNames: ['New Shape'],
-      schoolName: 'Old Shape',
-      searchDomains: ['alpha.edu.au'],
-    });
-    assert.deepEqual(result.schoolNames, ['New Shape']);
-  });
-
-  it('lists schoolNames (not schoolName) in SETTINGS_FIELDS', () => {
-    assert.ok(SETTINGS_FIELDS.includes('schoolNames'));
+  it('lists processingJobs (not schoolName/schoolNames/searchDomains) in SETTINGS_FIELDS', () => {
+    assert.ok(SETTINGS_FIELDS.includes('processingJobs'));
     assert.ok(!SETTINGS_FIELDS.includes('schoolName'));
+    assert.ok(!SETTINGS_FIELDS.includes('schoolNames'));
+    assert.ok(!SETTINGS_FIELDS.includes('searchDomains'));
   });
 });
 
-describe('TASK-053 unit: buildConnectionPatch', () => {
-  it('writes a non-empty list as a Set and always retires the legacy scalar', () => {
-    const patch = buildConnectionPatch({ schoolNames: ['Alpha School', 'Beta School'] });
-    assert.ok(patch.schoolNames instanceof Set);
-    assert.deepEqual([...patch.schoolNames], ['Alpha School', 'Beta School']);
-    assert.equal(patch.schoolName, REMOVE_ATTRIBUTE);
-  });
+describe('TASK-053 unit (TASK-055 shape): buildConnectionPatch', () => {
+  const jobs = [
+    { id: 'id-1', name: 'Alpha', schoolName: 'Alpha School', domain: 'alpha.edu.au', searchTerms: [] },
+    { id: 'id-2', name: 'Beta', schoolName: 'Beta School', domain: 'beta.edu.au', searchTerms: ['canteen'] },
+  ];
 
-  it('removes the attribute for an empty list, and still retires the legacy scalar', () => {
-    const patch = buildConnectionPatch({ schoolNames: [] });
+  it('writes a non-empty list as a plain array and retires EVERY legacy attribute', () => {
+    const patch = buildConnectionPatch({ processingJobs: jobs });
+    assert.ok(Array.isArray(patch.processingJobs));
+    assert.ok(!(patch.processingJobs instanceof Set));
+    assert.deepEqual(
+      patch.processingJobs.map((entry) => entry.schoolName),
+      ['Alpha School', 'Beta School']
+    );
+    assert.equal(patch.schoolName, REMOVE_ATTRIBUTE);
     assert.equal(patch.schoolNames, REMOVE_ATTRIBUTE);
-    assert.equal(patch.schoolName, REMOVE_ATTRIBUTE);
+    assert.equal(patch.searchDomains, REMOVE_ATTRIBUTE);
   });
 
-  it('touches neither key when schoolNames was not supplied', () => {
-    const patch = buildConnectionPatch({ searchDomains: ['alpha.edu.au'] });
+  it('removes the attribute for an empty list, and still retires every legacy attribute', () => {
+    const patch = buildConnectionPatch({ processingJobs: [] });
+    assert.equal(patch.processingJobs, REMOVE_ATTRIBUTE);
+    assert.equal(patch.schoolName, REMOVE_ATTRIBUTE);
+    assert.equal(patch.schoolNames, REMOVE_ATTRIBUTE);
+    assert.equal(patch.searchDomains, REMOVE_ATTRIBUTE);
+  });
+
+  it('touches no settings key when processingJobs was not supplied', () => {
+    const patch = buildConnectionPatch({ scheduleEnabled: true });
+    assert.ok(!('processingJobs' in patch));
     assert.ok(!('schoolNames' in patch));
     assert.ok(!('schoolName' in patch));
+    assert.ok(!('searchDomains' in patch));
   });
 });
 
@@ -195,46 +228,51 @@ describe('TASK-053 unit: buildConnectionPatch', () => {
  * Projection
  * ========================================================================= */
 
-describe('TASK-053 unit: PUBLIC_ATTRIBUTES / toPublicJson / toSettingsJson', () => {
-  it('publishes schoolNames and not schoolName', () => {
-    assert.ok(PUBLIC_ATTRIBUTES.includes('schoolNames'));
+describe('TASK-053 unit (TASK-055 shape): PUBLIC_ATTRIBUTES / toPublicJson / toSettingsJson', () => {
+  it('publishes processingJobs and none of the legacy attribute names', () => {
+    assert.ok(PUBLIC_ATTRIBUTES.includes('processingJobs'));
     assert.ok(!PUBLIC_ATTRIBUTES.includes('schoolName'));
+    assert.ok(!PUBLIC_ATTRIBUTES.includes('schoolNames'));
+    assert.ok(!PUBLIC_ATTRIBUTES.includes('searchDomains'));
   });
 
-  it('projects a stored Set as a SORTED array', () => {
+  it('folds a stored Set into the synthesised job, sorted so the read is stable', () => {
     const json = toPublicJson({ schoolNames: new Set(['Zeta College', 'Alpha School']) });
-    assert.deepEqual(json.schoolNames, ['Alpha School', 'Zeta College']);
+    assert.equal(json.processingJobs.length, 1);
+    assert.equal(json.processingJobs[0].schoolName, 'Alpha School');
+    assert.deepEqual(json.processingJobs[0].searchTerms, ['Zeta College']);
   });
 
-  it('projects a legacy scalar row as a one-element array', () => {
+  it('projects a legacy scalar row as one synthesised job, never as schoolName', () => {
     const json = toPublicJson({ email: 'p@example.test', schoolName: '  Ashfield Public School  ' });
-    assert.deepEqual(json.schoolNames, ['Ashfield Public School']);
+    assert.equal(json.processingJobs[0].schoolName, 'Ashfield Public School');
     assert.ok(!('schoolName' in json));
+    assert.ok(!('schoolNames' in json));
   });
 
-  it('lets schoolNames win when a row somehow carries both', () => {
+  it('lets schoolNames win over the older scalar when a row somehow carries both', () => {
     const json = toPublicJson({
       schoolNames: new Set(['New Shape']),
       schoolName: 'Old Shape',
     });
-    assert.deepEqual(json.schoolNames, ['New Shape']);
+    assert.equal(json.processingJobs[0].schoolName, 'New Shape');
   });
 
-  it('projects null when a row has neither (this is what /auth/me returns)', () => {
-    assert.equal(toPublicJson({ email: 'p@example.test' }).schoolNames, null);
-    assert.equal(toPublicJson(null).schoolNames, null);
+  it('projects null when a row has nothing (this is what /auth/me returns)', () => {
+    assert.equal(toPublicJson({ email: 'p@example.test' }).processingJobs, null);
+    assert.equal(toPublicJson(null).processingJobs, null);
   });
 
-  it('ignores a blank legacy scalar rather than projecting [""]', () => {
-    assert.equal(toPublicJson({ schoolName: '   ' }).schoolNames, null);
-    assert.equal(toPublicJson({ schoolName: 42 }).schoolNames, null);
+  it('ignores a blank legacy scalar rather than synthesising a job from it', () => {
+    assert.equal(toPublicJson({ schoolName: '   ' }).processingJobs, null);
+    assert.equal(toPublicJson({ schoolName: 42 }).processingJobs, null);
   });
 
   it('coerces the no-school case to [] for GET /settings - intentionally different from /auth/me', () => {
-    assert.deepEqual(toSettingsJson({ email: 'p@example.test' }).schoolNames, []);
-    assert.deepEqual(toSettingsJson(null, { email: 'p@example.test' }).schoolNames, []);
+    assert.deepEqual(toSettingsJson({ email: 'p@example.test' }).processingJobs, []);
+    assert.deepEqual(toSettingsJson(null, { email: 'p@example.test' }).processingJobs, []);
     // The difference is the point: raw toPublicJson says null for the same row.
-    assert.equal(toPublicJson({ email: 'p@example.test' }).schoolNames, null);
+    assert.equal(toPublicJson({ email: 'p@example.test' }).processingJobs, null);
   });
 });
 

@@ -1207,7 +1207,9 @@ describe('Connections Functions', () => {
       const connection = {
         userId: 'google#123',
         email: 'test@example.com',
-        schoolNames: new Set(['My School']),
+        processingJobs: [
+          { id: 'job-1', name: 'Newsletters', schoolName: 'My School', domain: 'myschool.edu.au', searchTerms: [] },
+        ],
         hasRefreshToken: true,
         refreshTokenEnc: 'should-not-appear',
         secretField: 'should-not-appear',
@@ -1215,8 +1217,13 @@ describe('Connections Functions', () => {
 
       const json = toPublicJson(connection);
       assert.equal(json.email, 'test@example.com');
-      assert.deepEqual(json.schoolNames, ['My School']);
+      // TASK-055: the settings shape is a list of named processing jobs; the
+      // superseded string sets are never emitted under their own names.
+      assert.equal(json.processingJobs.length, 1);
+      assert.equal(json.processingJobs[0].schoolName, 'My School');
       assert.ok(!('schoolName' in json));
+      assert.ok(!('schoolNames' in json));
+      assert.ok(!('searchDomains' in json));
       assert.equal(json.connected, true);
       assert.equal(json.connectionStatus, 'connected');
       assert.ok(!('userId' in json));
@@ -1249,24 +1256,41 @@ describe('Connections Functions', () => {
     });
 
     it('should use fallback values when connection is null', () => {
-      const json = toPublicJson(null, { email: 'fallback@example.com', schoolNames: ['Fallback School'] });
+      const fallbackJob = {
+        id: 'fallback-1',
+        name: 'Fallback',
+        schoolName: 'Fallback School',
+        domain: 'fallback.edu.au',
+        searchTerms: [],
+      };
+      const json = toPublicJson(null, { email: 'fallback@example.com', processingJobs: [fallbackJob] });
       assert.equal(json.email, 'fallback@example.com');
-      assert.deepEqual(json.schoolNames, ['Fallback School']);
+      assert.deepEqual(json.processingJobs, [fallbackJob]);
     });
 
     it('should prefer connection values over fallback', () => {
+      const primaryJob = {
+        id: 'primary-1',
+        name: 'Primary',
+        schoolName: 'Primary School',
+        domain: 'primary.edu.au',
+        searchTerms: [],
+      };
       const json = toPublicJson(
-        { email: 'primary@example.com', schoolNames: new Set(['Primary']) },
-        { email: 'fallback@example.com', schoolNames: ['Fallback'] }
+        { email: 'primary@example.com', processingJobs: [primaryJob] },
+        {
+          email: 'fallback@example.com',
+          processingJobs: [{ ...primaryJob, id: 'fallback-1', name: 'Fallback' }],
+        }
       );
       assert.equal(json.email, 'primary@example.com');
-      assert.deepEqual(json.schoolNames, ['Primary']);
+      assert.deepEqual(json.processingJobs, [primaryJob]);
     });
 
     it('should normalize null/empty to null', () => {
-      const json = toPublicJson({ email: '', schoolNames: null });
+      const json = toPublicJson({ email: '', processingJobs: null });
       assert.equal(json.email, null);
-      assert.equal(json.schoolNames, null);
+      assert.equal(json.processingJobs, null);
     });
 
     it('should never include refreshTokenEnc in output', () => {
@@ -1286,9 +1310,12 @@ describe('Connections Functions', () => {
     it('should define public attributes', () => {
       assert.ok(Array.isArray(PUBLIC_ATTRIBUTES));
       assert.ok(PUBLIC_ATTRIBUTES.includes('email'));
-      assert.ok(PUBLIC_ATTRIBUTES.includes('schoolNames'));
-      // TASK-053: the legacy scalar is projected UNDER the new name, never its own.
+      assert.ok(PUBLIC_ATTRIBUTES.includes('processingJobs'));
+      // TASK-053/TASK-055: every legacy settings attribute is projected UNDER the
+      // new name by the migrate-on-read fallback, never under its own.
       assert.ok(!PUBLIC_ATTRIBUTES.includes('schoolName'));
+      assert.ok(!PUBLIC_ATTRIBUTES.includes('schoolNames'));
+      assert.ok(!PUBLIC_ATTRIBUTES.includes('searchDomains'));
     });
 
     it('should define secret attributes', () => {
