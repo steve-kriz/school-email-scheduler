@@ -262,7 +262,7 @@ Rules for the date fields:
 
 ## The remaining fields
 
-- title: short and specific, in title case, no trailing punctuation, ideally under sixty characters. "Year 4 Zoo Excursion", not "Excursion" and not a sentence.
+- title: short and specific, in title case, no trailing punctuation, ideally under sixty characters. "Year 4 Zoo Excursion", not "Excursion" and not a sentence. STABILITY MATTERS: this exact email may be re-processed later, and re-extracting it must produce the same title text so the same event is recognised rather than duplicated. Base the title on the wording the email itself uses for this event (a heading, a list item, a subject line) rather than composing a fresh phrasing, and keep the word order and word choice as close to that source wording as title case and the length limit allow - do not vary phrasing, word order, or word choice between what is effectively the same heading.
 - description: one to three plain sentences of the detail a parent needs - what it is, who it is for, what to bring, what it costs. Quote figures and requirements from the email rather than paraphrasing them loosely. No markdown, no bullet characters, no links unless the link itself is the point.
 - location: where it happens, as stated. null when the email does not say. Do not assume "at the school".
 - category: exactly one of excursion, sport, payment, assembly, meeting, performance, holiday, uniform, deadline, other. Choose the one a parent would file it under; use payment when money is the point of the message, deadline when a form or response is, and other only when nothing else fits.
@@ -623,6 +623,13 @@ export function buildRequest({
   return {
     model,
     max_tokens: maxTokens,
+    // Zero, not the API default, because eventId (events.mjs's deriveEventId) is
+    // hashed from this call's own title text: any sampling variation between two
+    // extractions of the same email produces a different hash and therefore a
+    // duplicate row rather than the same event being recognised. Temperature 0
+    // does not by itself guarantee byte-identical output, hence the title
+    // instruction above also asks for source-anchored, non-paraphrased wording.
+    temperature: 0,
     system: buildSystemBlocks(),
     messages: [
       {
