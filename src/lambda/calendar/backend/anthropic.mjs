@@ -515,7 +515,9 @@ export function senderDomain(from) {
  *
  * An empty domain list means "watch nothing", not "watch everything": the
  * fail-closed direction, because the other one would put an entire personal
- * mailbox through the model.
+ * mailbox through the model. That default is not negotiable and no caller can
+ * change it by passing a different list; the one narrow exception is
+ * `extractFromMessage`'s `queryMatched` flag, documented there.
  *
  * @param {unknown} from A From header, or a bare domain.
  * @param {unknown} searchDomains
@@ -551,6 +553,23 @@ export function isWatchedSender(from, searchDomains) {
  * An EMPTY list emits no `<school_name>` line at all rather than an empty pair:
  * the block stays well formed, and the model is not shown a field with nothing
  * in it.
+ *
+ * PER PROCESSING JOB (TASK-056), the caller passes exactly that job's own values
+ * - `schoolNames: [job.schoolName]`, `searchDomains: [job.domain]` - never a
+ * union across jobs, so one school's name is never shown to the model while it
+ * reads another school's email.
+ *
+ * A JOB'S `searchTerms` ARE NEVER SENT (TASK-056, DECISION A). They are a Gmail
+ * RETRIEVAL hint and nothing else. Three reasons, none of which should be undone
+ * without re-reading them: (1) `<school_name>` asserts an identity fact - putting
+ * "Year 4 excursion" there tells the model the school is CALLED that, which
+ * corrupts the isSchoolEmail judgement the system prompt asks for and biases
+ * extraction toward inventing events that match the term; (2) `<watched_domain>`
+ * values go through `toDomainList` -> `normalizeDomain`, which would mangle free
+ * text into a pseudo-hostname and emit it as a domain; (3) every extra byte here
+ * is more untrusted user text inside the containment boundary, for no extraction
+ * benefit. This function takes no `searchTerms` parameter at all, so the rule is
+ * enforced by the signature rather than by remembering it.
  *
  * @param {object} args
  * @param {object} [args.message] A message from gmail.mjs's `fetchCandidateMessages`.
@@ -1079,6 +1098,24 @@ export async function callModel(
  * survived the retry policy - see EXTRACTION_STATUS. The unwatched-sender check
  * happens FIRST, before a single token is spent.
  *
+ * `queryMatched` - THE ONE WAY PAST THE COST GATE (TASK-056). Since processing
+ * jobs search on QUOTED TEXT as well as on sender domain (`buildJobQuery` in
+ * gmail.mjs), a message a job's own query returned may legitimately come from a
+ * sender outside `job.domain` - a newsletter relay, a P&C mailing list, a teacher
+ * writing from a personal account and quoting the school's name. Those are
+ * exactly the messages the widening exists to find, so dropping them here as
+ * `skipped_sender` would make the widened query pure cost: Gmail quota spent
+ * listing and fetching mail that is then binned. A caller that already applied
+ * its own retrieval filter therefore passes `queryMatched: true` to say "this
+ * message IS a candidate by construction, the gate has already been satisfied
+ * upstream".
+ *
+ * It is opt-in and defaults to FALSE, so every other caller - and any future one
+ * that forgets this flag exists - keeps the fail-closed behaviour, including for
+ * an empty domain list. The narrow shape matters: the flag asserts a fact about
+ * how the message was obtained; it is not a "skip the safety checks" switch, and
+ * it must never be set from anything a request body can influence.
+ *
  * The events in the result are the model's raw output. They are not yet dated,
  * bounded or keyed: `events.mjs` does that, and is the only thing that decides
  * what is storable.
@@ -1087,11 +1124,16 @@ export async function callModel(
  * @param {object} args.message A message from `fetchCandidateMessages`.
  * @param {unknown} [args.schoolNames]
  * @param {unknown} [args.searchDomains]
+ * @param {boolean} [args.queryMatched] The caller's own search returned this
+ *   message; skip the sender cost gate. See above.
  * @param {object} [deps] `createMessage`, `client`, `errorTypes`, `sleep`,
  *   `random`, `now`, `maxAttempts`, `baseDelayMs`, `maxDelayMs`, `env`, `log`.
  * @returns {Promise<{ messageId: string, status: string, events: object[], isSchoolEmail: boolean|null, stopReason: string, usage: object, message: object }>}
  */
-export async function extractFromMessage({ message, schoolNames = null, searchDomains = null } = {}, deps = {}) {
+export async function extractFromMessage(
+  { message, schoolNames = null, searchDomains = null, queryMatched = false } = {},
+  deps = {}
+) {
   if (!message || typeof message !== "object") {
     throw new Error("extractFromMessage: message is required");
   }
@@ -1103,8 +1145,14 @@ export async function extractFromMessage({ message, schoolNames = null, searchDo
   const base = { messageId, events: [], isSchoolEmail: null, stopReason: "", usage: emptyUsage(), message };
 
   if (!isWatchedSender(message.from, searchDomains)) {
-    logLine("calendar.anthropic.skipped", { messageId, reason: EXTRACTION_STATUS.SKIPPED_SENDER });
-    return { ...base, status: EXTRACTION_STATUS.SKIPPED_SENDER };
+    if (queryMatched !== true) {
+      logLine("calendar.anthropic.skipped", { messageId, reason: EXTRACTION_STATUS.SKIPPED_SENDER });
+      return { ...base, status: EXTRACTION_STATUS.SKIPPED_SENDER };
+    }
+    // Message id only: whose it is, and what it says, stay out of the log. This
+    // line exists so the cost of the text-match widening is visible to an
+    // operator rather than invisible.
+    logLine("calendar.anthropic.sender_gate_bypassed", { messageId });
   }
 
   const text = String(message.body || message.snippet || "").trim();
@@ -1181,7 +1229,10 @@ export async function extractFromMessage({ message, schoolNames = null, searchDo
  * @param {object} [deps] As `extractFromMessage`.
  * @returns {Promise<{ results: object[], events: object[], errors: Array<{id: string, error: string}>, usage: object, counts: Record<string, number> }>}
  */
-export async function extractEvents({ messages = [], schoolNames = null, searchDomains = null } = {}, deps = {}) {
+export async function extractEvents(
+  { messages = [], schoolNames = null, searchDomains = null, queryMatched = false } = {},
+  deps = {}
+) {
   const { env = process.env, log = null } = deps;
   const logLine = typeof log === "function" ? log : makeLogger(env);
 
@@ -1195,7 +1246,10 @@ export async function extractEvents({ messages = [], schoolNames = null, searchD
     const messageId = String(message?.id ?? "");
     let result;
     try {
-      result = await extractFromMessage({ message, schoolNames, searchDomains }, { ...deps, log: logLine });
+      result = await extractFromMessage(
+        { message, schoolNames, searchDomains, queryMatched },
+        { ...deps, log: logLine }
+      );
     } catch (error) {
       // Id and reason only: never the subject, the sender or the body.
       errors.push({ id: messageId, error: error?.message || String(error) });
