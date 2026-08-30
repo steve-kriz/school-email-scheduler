@@ -1112,6 +1112,13 @@ export function createCalendarApp(options = {}) {
     close.addEventListener("click", () => closeEvent());
     panel.appendChild(close);
 
+    // The panel lives inline at the bottom of the page grid, not in a fixed
+    // overlay - on a tall month view it can open below the fold, so bring it
+    // into view rather than leaving the user to notice nothing happened.
+    if (typeof panel.scrollIntoView === "function") {
+      panel.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+
     return panel;
   }
 
