@@ -623,6 +623,84 @@ input[type="checkbox"] {
   color: var(--alarm);
 }
 
+/* --- Settings: processing jobs (TASK-057) ---
+ *
+ * A job is one school, one domain and its search terms, and there can be twenty
+ * of them on this page. Two constraints shape everything below.
+ *
+ * ONE COLUMN, ALWAYS. Every one of these is `display: grid` with a single
+ * implicit column, so a row stacks label-over-field at any width and there is
+ * nothing to scroll sideways. NOTHING here sets `overflow-x`: a horizontally
+ * scrolling region inside a vertically scrolling page is the trap the phone
+ * block at the foot of this file explicitly refused for the month grid, and a
+ * form is no better a place for it.
+ *
+ * NO NEW TOUCH-TARGET RULE. Every control the job editor adds carries .btn or
+ * .btn-small and every input carries .field-input, so the 44px minimum and the
+ * 16px `font: inherit` are inherited from the blocks above - outside any media
+ * query, and not restated here where they could drift.
+ */
+
+.jobs {
+  display: grid;
+  gap: 0.75rem;
+}
+
+/* Same card language as .settings__section: a job reads as one distinct thing
+ * rather than as loose fields that happen to sit near each other. */
+.job {
+  display: grid;
+  gap: 0.5rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.job__head {
+  margin: 0;
+  font-size: 1rem;
+  /* A user-supplied name can be one very long word; wrap it rather than let it
+   * push the card wider than the page. */
+  overflow-wrap: break-word;
+}
+
+.job__terms {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.job__term {
+  display: grid;
+  gap: 0.25rem;
+}
+
+/* Wrap rather than shrink: two 44px buttons do not fit beside each other at
+ * 360px, and a button that gets smaller at a breakpoint is a hit area you
+ * cannot reason about. */
+.job__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+/* The armed state of the in-row remove. Bordered AND worded ("Remove <name>?"),
+ * never colour alone - see the docblock at the top of this file. */
+.job__confirm {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid var(--alarm);
+  border-radius: 6px;
+}
+
+.job__confirm p {
+  margin: 0;
+}
+
 /* --- Settings: disconnect section ---
  *
  * Same visual language as .panel, which is what the settings form next to it
@@ -733,5 +811,16 @@ input[type="checkbox"] {
    * rather than shrink. */
   .attention-actions {
     flex-wrap: wrap;
+  }
+
+  /* Padding only. The job card is already one column at every width, and its
+   * buttons and inputs keep their 44px and 16px exactly as everything else here
+   * does - this block buys back horizontal room, it does not shrink controls. */
+  .job {
+    padding: 0.6rem;
+  }
+
+  .job__confirm {
+    padding: 0.5rem;
   }
 }

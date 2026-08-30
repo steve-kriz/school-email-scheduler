@@ -14,12 +14,12 @@
  *    them. So the DOM is built exclusively with `document.createElement` and
  *    `textContent`. No HTML string is ever assembled and assigned into the
  *    document - not from data, not from constants. The same rule is applied to
- *    every `schoolNames` entry and every processing-job NAME, which come from
- *    settings rather than from mail: they are still stored raw (see
- *    backend/settings.mjs, which names escaping-on-render as its mitigation), so
- *    they are still rendered as text here - the joined school list goes into ONE
- *    `textContent`, and a job name goes into an `<option>`'s `textContent`,
- *    never into markup.
+ *    every processing job's NAME, which comes from settings rather than from
+ *    mail: they are still stored raw (see backend/settings.mjs, which names
+ *    escaping-on-render as its mitigation), so they are still rendered as text
+ *    here - the joined job list goes into ONE `textContent` on the identity
+ *    card and the calendar header, and each job's name also goes into a
+ *    `job-filter` `<option>`'s `textContent`, never into markup.
  *
  * 2. A DATE-ONLY DAY IS A CALENDAR DATE, NOT AN INSTANT. `new Date("2026-09-04")`
  *    parses as UTC midnight, which in Denver is 2026-09-03 at 18:00 - so an
@@ -610,25 +610,44 @@ export function createApiClient({ fetchImpl, onUnauthorized } = {}) {
 // --- Connection state --------------------------------------------------------
 
 /**
- * Read the saved school names off an `/auth/me` body.
+ * Read the saved processing jobs off an `/auth/me` body (TASK-055/TASK-057).
  *
- * Tolerant on purpose: the attribute is null on a row that has never had one, and
- * this page must not throw on the shape it is guaranteed to meet on a first run.
- * Blank entries are dropped so a stray one cannot render as "Watching mail for ,
- * St Mary's".
+ * Tolerant on purpose, exactly as the `schoolNames` reader it replaces was: the
+ * attribute is null on a row that has never had one, and this page must not throw
+ * on the shape it is guaranteed to meet on a first run. An entry that is not an
+ * object, or whose `name` is missing or blank, is dropped rather than rendered -
+ * a stray one would otherwise read as "Watching mail for , St Mary's".
+ *
+ * Returns the JOB OBJECTS, not their names: `needsSchool` only counts them, while
+ * the two places that display them want the names. Callers that want names map
+ * `job.name.trim()` themselves.
+ *
+ * Distinct from `processingJobList` below, which is stricter (requires a usable
+ * `id` too) because the job-filter dropdown's `<option value>` IS the id.
  *
  * @param {unknown} value
- * @returns {string[]}
+ * @returns {Array<{ name: string } & Record<string, unknown>>}
  */
-export function schoolNameList(value) {
+export function processingJobEntries(value) {
   if (!Array.isArray(value)) return [];
-  return value.map((entry) => (typeof entry === "string" ? entry.trim() : "")).filter((entry) => entry !== "");
+  return value.filter(
+    (entry) =>
+      entry !== null &&
+      typeof entry === "object" &&
+      !Array.isArray(entry) &&
+      typeof entry.name === "string" &&
+      entry.name.trim() !== ""
+  );
 }
 
 /**
- * Read the configured processing jobs off an `/auth/me` body, as `{ id, name }`.
+ * Read the configured processing jobs off an `/auth/me` body, as `{ id, name }`,
+ * for the job-filter dropdown specifically.
  *
- * THIS IS THE ONLY SOURCE OF A JOB'S NAME IN THIS APP. Events carry a
+ * Stricter than `processingJobEntries` above on purpose: the filter dropdown's
+ * `<option value>` IS the job id, so an entry missing a usable id would render
+ * as `value=""`, which is indistinguishable from the "All jobs" option. THIS IS
+ * THE ONLY SOURCE OF A JOB'S NAME FOR THAT CONTROL. Events carry a
  * `processingJobId` and nothing else (see backend/events.mjs `toEventJson`), so
  * the label on the filter control is a CLIENT-SIDE JOIN against the list the
  * page already fetched with `/auth/me`. Nothing here makes a request, and no
@@ -636,12 +655,12 @@ export function schoolNameList(value) {
  * would not, and only the settings-sourced list can name a job that happens to
  * have no events in the month on screen.
  *
- * Tolerant in exactly the same way as `schoolNameList` above, and for the same
- * reason: `/auth/me` projects an unset attribute as `null` rather than `[]`
- * (see backend/connections.mjs `toPublicJson`), so a non-array is the ordinary
- * first-run case, not a defensive afterthought. An entry with no usable id or
- * no usable name is dropped rather than rendered as a blank option nobody can
- * identify.
+ * Tolerant in exactly the same way as `processingJobEntries` above, and for the
+ * same reason: `/auth/me` projects an unset attribute as `null` rather than
+ * `[]` (see backend/connections.mjs `toPublicJson`), so a non-array is the
+ * ordinary first-run case, not a defensive afterthought. An entry with no
+ * usable id or no usable name is dropped rather than rendered as a blank
+ * option nobody can identify.
  *
  * @param {unknown} value The `processingJobs` field of an `/auth/me` body.
  * @returns {Array<{ id: string, name: string }>}
@@ -696,10 +715,13 @@ export function filterEventsByJob(events, jobId) {
  * still needs the setup prompt even though it is also not connected. Treating
  * them as one enum would drop one of the two messages in exactly those cases.
  *
- * `needsSchool` is true whenever `schoolNames` is absent, is not an array, or is
- * empty. `/auth/me` projects an unset attribute as null rather than `[]` (see
- * backend/connections.mjs), so "not an array" is the ordinary first-run case here,
- * not a defensive afterthought.
+ * `needsSchool` is true whenever `processingJobs` is absent, is not an array, is
+ * empty, or holds nothing nameable. `/auth/me` projects an unset attribute as null
+ * rather than `[]` (see backend/connections.mjs), so "not an array" is the ordinary
+ * first-run case here, not a defensive afterthought. It reads `processingJobs`
+ * rather than the removed `schoolNames` (TASK-055): a row that still carries the
+ * legacy attributes is migrated into one synthesised job by `toPublicJson`, so
+ * there is nothing left for this function to read under the old name.
  *
  * @param {object|null} me
  * @returns {{ signedIn: boolean, needsConnect: boolean, needsSchool: boolean, needsReauth: boolean }}
@@ -708,14 +730,14 @@ export function connectionView(me) {
   if (!me || typeof me !== "object") {
     return { signedIn: false, needsConnect: true, needsSchool: false, needsReauth: false };
   }
-  const schoolNames = schoolNameList(me.schoolNames);
+  const jobs = processingJobEntries(me.processingJobs);
   return {
     signedIn: true,
     // "unknown" (the connections table could not be read) is deliberately NOT
     // treated as "not connected": prompting a reconnect there would mint a
     // second grant over a working one to fix what was a blip.
     needsConnect: me.connectionStatus === "not_connected",
-    needsSchool: schoolNames.length === 0,
+    needsSchool: jobs.length === 0,
     needsReauth: me.lastScanStatus === REAUTH_SCAN_STATUS,
   };
 }
@@ -772,7 +794,7 @@ function schoolCard(doc) {
   return card;
 }
 
-/** Who is signed in, and which school we are watching. Both rendered as text. */
+/** Who is signed in, and which jobs we are watching. Both rendered as text. */
 function identityCard(doc, me) {
   const card = el(doc, "section", "card card--identity");
   card.setAttribute("id", "identity-card");
@@ -781,8 +803,8 @@ function identityCard(doc, me) {
   email.textContent = `Signed in as ${textOr(me?.email, "your Google account")}`;
   card.appendChild(email);
 
-  const schoolNames = schoolNameList(me?.schoolNames);
-  if (schoolNames.length > 0) {
+  const jobNames = processingJobEntries(me?.processingJobs).map((job) => job.name.trim());
+  if (jobNames.length > 0) {
     // Each name is stored raw and the JOINED list is rendered as TEXT here,
     // exactly as an email subject is. They are the user's own values, so an
     // injection is self-inflicted, but the storage layer names this escaping as
@@ -790,7 +812,7 @@ function identityCard(doc, me) {
     // than a list assembled out of markup.
     const school = el(doc, "p", "card-body");
     school.setAttribute("id", "identity-school-name");
-    school.textContent = `Watching mail for ${schoolNames.join(", ")}`;
+    school.textContent = `Watching mail for ${jobNames.join(", ")}`;
     card.appendChild(school);
   }
   return card;
@@ -1350,11 +1372,11 @@ export function createCalendarApp(options = {}) {
   function applyIdentity() {
     renderConnectionCards(doc, byId("connection-state"), state.me);
 
-    const schoolNames = schoolNameList(state.me?.schoolNames);
+    const jobNames = processingJobEntries(state.me?.processingJobs).map((job) => job.name.trim());
     const header = byId("school-name");
     // Text, not markup - every name is stored raw (see backend/settings.mjs).
     if (header) {
-      header.textContent = schoolNames.length === 0 ? "" : `Watching mail for ${schoolNames.join(", ")}`;
+      header.textContent = jobNames.length === 0 ? "" : `Watching mail for ${jobNames.join(", ")}`;
     }
 
     // The one place the job dropdown is (re)built - see `renderJobFilter`.

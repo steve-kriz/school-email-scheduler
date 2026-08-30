@@ -21,28 +21,39 @@
         <p id="settings-summary" class="settings-summary"></p>
 
         <form id="settings-form" class="panel settings-panel" novalidate>
-          <h2>Your school</h2>
+          <h2>Your processing jobs</h2>
 
-          <div class="field">
-            <label class="field-label" for="school-names-input">School names</label>
-            <textarea id="school-names-input" class="field-input" rows="3"></textarea>
-            <p class="field-hint">
-              One school name per line. Add every school whose mail you want us to
-              read, and any other name it uses.
-            </p>
-            <p id="error-schoolNames" class="field-error" role="alert" hidden></p>
-          </div>
+          <p class="field-hint">
+            A processing job is one school, one email domain its mail is sent
+            from, and any extra words worth searching for. Each job is searched on
+            its own and every event it finds is labelled with its name, so you can
+            add one job per school - or several for one school - without the
+            results getting mixed together. A public mail provider such as
+            gmail.com is not accepted as a domain.
+          </p>
 
-          <div class="field">
-            <label class="field-label" for="search-domains-input">School email domains</label>
-            <textarea id="search-domains-input" class="field-input" rows="3"></textarea>
-            <p class="field-hint">
-              One domain per line, or separated by commas. These are the sender
-              domains we treat as school mail, so a public mail provider such as
-              gmail.com is not accepted.
-            </p>
-            <p id="error-searchDomains" class="field-error" role="alert" hidden></p>
-          </div>
+          <!--
+            The ONLY container on this page whose children are built by script
+            (settings.js). Everything else here is static markup, including the
+            empty-state hint, the list-level error slot and the add button below,
+            so a script that failed to load still leaves a readable page.
+          -->
+          <div id="processing-jobs" class="jobs"></div>
+
+          <p id="processing-jobs-empty" class="field-hint" hidden>
+            No processing job is set up yet, so none of your mail is being
+            scanned. Add one below - nothing on this page is stored until you
+            press Save settings, so an added or removed job is only really gone
+            once you have saved.
+          </p>
+
+          <p id="error-processingJobs" class="field-error" role="alert" hidden></p>
+
+          <!--
+            type="button" is load-bearing: this sits inside #settings-form, and a
+            default type="submit" would save the whole form on every add.
+          -->
+          <button id="add-processing-job" type="button" class="btn">Add processing job</button>
 
           <h2>Automatic scanning</h2>
 
