@@ -36,17 +36,18 @@ variable "tenant" {
   type        = string
 }
 
-variable "terraform_remote_state_basestack_config" {
-  description = "Terraform Remote State Config"
-  type        = map(string)
-}
-
-# var.terraform_remote_state_legacystack_config and its
-# data.terraform_remote_state.legacystack in provider.tf were removed by
-# TASK-051 - nothing in this stack ever read an output from that state.
-# data.terraform_remote_state.basestack above is NOT dead: the Lambda's
-# vpc_config and security group are built from its private_subnet_ids and
-# vpc_id outputs.
+# var.terraform_remote_state_basestack_config and its
+# data.terraform_remote_state.basestack in provider.tf were removed by TASK-052,
+# which deleted the Lambda's vpc_config and aws_security_group.calendar_sg - the
+# only two consumers of that state's private_subnet_ids and vpc_id outputs. The
+# declaration and the tfvars key in config/dev/au.tfvars went in the SAME change
+# (an orphaned tfvars key only warns, but a declaration with no default and no
+# value is a hard error, so the two sides must move together).
+#
+# var.terraform_remote_state_legacystack_config and its own
+# data.terraform_remote_state.legacystack had already been removed by TASK-051 -
+# nothing in this stack ever read an output from that state. This stack now
+# reads NO remote state at all.
 
 # var.timezone, var.geo_id and var.language - per-tenant maps keyed au/uk/us -
 # were removed by TASK-051. Nothing referenced them, and this stack now deploys

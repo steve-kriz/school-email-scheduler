@@ -42,9 +42,12 @@ function stripHclComments(content) {
 // `Resource = "arn:aws:logs:*:*:*"`.
 const UNSCOPED_RESOURCE = /Resource\s*=\s*"\*"/;
 
-// The only statements allowed an unscoped resource. The VPC network-interface
-// actions do not support resource-level permissions, so AWS requires "*".
-const ALLOWED_UNSCOPED_SIDS = ['VPCNetworkInterfaces'];
+// The only statements allowed an unscoped resource. Until TASK-052 this was
+// ['VPCNetworkInterfaces'] - the EC2 network-interface actions AWS refuses to
+// let you resource-scope. TASK-052 detached the function from the VPC, so that
+// statement is gone and NO statement in this policy may use Resource = "*" any
+// more. The empty array is the assertion, not a placeholder.
+const ALLOWED_UNSCOPED_SIDS = [];
 
 /**
  * Returns the calendar Lambda's inline IAM policy text with HCL comment lines
@@ -167,23 +170,56 @@ describe('Calendar Lambda Terraform Unit Tests', () => {
       });
     });
 
-    describe('Scenario: VPC configuration', () => {
-      it('Given aws_lambda_function, Then vpc_config block exists', () => {
-        const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
-        assert.ok(tfContent.includes('vpc_config {'),
-          'vpc_config block not found');
+    // INVERTED BY TASK-052 (was "Scenario: VPC configuration", asserting a
+    // vpc_config block existed with security_group_ids =
+    // [aws_security_group.calendar_sg.id] and subnet_ids =
+    // data.terraform_remote_state.basestack.outputs.private_subnet_ids).
+    // TASK-052 deliberately removed the VPC attachment; the function runs on
+    // AWS-managed networking. These assertions now pin the ABSENCE of each of
+    // the three things they used to require.
+    describe('Scenario: No VPC configuration (TASK-052)', () => {
+      it('Given aws_lambda_function, Then no vpc_config block exists', () => {
+        const tfContent = stripHclComments(
+          fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8'));
+        assert.ok(!/vpc_config\s*\{/.test(tfContent),
+          'a vpc_config block is declared; TASK-052 removed the VPC attachment on purpose');
+        assert.ok(!tfContent.includes('vpc_config'),
+          'vpc_config is still referenced in code (an empty placeholder still attaches nothing but signals intent to)');
       });
 
-      it('When vpc_config is set, Then security_group_ids includes calendar security group', () => {
-        const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
-        assert.ok(tfContent.includes('security_group_ids = [aws_security_group.calendar_sg.id]'),
-          'security_group_ids not correctly set');
+      it('When the Lambda is configured, Then it names no security_group_ids and no calendar security group', () => {
+        const tfContent = stripHclComments(
+          fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8'));
+        assert.ok(!tfContent.includes('security_group_ids'),
+          'security_group_ids survives with no vpc_config to carry it');
+        assert.ok(!tfContent.includes('aws_security_group.calendar_sg'),
+          'aws_security_group.calendar_sg is still referenced, but the resource was removed');
       });
 
-      it('When vpc_config is set, Then subnet_ids are basestack private_subnet_ids', () => {
+      it('When the Lambda is configured, Then it names no subnet_ids and reads no basestack output', () => {
+        const tfContent = stripHclComments(
+          fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8'));
+        assert.ok(!tfContent.includes('subnet_ids'),
+          'subnet_ids survives with no vpc_config to carry it');
+        assert.ok(!tfContent.includes('data.terraform_remote_state.basestack'),
+          'lambda_calendar.tf still reads data.terraform_remote_state.basestack, which no longer exists');
+      });
+
+      it('And a comment records that the no-VPC placement is deliberate, what it gives up and why it is safe', () => {
         const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
-        assert.ok(tfContent.includes('subnet_ids         = data.terraform_remote_state.basestack.outputs.private_subnet_ids'),
-          'subnet_ids not correctly set');
+        const comments = tfContent.split('\n').filter(line => /^\s*(#|\/\/)/.test(line)).join('\n');
+        assert.ok(/deliberate/i.test(comments),
+          'no comment states the no-VPC placement is deliberate; a future reader would "restore" it as a bug');
+        assert.ok(/NAT|egress IP|fixed .*IP/i.test(comments),
+          'the comment does not name the loss of a fixed NAT egress IP');
+        assert.ok(/isolation/i.test(comments),
+          'the comment does not name the loss of network-layer isolation');
+        assert.ok(/vpc[_ ]?endpoint/i.test(comments),
+          'the comment does not explain that nothing used a VPC endpoint');
+        assert.ok(/public endpoint/i.test(comments),
+          'the comment does not explain that every dependency is a public endpoint');
+        assert.ok(/SourceVpc/i.test(comments),
+          'the comment does not explain that no IAM/KMS grant is scoped by a source-VPC condition');
       });
     });
 
@@ -222,7 +258,10 @@ describe('Calendar Lambda Terraform Unit Tests', () => {
     });
 
     describe('Scenario: IAM policy scoping', () => {
-      it('Given iam_policy for calendar lambda, Then the statements using an unscoped Resource = "*" are exactly the VPC network-interface statement', () => {
+      // INVERTED BY TASK-052: the title used to end "... are exactly the VPC
+      // network-interface statement". With the VPC attachment gone there is no
+      // statement AWS refuses to scope, so the expected set is empty.
+      it('Given iam_policy for calendar lambda, Then NO statement uses an unscoped Resource = "*"', () => {
         const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
         const policyText = extractCalendarPolicy(tfContent);
         const statements = parsePolicyStatements(policyText);
@@ -235,8 +274,18 @@ describe('Calendar Lambda Terraform Unit Tests', () => {
         }
 
         assert.deepStrictEqual(sidsWithUnscopedResource(policyText), ALLOWED_UNSCOPED_SIDS,
-          'the statements granting an unscoped Resource = "*" must be exactly ' +
-          `${ALLOWED_UNSCOPED_SIDS.join(', ')} (the EC2 network-interface actions AWS cannot scope)`);
+          'no statement in the calendar policy may grant an unscoped Resource = "*" since ' +
+          'TASK-052 removed VPCNetworkInterfaces with the VPC attachment');
+
+        // The VPC statement itself, and any ENI grant by any name, must be gone.
+        assert.ok(!statements.some(statement => statement.sid === 'VPCNetworkInterfaces'),
+          'the VPCNetworkInterfaces statement survives, but the function has no ENIs to manage');
+        assert.ok(!/ec2:\w*NetworkInterface/.test(policyText),
+          'an ec2:*NetworkInterface action survives in the calendar policy');
+        assert.ok(!/ec2:\w*PrivateIpAddresses/.test(policyText),
+          'an ec2:*PrivateIpAddresses action survives in the calendar policy');
+        assert.ok(!/"ec2:/.test(policyText),
+          'the calendar policy still grants an ec2:* action of some kind');
 
         // CloudWatch Logs is scoped-with-wildcards, not unscoped: it must keep
         // its logs ARN pattern rather than degrade to "*".
@@ -295,7 +344,10 @@ describe('Calendar Lambda Terraform Unit Tests', () => {
           const mutatedSids = sidsWithUnscopedResource(
             extractCalendarPolicy(fs.readFileSync(fixturePath, 'utf-8')));
 
-          assert.deepStrictEqual(mutatedSids, ['KMSCalendarKey', 'VPCNetworkInterfaces'],
+          // 'VPCNetworkInterfaces' was the second element here until TASK-052
+          // deleted that statement; the KMS mutation is now the ONLY unscoped
+          // grant the fixture can produce.
+          assert.deepStrictEqual(mutatedSids, ['KMSCalendarKey'],
             'the mutated fixture should attribute an unscoped resource to the KMS statement');
           assert.throws(
             () => assert.deepStrictEqual(mutatedSids, ALLOWED_UNSCOPED_SIDS),
@@ -348,7 +400,10 @@ describe('Calendar Lambda Terraform Unit Tests', () => {
           const mutatedSids = sidsWithUnscopedResource(
             extractCalendarPolicy(fs.readFileSync(fixturePath, 'utf-8')));
 
-          assert.deepStrictEqual(mutatedSids, ['SidLastStatement', 'VPCNetworkInterfaces'],
+          // 'VPCNetworkInterfaces' was the second element here until TASK-052
+          // deleted that statement; the injected Sid-last statement is now the
+          // only unscoped grant, and it must still be reported.
+          assert.deepStrictEqual(mutatedSids, ['SidLastStatement'],
             'the Sid-last statement\'s unscoped Resource must be attributed and reported ' +
             'even though the Statement marker has no surrounding whitespace');
         } finally {
@@ -453,29 +508,46 @@ describe('Calendar Lambda Terraform Unit Tests', () => {
       });
     });
 
-    describe('Scenario: Security group configuration', () => {
-      it('Given aws_security_group for calendar lambda, Then name is ${local.name_prefix}-school-calendar-sg', () => {
-        const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
-        assert.ok(tfContent.includes('name        = "${local.name_prefix}-school-calendar-sg"'),
-          'security group name not correctly set');
+    // INVERTED BY TASK-052 (was "Scenario: Security group configuration",
+    // asserting aws_security_group.calendar_sg existed, was named
+    // "${local.name_prefix}-school-calendar-sg", allowed all egress and declared
+    // no ingress). The SG existed only to satisfy the VPC attachment; with the
+    // attachment gone it had no consumer and was removed. These assertions now
+    // pin its absence, including the egress/name details they used to require.
+    describe('Scenario: No security group survives the VPC removal (TASK-052)', () => {
+      it('Given lambda_calendar.tf, Then aws_security_group.calendar_sg is not declared', () => {
+        const tfContent = stripHclComments(
+          fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8'));
+        assert.ok(!/resource\s+"aws_security_group"\s+"calendar_sg"/.test(tfContent),
+          'aws_security_group.calendar_sg is still declared with nothing to attach it to');
+        assert.ok(!tfContent.includes('"${local.name_prefix}-school-calendar-sg"'),
+          'the school-calendar-sg name survives in code');
       });
 
-      it('When security group is configured, Then it allows all egress', () => {
-        const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
-        assert.ok(tfContent.includes('egress {'), 'egress block not found');
-        assert.ok(tfContent.includes('from_port   = 0'), 'egress from_port not set');
-        assert.ok(tfContent.includes('to_port     = 0'), 'egress to_port not set');
-        assert.ok(tfContent.includes('protocol    = "-1"'), 'egress protocol not set to all');
-        assert.ok(tfContent.includes('cidr_blocks = ["0.0.0.0/0"]'), 'egress CIDR not set to all');
+      it('And no egress/ingress rule block or vpc_id survives in lambda_calendar.tf', () => {
+        const tfContent = stripHclComments(
+          fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8'));
+        assert.ok(!/^\s*egress\s*\{/m.test(tfContent), 'an egress block survives with no security group to own it');
+        assert.ok(!/^\s*ingress\s*\{/m.test(tfContent), 'an ingress block survives with no security group to own it');
+        assert.ok(!tfContent.includes('cidr_blocks'), 'a cidr_blocks assignment survives');
+        assert.ok(!tfContent.includes('vpc_id'), 'a vpc_id assignment survives');
       });
 
-      it('When security group is configured, Then it declares no ingress rule', () => {
+      it('And no .tf file anywhere under terraform/ declares aws_security_group or aws_security_group_rule', () => {
+        const offenders = [];
+        for (const file of fs.readdirSync(TERRAFORM_DIR).filter(f => f.endsWith('.tf'))) {
+          const code = stripHclComments(fs.readFileSync(path.join(TERRAFORM_DIR, file), 'utf-8'));
+          if (/resource\s+"aws_security_group(_rule)?"/.test(code)) offenders.push(file);
+        }
+        assert.deepStrictEqual(offenders, [],
+          `these files still declare a security group resource: ${offenders.join(', ')}`);
+      });
+
+      it('And the removal comment warns about the DependencyViolation ENI-cleanup hazard on a real apply', () => {
         const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
-        // Find the security group block
-        const sgMatch = tfContent.match(/resource "aws_security_group" "calendar_sg" \{[\s\S]*?\n\}/);
-        assert.ok(sgMatch, 'security group resource not found');
-        const sgBlock = sgMatch[0];
-        assert.ok(!sgBlock.includes('ingress {'), 'security group should not have ingress rules');
+        assert.ok(/DependencyViolation/.test(tfContent),
+          'nothing warns that detaching a Lambda from a VPC can fail the SG delete with DependencyViolation ' +
+          'while AWS is still reaping the service-managed ENIs');
       });
     });
 

@@ -36,7 +36,8 @@ import {
   maskCommentsAndStrings,
   INIT_SCRIPTS,
   TFVARS_FILES,
-  REMOTE_STATE_MAPS
+  REMOTE_STATE_MAPS,
+  REMOVED_REMOTE_STATE_MAPS
 } from '../helpers/tf-state-locking.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -408,27 +409,40 @@ describe('Feature: Terraform state locking uses S3 alone', () => {
       workspace = undefined;
     });
 
+    // INVERTED BY TASK-052. This used to loop over ['basestack'], require that
+    // data source to EXIST, and check only that it no longer indexed
+    // dynamodb_table. TASK-052 removed the Lambda's vpc_config and
+    // aws_security_group.calendar_sg - basestack's only readers - and deleted
+    // the data source, its variable and its tfvars key with them. There is no
+    // remote state left in this stack, which is a strictly stronger guarantee
+    // that no data source indexes a lock table key.
     it('Given terraform/provider.tf, Then no data source indexes a dynamodb_table key', () => {
-      // basestack is the only remote state left: TASK-051 deleted the
-      // legacystack one. Its absence is asserted below so a shorter loop cannot
-      // be mistaken for dropped coverage.
-      for (const dataSource of ['basestack']) {
-        const body = extractLabelledBlock(
-          providerContent, `data\\s+"terraform_remote_state"\\s+"${dataSource}"`);
-        assert.ok(body, `no terraform_remote_state "${dataSource}" data source found`);
-        assert.ok(!maskCommentsAndStrings(body).includes('dynamodb_table'),
-          `the ${dataSource} data source still indexes ["dynamodb_table"]`);
-      }
+      assert.ok(!maskCommentsAndStrings(providerContent).includes('dynamodb_table'),
+        'provider.tf still indexes ["dynamodb_table"] somewhere');
       assert.ok(
         !extractLabelledBlock(providerContent, 'data\\s+"terraform_remote_state"\\s+"legacystack"'),
         'data "terraform_remote_state" "legacystack" is still declared; TASK-051 removed it');
+      assert.ok(
+        !extractLabelledBlock(providerContent, 'data\\s+"terraform_remote_state"\\s+"basestack"'),
+        'data "terraform_remote_state" "basestack" is still declared; TASK-052 removed it with the VPC attachment');
+      assert.ok(!/data\s+"terraform_remote_state"/.test(maskCommentsAndStrings(providerContent)),
+        'provider.tf still declares a terraform_remote_state data source of some name');
+    });
+
+    // The evaluate-the-map loop that used to live here ran over
+    // REMOTE_STATE_MAPS = ['terraform_remote_state_basestack_config'] and
+    // asserted terraform evaluated it to a non-empty bucket/key/region with no
+    // dynamodb_table. That variable no longer exists, so REMOTE_STATE_MAPS is
+    // empty and the loop is vacuous. It is replaced - not dropped - by an
+    // executed assertion that terraform itself now rejects every removed map.
+    it('And REMOTE_STATE_MAPS is empty, so the per-map evaluation loop below is vacuous by design', () => {
+      assert.deepEqual(REMOTE_STATE_MAPS, [],
+        'REMOTE_STATE_MAPS is non-empty; re-add the per-map evaluation coverage if a remote state comes back');
     });
 
     for (const varFile of TFVARS_FILES) {
       for (const mapName of REMOTE_STATE_MAPS) {
         it(`Given ${varFile}, When ${mapName} is evaluated by terraform, Then it declares bucket, key and region and no dynamodb_table`, () => {
-          // Evaluated by terraform itself, so this reflects what a plan would
-          // really see - not what a regex over the file guesses.
           const map = evaluateMap(workspace, `var.${mapName}`, varFile);
           assert.deepEqual(Object.keys(map).sort(), ['bucket', 'key', 'region'],
             `${varFile} :: ${mapName} evaluated to keys ${Object.keys(map).sort().join(', ')}`);
@@ -438,18 +452,31 @@ describe('Feature: Terraform state locking uses S3 alone', () => {
           }
         });
       }
+
+      for (const mapName of REMOVED_REMOTE_STATE_MAPS) {
+        it(`Given ${varFile}, When terraform is asked to evaluate var.${mapName}, Then it rejects it as undeclared`, () => {
+          const result = tryConsole(workspace, `var.${mapName}`, varFile);
+          assert.equal(result.ok, false,
+            `terraform still evaluated var.${mapName}, so the declaration survives somewhere`);
+          assert.match(result.error, /not been declared|Reference to undeclared/,
+            `expected an undeclared-variable error for var.${mapName}, got: ${result.error}`);
+        });
+      }
     }
 
-    it('And the removed key is genuinely gone: indexing it errors with "Invalid index" (the desync failure path)', () => {
-      // This is the map-key/index desync hazard the ticket calls out. It also
-      // proves the scenario above is discriminating: if dynamodb_table were
-      // still in the maps, this would succeed instead of erroring.
+    // INVERTED BY TASK-052. This used to index
+    // var.terraform_remote_state_basestack_config["dynamodb_table"] and require
+    // an "Invalid index" error, proving the key had been dropped from a map that
+    // still existed. The whole map is gone now, so the same expression fails one
+    // step earlier - on the undeclared VARIABLE, not the missing key. Both are
+    // the desync failure path; this pins the stronger one.
+    it('And the whole map is gone, not just the key: indexing it errors on the undeclared variable', () => {
       const result = tryConsole(
         workspace, 'var.terraform_remote_state_basestack_config["dynamodb_table"]', TFVARS_FILES[0]);
       assert.equal(result.ok, false,
-        'indexing ["dynamodb_table"] still succeeded, so the key was NOT removed from the tfvars map');
-      assert.match(result.error, /Invalid index/,
-        `expected terraform to reject the missing key with "Invalid index", got: ${result.error}`);
+        'indexing ["dynamodb_table"] still succeeded, so the basestack map was NOT removed');
+      assert.match(result.error, /not been declared|Reference to undeclared|Invalid index/,
+        `expected terraform to reject the removed map, got: ${result.error}`);
     });
   });
 

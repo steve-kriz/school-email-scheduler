@@ -30,7 +30,8 @@ import {
   parseInitScript,
   INIT_SCRIPTS,
   TFVARS_FILES,
-  REMOTE_STATE_MAPS
+  REMOTE_STATE_MAPS,
+  REMOVED_REMOTE_STATE_MAPS
 } from '../helpers/tf-state-locking.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -170,26 +171,50 @@ describe('TASK-050 unit: S3-native state locking replaces the DynamoDB lock tabl
         'data "terraform_remote_state" "legacystack" is still declared in provider.tf; TASK-051 removed it');
     });
 
-    for (const dataSource of ['basestack']) {
-      it(`${dataSource} indexes exactly bucket, key and region`, () => {
-        const body = extractLabelledBlock(
-          providerContent, `data\\s+"terraform_remote_state"\\s+"${dataSource}"`);
-        assert.ok(body, `no terraform_remote_state "${dataSource}" data source found`);
+    // INVERTED BY TASK-052. This loop used to run over ['basestack'] and assert
+    // that data source indexed exactly bucket/key/region and no longer indexed
+    // dynamodb_table. TASK-052 removed the Lambda's vpc_config and
+    // aws_security_group.calendar_sg - basestack's only two readers - and
+    // deleted the data source with them, so there is no remote state left in
+    // this stack at all. The strongest form of "it does not index a lock table"
+    // is now "it does not exist", asserted explicitly rather than by letting an
+    // emptied loop body run zero times.
+    it('basestack is gone too, so no remote state data source survives to index anything', () => {
+      assert.ok(
+        !extractLabelledBlock(providerContent, 'data\\s+"terraform_remote_state"\\s+"basestack"'),
+        'data "terraform_remote_state" "basestack" is still declared in provider.tf; TASK-052 removed it ' +
+        'along with the VPC attachment that was its last reader');
+      assert.ok(!/data\s+"terraform_remote_state"/.test(maskCommentsAndStrings(providerContent)),
+        'provider.tf still declares some terraform_remote_state data source');
+    });
 
-        const config = extractLabelledBlock(body, 'config\\s*=');
-        assert.ok(config, `no config block found in the ${dataSource} data source`);
+    it('and with no remote state left, provider.tf indexes no dynamodb_table lock table key anywhere', () => {
+      assert.ok(!maskCommentsAndStrings(providerContent).includes('dynamodb_table'),
+        'provider.tf still indexes ["dynamodb_table"], which is a hard Invalid index error ' +
+        'once the key is gone from the tfvars maps');
+      assert.ok(!maskCommentsAndStrings(providerContent).includes('terraform_remote_state_basestack_config'),
+        'provider.tf still reads var.terraform_remote_state_basestack_config, which no longer exists');
+    });
 
-        const keys = [...parseAssignments(config).keys()].sort();
-        assert.deepEqual(keys, ['bucket', 'key', 'region'],
-          `${dataSource} config should index exactly bucket/key/region, got: ${keys.join(', ')}`);
-      });
+    it('REMOTE_STATE_MAPS is empty on purpose, and the loops below are therefore vacuous by design', () => {
+      // Guards the shared helper constant itself: if a future ticket re-adds a
+      // remote state it must re-add it here too, or the tfvars loops below
+      // would go on silently checking nothing.
+      assert.deepEqual(REMOTE_STATE_MAPS, [],
+        'REMOTE_STATE_MAPS is non-empty, but this stack reads no remote state since TASK-052');
+      assert.deepEqual([...REMOVED_REMOTE_STATE_MAPS].sort(),
+        ['terraform_remote_state_basestack_config', 'terraform_remote_state_legacystack_config'],
+        'REMOVED_REMOTE_STATE_MAPS must list both deleted remote-state config variables');
+    });
 
-      it(`${dataSource} no longer indexes the dynamodb_table map key`, () => {
-        const body = extractLabelledBlock(
-          providerContent, `data\\s+"terraform_remote_state"\\s+"${dataSource}"`);
-        assert.ok(!maskCommentsAndStrings(body).includes('dynamodb_table'),
-          `${dataSource} still indexes ["dynamodb_table"], which is a hard Invalid index ` +
-          'error once the key is gone from the tfvars maps');
+    for (const mapName of REMOVED_REMOTE_STATE_MAPS) {
+      it(`neither provider.tf nor variables.tf mentions ${mapName} in code`, () => {
+        assert.ok(!maskCommentsAndStrings(providerContent).includes(mapName),
+          `provider.tf still references ${mapName}`);
+        const variablesContent = readTf('variables.tf');
+        assert.ok(!new RegExp(`^\\s*variable\\s+"${mapName}"`, 'm')
+          .test(maskCommentsAndStrings(variablesContent)),
+        `variables.tf still declares variable "${mapName}"`);
       });
     }
   });
@@ -262,26 +287,26 @@ describe('TASK-050 unit: S3-native state locking replaces the DynamoDB lock tabl
   // -------------------------------------------------------------------------
   describe('the tfvars remote-state maps drop dynamodb_table and keep everything else', () => {
     for (const tfvars of TFVARS_FILES) {
-      for (const mapName of REMOTE_STATE_MAPS) {
-        it(`${tfvars} :: ${mapName} declares exactly bucket, key and region`, () => {
+      // INVERTED BY TASK-052. This loop used to run over REMOTE_STATE_MAPS -
+      // then ['terraform_remote_state_basestack_config'] - and require that map
+      // to declare exactly bucket/key/region with non-empty values. TASK-052
+      // deleted the variable, its data source and this tfvars key together, so
+      // REMOTE_STATE_MAPS is now empty and the loop body no longer runs. The
+      // assertion is replaced, not dropped: each REMOVED map must be absent.
+      for (const mapName of REMOVED_REMOTE_STATE_MAPS) {
+        it(`${tfvars} :: declares no ${mapName} map at all`, () => {
           const content = readTf(...tfvars.split('/'));
-          const body = extractMapLiteral(content, mapName);
-          assert.ok(body, `${tfvars} declares no ${mapName} map`);
-
-          const assignments = parseAssignments(body);
-          const keys = [...assignments.keys()].sort();
-          assert.deepEqual(keys, ['bucket', 'key', 'region'],
-            `${tfvars} :: ${mapName} should declare exactly bucket/key/region, got: ${keys.join(', ')}`);
-
-          // bucket/key/region must still be real, non-empty string literals -
-          // "removed dynamodb_table" must not have meant "emptied the map".
-          for (const key of ['bucket', 'key', 'region']) {
-            const value = unquote(assignments.get(key));
-            assert.ok(value && value.length > 0,
-              `${tfvars} :: ${mapName}.${key} is not a non-empty string literal (got ${assignments.get(key)})`);
-          }
+          assert.ok(!extractMapLiteral(maskCommentsOnly(content), mapName),
+            `${tfvars} still declares a ${mapName} map, but its variable declaration was removed - ` +
+            'terraform would warn "Value for undeclared variable"');
         });
       }
+
+      it(`${tfvars} :: carries no remote-state config map of any name`, () => {
+        const content = maskCommentsOnly(readTf(...tfvars.split('/')));
+        assert.ok(!/terraform_remote_state\w*\s*=/.test(content),
+          `${tfvars} still assigns a terraform_remote_state* map; this stack reads no remote state`);
+      });
 
       it(`${tfvars} does not mention dynamodb_table at all`, () => {
         const content = readTf(...tfvars.split('/'));

@@ -15,6 +15,11 @@
 #
 # The ALB itself is untouched: it is basestack-owned and shared with the chatbot
 # (listener rule priority 119), and was never ours to remove.
+#
+# NETWORKING (TASK-052): this function is NOT in a VPC. The vpc_config, the
+# security group it referenced and the basestack remote state that supplied the
+# subnet and VPC ids are all gone. See the comment on the function resource
+# below for what that gives up and why it is safe here.
 # =============================================================================
 
 
@@ -277,10 +282,44 @@ resource "aws_lambda_function" "calendar" {
     Purpose = "School Calendar"
   })
 
-  vpc_config {
-    security_group_ids = [aws_security_group.calendar_sg.id]
-    subnet_ids         = data.terraform_remote_state.basestack.outputs.private_subnet_ids
-  }
+  # THIS FUNCTION HAS NO `vpc_config` AND IS NOT ATTACHED TO ANY VPC. That is
+  # deliberate, not an oversight - do not "restore" it. TASK-052 removed the
+  # `vpc_config` block (private subnets + aws_security_group.calendar_sg), the
+  # security group itself, the VPCNetworkInterfaces IAM statement below, and
+  # data.terraform_remote_state.basestack with it - that block was the state's
+  # only reader.
+  #
+  # The Lambda now runs on AWS-managed networking: the service gives it outbound
+  # internet and public AWS service endpoints directly, with no ENIs, no subnets
+  # and no NAT gateway in the path.
+  #
+  # What that gives up, stated plainly so nobody reads it as a regression later:
+  #   * No fixed egress IP. Outbound traffic no longer leaves through the
+  #     basestack NAT's stable public IP, so this function cannot be allow-listed
+  #     by source IP at any destination. Nothing it calls does that today; if a
+  #     future dependency demands a static source IP, that requirement - not
+  #     "isolation" in the abstract - is what would bring a VPC back.
+  #   * No network-layer isolation. There is no security group and no subnet
+  #     routing in front of the function's outbound calls; egress control is
+  #     whatever the code chooses to connect to. (The old SG was egress-all to
+  #     0.0.0.0/0 with no ingress rule, so it constrained nothing in practice -
+  #     it existed only to satisfy the VPC attachment.)
+  #
+  # Why that is safe HERE specifically:
+  #   * There is no `aws_vpc_endpoint` anywhere in terraform/, so nothing was
+  #     reaching an AWS service over PrivateLink that now cannot.
+  #   * No IAM or KMS policy in this repo carries an `aws:SourceVpc` or
+  #     `aws:SourceVpce` condition, so no grant was scoped to arriving from that
+  #     VPC and no access is silently lost by leaving it.
+  #   * Every dependency is a PUBLIC endpoint reachable without a VPC: DynamoDB,
+  #     KMS, Secrets Manager, EventBridge Scheduler and CloudWatch Logs (all
+  #     constructed in src/lambda/calendar/backend/*.mjs with no `endpoint`
+  #     override), plus Google OAuth/Gmail and Anthropic over the internet.
+  #
+  # The VPC attachment was inherited house style copied from the other basestack
+  # apps, never a connectivity or isolation requirement of this one. Ingress is
+  # unaffected either way: a function URL request is delivered as an INVOCATION
+  # by the Lambda service, never as a network connection into a subnet.
 
   environment {
     variables = {
@@ -346,12 +385,16 @@ resource "aws_iam_role" "calendar_lambda_exec_role" {
 }
 
 # --- IAM Policy ---
-# Deliberately scoped: every statement names its resource except the two that
-# AWS does not allow to be scoped (CloudWatch Logs stream creation and the VPC
-# network-interface actions).
+# Deliberately scoped: every statement names its resource, and since TASK-052
+# NO statement here uses Resource = "*" at all. The one that did was
+# VPCNetworkInterfaces (five ec2:*NetworkInterface / *PrivateIpAddresses actions
+# that AWS does not allow to be resource-scoped); it was removed with the
+# function's vpc_config, because a Lambda that is not attached to a VPC never
+# has ENIs created on its behalf and so needs none of them. CloudWatchLogs is
+# the loosest statement left and is still scoped to "arn:aws:logs:*:*:*".
 resource "aws_iam_policy" "calendar_lambda_policy" {
   name        = "${local.name_prefix}-school-calendar-policy"
-  description = "Policy for school calendar Lambda - CloudWatch Logs + VPC + DynamoDB + KMS + Secrets Manager"
+  description = "Policy for school calendar Lambda - CloudWatch Logs + DynamoDB + KMS + Secrets Manager"
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -365,22 +408,6 @@ resource "aws_iam_policy" "calendar_lambda_policy" {
           "logs:PutLogEvents"
         ]
         Resource = "arn:aws:logs:*:*:*"
-      },
-      {
-        # Required for any VPC-attached Lambda: the service creates and tears
-        # down ENIs in the private subnets on the function's behalf. These
-        # actions do not support resource-level restrictions, so Resource
-        # must be "*".
-        Sid    = "VPCNetworkInterfaces"
-        Effect = "Allow"
-        Action = [
-          "ec2:CreateNetworkInterface",
-          "ec2:DescribeNetworkInterfaces",
-          "ec2:DeleteNetworkInterface",
-          "ec2:AssignPrivateIpAddresses",
-          "ec2:UnassignPrivateIpAddresses"
-        ]
-        Resource = "*"
       },
       {
         # Read/write on the two calendar tables: connections (OAuth state and
@@ -445,26 +472,20 @@ resource "aws_iam_role_policy_attachment" "calendar_policy_attach" {
   policy_arn = aws_iam_policy.calendar_lambda_policy.arn
 }
 
-# --- Security Group ---
-# Egress-only. No ingress rule is needed or wanted: a request arriving at the
-# function URL is delivered by the Lambda service as an INVOCATION, not as a
-# network connection to this ENI - exactly as the ALB used to deliver it before
-# TASK-049. Nothing outside ever opens a socket to this function, so an ingress
-# rule would grant reachability that does not exist and cannot be used.
-resource "aws_security_group" "calendar_sg" {
-  name        = "${local.name_prefix}-school-calendar-sg"
-  description = "Security group for school calendar Lambda"
-  vpc_id      = data.terraform_remote_state.basestack.outputs.vpc_id
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = var.tags
-}
+# TASK-052 removed aws_security_group.calendar_sg from here. It was egress-all
+# to 0.0.0.0/0 with no ingress rule, its vpc_id came from
+# data.terraform_remote_state.basestack, and its ONLY consumer was the
+# vpc_config on aws_lambda_function.calendar above - it existed to satisfy the
+# VPC attachment, not to constrain anything. With the attachment gone it had no
+# consumer and nothing left to attach to. This repo now declares no
+# aws_security_group and no aws_security_group_rule at all. See the networking
+# comment on the Lambda for what running outside a VPC gives up and why it is
+# safe here.
+#
+# ROLLOUT NOTE: detaching a Lambda from a VPC leaves the service-managed ENIs
+# behind for a while, so the first real apply can fail to delete this security
+# group with DependencyViolation. That is AWS being slow to reap ENIs, not a
+# broken plan - re-run the apply once the ENIs are gone.
 
 # --- Function URL (the ingress, TASK-049) ---
 #
