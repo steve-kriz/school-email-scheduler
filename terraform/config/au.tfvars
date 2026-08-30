@@ -5,7 +5,7 @@
 ##############################################
 project_name  = "receptionhq"
 region        = "ap-southeast-2"
-environment   = "dev"
+environment   = "prod"
 tenant        = "au"
 Alert_SNS_ARN = ""
 ##############################################

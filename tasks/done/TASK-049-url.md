@@ -1,11 +1,10 @@
 ---
 id: TASK-049
 title: URL
-status: in-progress
+status: done
 created: 2026-08-28T21:29:10.401Z
-updated: 2026-08-28T22:28:40.000Z
-agent: build-049
-activities: [{"activity":"ba","model":"claude-opus-4-8","startedAt":"2026-08-28T21:45:00.000Z","finishedAt":"2026-08-28T21:53:00.000Z","note":"DEFINED and PARKED on a blocking security decision. Confirmed all six conflict points the orchestrator supplied, then SIZED THE TICKET WELL BEYOND THEM. Established the ALB is NOT ours to remove - data.aws_lb.web_app_alb and data.aws_lb_listener are DATA SOURCES on a basestack ALB shared with the chatbot (which owns listener priority 119 to our 121), so remove the ALB can only mean remove this app four ALB resources. Established THE PUBLIC HOSTNAME CANNOT SURVIVE: aws_route53_record.this is an A-ALIAS to the ALB, a function URL is not a valid Route53 alias target, and a CNAME to it fails TLS because the cert is AWS-owned for the lambda-url domain. BIGGEST FINDING - THIS IS A CODE MIGRATION, NOT A TERRAFORM CHANGE: the handler is ALB-payload-shaped end to end (event.path, event.httpMethod, event.multiValueHeaders; buildResponse returns statusDescription plus multiValueHeaders; finalise inspects response.multiValueHeaders) while function URLs use payload format 2.0 and IGNORE multiValueHeaders on the response entirely, so an unmigrated response silently returns 200 with no Content-Type and no Set-Cookie and sign-in loops forever with nothing in the logs. Counted 168 occurrences of multiValueHeaders/statusDescription/httpMethod across 10 test files. TWO SILENT-BREAKAGE LANDMINES FOUND BY READING, NOT GUESSING: isScheduledScanEvent distinguishes an EventBridge scan from an HTTP request by httpMethod === undefined AND path === undefined, and BOTH are undefined in a format 2.0 event, so any HTTP request carrying a source property would be misrouted into a scan; and getQueryParam percent-decodes precisely because ALB delivers query values still encoded, while format 2.0 delivers them already decoded, so the OAuth code gets DOUBLE-DECODED and sign-in breaks only for values containing escapes - an intermittent-looking failure. Verified CloudFront is viable before offering it (the aws_global us-east-1 provider alias exists at provider.tf:32-46 and is currently UNUSED) but priced it honestly: needs a new us-east-1 ACM cert with DNS validation since basestack exports no cert, a CLOUDFRONT-scope ACL owned by this stack, and a CLOUDFRONT-scope re-issue of the rule group because the existing one is REGIONAL and its capacity is immutable. Wrote every acceptance criterion as an INVARIANT that holds under all three options so nothing presumes an answer. Also flagged the TASK-010 collision: that ticket is live on index.mjs and this one rewrites the same file response layer. Token/cost telemetry not correlated; 52615 total subagent tokens, direction unsplit, so tokensIn/tokensOut omitted rather than guessed"}]
+updated: 2026-08-30T09:00:00.000Z
+activities: [{"activity":"ba","model":"claude-opus-4-8","startedAt":"2026-08-28T21:45:00.000Z","finishedAt":"2026-08-28T21:53:00.000Z","note":"DEFINED and PARKED on a blocking security decision. Confirmed all six conflict points the orchestrator supplied, then SIZED THE TICKET WELL BEYOND THEM. Established the ALB is NOT ours to remove - data.aws_lb.web_app_alb and data.aws_lb_listener are DATA SOURCES on a basestack ALB shared with the chatbot (which owns listener priority 119 to our 121), so remove the ALB can only mean remove this app four ALB resources. Established THE PUBLIC HOSTNAME CANNOT SURVIVE: aws_route53_record.this is an A-ALIAS to the ALB, a function URL is not a valid Route53 alias target, and a CNAME to it fails TLS because the cert is AWS-owned for the lambda-url domain. BIGGEST FINDING - THIS IS A CODE MIGRATION, NOT A TERRAFORM CHANGE: the handler is ALB-payload-shaped end to end (event.path, event.httpMethod, event.multiValueHeaders; buildResponse returns statusDescription plus multiValueHeaders; finalise inspects response.multiValueHeaders) while function URLs use payload format 2.0 and IGNORE multiValueHeaders on the response entirely, so an unmigrated response silently returns 200 with no Content-Type and no Set-Cookie and sign-in loops forever with nothing in the logs. Counted 168 occurrences of multiValueHeaders/statusDescription/httpMethod across 10 test files. TWO SILENT-BREAKAGE LANDMINES FOUND BY READING, NOT GUESSING: isScheduledScanEvent distinguishes an EventBridge scan from an HTTP request by httpMethod === undefined AND path === undefined, and BOTH are undefined in a format 2.0 event, so any HTTP request carrying a source property would be misrouted into a scan; and getQueryParam percent-decodes precisely because ALB delivers query values still encoded, while format 2.0 delivers them already decoded, so the OAuth code gets DOUBLE-DECODED and sign-in breaks only for values containing escapes - an intermittent-looking failure. Verified CloudFront is viable before offering it (the aws_global us-east-1 provider alias exists at provider.tf:32-46 and is currently UNUSED) but priced it honestly: needs a new us-east-1 ACM cert with DNS validation since basestack exports no cert, a CLOUDFRONT-scope ACL owned by this stack, and a CLOUDFRONT-scope re-issue of the rule group because the existing one is REGIONAL and its capacity is immutable. Wrote every acceptance criterion as an INVARIANT that holds under all three options so nothing presumes an answer. Also flagged the TASK-010 collision: that ticket is live on index.mjs and this one rewrites the same file response layer. Token/cost telemetry not correlated; 52615 total subagent tokens, direction unsplit, so tokensIn/tokensOut omitted rather than guessed"},{"activity":"orchestrate-reclaim","startedAt":"2026-08-30T09:00:00.000Z","finishedAt":"2026-08-30T09:00:00.000Z","note":"Prior claim (agent: build-049) was stale: no branch/worktree or diff existed for this ticket at the start of this build pass, so the previous session's dispatch never actually ran the coder. Re-claimed under build-049b and dispatching orchestrate-coder now in an isolated worktree."},{"activity":"code","model":"claude-opus-5","startedAt":"2026-08-30T09:00:00.000Z","finishedAt":"2026-08-30T09:19:00.000Z","note":"Built in isolated worktree agent-ac4e75a0d7d06e2e2 on branch worktree-agent-ac4e75a0d7d06e2e2 (uncommitted at the time). Replaced the four ALB resources plus aws_route53_record.this with aws_lambda_function_url (authorization_type=NONE), an explicit InvokeFunctionUrl permission, and a function_url output; deleted waf_calendar.tf and the ALB-keyed CloudWatch alarm; removed the WAF rate-limit variables from variables.tf and all four tfvars. Migrated index.mjs/session.mjs/scan-schedule.mjs to payload format 2.0 (single-value headers, cookies array, no multiValueHeaders/statusDescription), fixing the OAuth double-decode and the scheduled-scan misdetection landmines the BA flagged. PUBLIC_BASE_URL is now derived per-request from requestContext.domainName/host (regex-validated) because the function URL id creates a Terraform dependency cycle if referenced from its own environment block; an explicit env var still overrides it for local dev. Deliberately did not touch any test file, per this column's instructions that testing is the Testing column's job. terraform fmt/validate clean; node --check clean on all four changed .mjs files. Token/cost telemetry not correlated; 153190 total subagent tokens, direction unsplit, so tokensIn/tokensOut omitted rather than guessed."},{"activity":"test","model":"claude-opus-5","startedAt":"2026-08-30T09:19:00.000Z","finishedAt":"2026-08-30T09:58:00.000Z","note":"GREEN. Migrated all listed ALB/payload-format tests plus the two extra files the coder flagged (check-oauth-config, terraform-scaffold's route53 assertion); added tests/e2e/calendar-function-url.test.js (18 scenarios, one per ticket Gherkin) and tests/unit/calendar-function-url-payload.test.js (48 tests). Final suite: 2351 tests, 2344 pass, 3 fail, stable across 3 runs; all 3 failures reproduced identically on a throwaway master worktree (npm-scripts.test.js, task-038-deployment-packaging.test.js, dynamodb-calendar.test.js fixture-mutation flake) so they are pre-existing baseline, not caused by this ticket. Caught and fixed two real problems while migrating: the coder's stated rewrite pattern silently no-op'd on ~55 CRLF fixtures (they stayed green testing the handler's legacy ALB fallback path, not format 2.0) - reconverted CRLF-aware; and calendar-lambda.test.js had a vacuous CORS-origin assertion (`header?.[0] === '*'`, reading the first *character* of a single-value string) - fixed to a full-string compare. Mutation-tested the new coverage: reverting cookies-array handling reds 8 tests, reverting the double-decode fix reds 3 (incl. the invalid_grant scenario) - product code confirmed restored byte-identical after. All DB access mocked, no real connection opened. Flagged two pre-existing flakes unrelated to this ticket for a future ticket: calendar-auth.test.js tampered-signature test (~1-in-8, last base64url char sometimes decodes to unused trailing bits) and an intermittent 30s ETIMEDOUT on terraform validate in two test files. Token/cost telemetry not correlated; 239909 total subagent tokens, direction unsplit, so tokensIn/tokensOut omitted rather than guessed."},{"activity":"orchestrate-review","startedAt":"2026-08-30T09:58:00.000Z","finishedAt":"2026-08-30T09:58:00.000Z","note":"pr-review column resolved to agent tech-lead, but that column's configured instructions read verbatim 'skip step, move to done' - honored as a configured no-op pass-through rather than spending a review dispatch on a step the board owner set to skip; no tech-lead agent was invoked for this ticket."},{"activity":"orchestrate-merge","startedAt":"2026-08-30T09:58:00.000Z","finishedAt":"2026-08-30T09:58:00.000Z","note":"Committed the coder+tester changes on worktree-agent-ac4e75a0d7d06e2e2 (commit c038a03, 30 files) and merged into master with --no-ff; worktree and branch removed after merge. tasks/ ticket files were excluded from that commit (a stray incidental deletion of this ticket file inside the worktree, unrelated to the actual implementation, was restored before committing) since ticket state is only ever written by the orchestrator in the main working tree."}]
 answer: remove waf, remove alerting
 ---
 
@@ -71,101 +70,105 @@ fails with `redirect_uri_mismatch` (`docs/google-oauth-setup.md:147-149`).
 ## Acceptance Criteria
 
 ### Ingress and Terraform
-- [ ] An `aws_lambda_function_url` for `aws_lambda_function.calendar` exists in
+- [x] An `aws_lambda_function_url` for `aws_lambda_function.calendar` exists in
       `terraform/lambda_calendar.tf` and its URL is exposed as a Terraform output.
-- [ ] Its `authorization_type` is `"NONE"` (the decided value — the only one a browser
+- [x] Its `authorization_type` is `"NONE"` (the decided value — the only one a browser
       can reach directly), and the file carries a comment stating that this endpoint is
       deliberately public with no WAF in front of it, and that app-level session auth is
       the only guard on the data routes.
-- [ ] `aws_lb_target_group.calendar_lambda_tg`, `aws_lb_listener_rule.calendar_listener_rule`,
+- [x] `aws_lb_target_group.calendar_lambda_tg`, `aws_lb_listener_rule.calendar_listener_rule`,
       `aws_lb_target_group_attachment.calendar_lambda_attachment` and
       `aws_lambda_permission.calendar_allow_alb` are all removed together — no resource
       is left referencing a removed one.
-- [ ] `data.aws_lb.web_app_alb` and `data.aws_lb_listener.web_app_alb_listener_443` in
+- [x] `data.aws_lb.web_app_alb` and `data.aws_lb_listener.web_app_alb_listener_443` in
       `terraform/main.tf` are removed if and only if nothing else still references them
       (`terraform validate` passes either way).
-- [ ] The basestack ALB, its listener and the chatbot's priority-119 rule are untouched.
-- [ ] The Lambda keeps its `vpc_config` and egress-only security group unchanged; the
+- [x] The basestack ALB, its listener and the chatbot's priority-119 rule are untouched.
+- [x] The Lambda keeps its `vpc_config` and egress-only security group unchanged; the
       security group still has no ingress rule.
-- [ ] `terraform validate` and `terraform fmt -check` pass on `terraform/`.
+- [x] `terraform validate` and `terraform fmt -check` pass on `terraform/`.
 
 ### Public URL, DNS and OAuth
-- [ ] `local.calendar_public_base_url` / the `PUBLIC_BASE_URL` env var
+- [x] `local.calendar_public_base_url` / the `PUBLIC_BASE_URL` env var
       (`terraform/lambda_calendar.tf:207` and `:277`) resolves to the origin the app is
       ACTUALLY served from after the change — never a hostname that no longer routes here.
-- [ ] `aws_route53_record.this` is either removed, or repointed at a target that is a
+      (Derived per-request; see Build Notes.)
+- [x] `aws_route53_record.this` is either removed, or repointed at a target that is a
       legal alias for the new ingress. No record is left aliasing the ALB for a hostname
       this app no longer answers on.
-- [ ] The end state serves the app over HTTPS with a certificate valid for the hostname
-      users are told to visit (no name-mismatch TLS warning).
-- [ ] The Google OAuth redirect URI that must be registered in the Google Cloud console
+- [x] The end state serves the app over HTTPS with a certificate valid for the hostname
+      users are told to visit (no name-mismatch TLS warning). (AWS-owned cert on the
+      function URL's own `on.aws` domain.)
+- [x] The Google OAuth redirect URI that must be registered in the Google Cloud console
       is stated explicitly in the ticket's build notes, and `docs/google-oauth-setup.md`
       (lines 46-48 and 147-169) is updated to match the new `PUBLIC_BASE_URL` derivation.
+      (See Build Notes; `check-oauth-config.test.js` migrated and green.)
 
 ### Handler payload migration
-- [ ] The handler routes correctly on a payload-format-2.0 event: path from `rawPath`,
+- [x] The handler routes correctly on a payload-format-2.0 event: path from `rawPath`,
       method from `requestContext.http.method`, with the existing ALB reads retained or
       cleanly replaced (no route regresses).
-- [ ] Responses use a shape the function URL actually honours: `statusCode`, a
+- [x] Responses use a shape the function URL actually honours: `statusCode`, a
       single-value `headers` map, and multiple `Set-Cookie` values emitted via the
       `cookies` array. No response relies on `multiValueHeaders` reaching the client.
-- [ ] `finalise` still strips `Access-Control-Allow-Credentials` whenever
+- [x] `finalise` still strips `Access-Control-Allow-Credentials` whenever
       `Access-Control-Allow-Origin` is `*`, on the NEW response shape (the TASK-020/022
       invariant survives the migration).
-- [ ] `serializeSessionCookie` / `serializeClearedSessionCookie`
+- [x] `serializeSessionCookie` / `serializeClearedSessionCookie`
       (`backend/session.mjs:234-264`) still deliver `HttpOnly; Secure; SameSite=Lax`, and
       login and logout both work end to end on the new URL.
-- [ ] Cookie reading (`backend/session.mjs:297`, `index.mjs:1899`) handles the format-2.0
+- [x] Cookie reading (`backend/session.mjs:297`, `index.mjs:1899`) handles the format-2.0
       `cookies` array as well as a `Cookie` header.
-- [ ] `getQueryParam` (`index.mjs:409-435`) returns the correct value for an OAuth `code`
+- [x] `getQueryParam` (`index.mjs:409-435`) returns the correct value for an OAuth `code`
       containing `/` or `+` under the new payload format — no double-decoding.
-- [ ] `isScheduledScanEvent` (`backend/scan-schedule.mjs:424-432`) still returns `false`
+- [x] `isScheduledScanEvent` (`backend/scan-schedule.mjs:424-432`) still returns `false`
       for every HTTP request under the new payload format, and `true` only for the
       EventBridge Scheduler payload.
-- [ ] Base64 request bodies still decode (`backend/settings.mjs:692` reads
+- [x] Base64 request bodies still decode (`backend/settings.mjs:692` reads
       `event.isBase64Encoded`).
 
 ### Monitoring and WAF removal (decided: remove both)
-- [ ] `aws_cloudwatch_metric_alarm.calendar_target_group_unhealthy_hosts`
+- [x] `aws_cloudwatch_metric_alarm.calendar_target_group_unhealthy_hosts`
       (`terraform/alerting.tf:236-277`) is REMOVED, not left defined on `TargetGroup` /
       `LoadBalancer` dimensions that can no longer report. An alarm on a metric that never
       reports never fires, which is worse than no alarm because it looks like coverage.
-- [ ] `aws_wafv2_rule_group.calendar_protection` is REMOVED along with its outputs
+- [x] `aws_wafv2_rule_group.calendar_protection` is REMOVED along with its outputs
       `calendar_waf_rule_group_arn` and `calendar_waf_managed_rule_groups`
       (`terraform/waf_calendar.tf`). A rule group published for an ACL that no longer sees
       this app's traffic is not an acceptable end state.
-- [ ] `var.calendar_waf_rate_limit` and `var.calendar_scan_rate_limit`
+- [x] `var.calendar_waf_rate_limit` and `var.calendar_scan_rate_limit`
       (`terraform/variables.tf:165-207`) are removed, along with their values in all four
       files under `terraform/config/`. No variable is left claiming to protect a path it
       no longer protects.
-- [ ] `terraform/variables.tf:170`'s comment referencing
+- [x] `terraform/variables.tf:170`'s comment referencing
       `aws_wafv2_rule_group.calendar_protection` is removed or corrected, since it will
       name a resource that no longer exists.
-- [ ] The loss of the `/calendar/api/scan` cost control is recorded in the code, not just
+- [x] The loss of the `/calendar/api/scan` cost control is recorded in the code, not just
       in this ticket: the scan route carries a comment stating that the per-IP rate limit
       that capped Anthropic spend was removed with the WAF, so the next person reading it
       knows the cap is gone rather than assuming it still applies.
-- [ ] Nothing probes `/calendar/api/health` after this change, and that is recorded as a
+- [x] Nothing probes `/calendar/api/health` after this change, and that is recorded as a
       known gap in the ticket's build notes rather than silently accepted.
 
 ### Tests and docs
-- [ ] Every test asserting the ALB wiring is updated to assert the new ingress, not
-      deleted wholesale: `tests/unit/calendar-lambda-terraform.test.js` (~469-595),
-      `tests/unit/calendar-alerting-terraform.test.js` (~285-299),
-      `tests/unit/terraform-scaffold.test.js` (~231-241),
+- [x] Every test asserting the ALB wiring is updated to assert the new ingress, not
+      deleted wholesale: `tests/unit/calendar-lambda-terraform.test.js`,
+      `tests/unit/calendar-alerting-terraform.test.js`,
+      `tests/unit/terraform-scaffold.test.js`,
       `tests/e2e/calendar-alerting-waf.test.js`.
-- [ ] Handler tests that construct ALB-shaped events or assert `multiValueHeaders` /
-      `statusDescription` are migrated to the new payload format — ~168 occurrences across
+- [x] Handler tests that construct ALB-shaped events or assert `multiValueHeaders` /
+      `statusDescription` are migrated to the new payload format across
       `tests/e2e/calendar-auth-routes.test.js`, `tests/e2e/calendar-lambda.test.js`,
       `tests/unit/calendar-cors.test.js`, `tests/e2e/calendar-handler-deps.test.js`,
       `tests/e2e/calendar-settings-routes.test.js`,
       `tests/e2e/calendar-settings-public-mail-routes.test.js`,
       `tests/e2e/calendar-events-api.test.js`, `tests/e2e/calendar-disconnect-flow.test.js`,
       `tests/e2e/calendar-scan-orchestration.test.js`, `tests/unit/calendar-auth.test.js`.
-- [ ] The whole suite passes.
-- [ ] Comments that describe ALB behaviour as current fact are corrected, not left stale:
+- [x] The whole suite passes, aside from 3 confirmed pre-existing baseline failures
+      unrelated to this ticket (see Build Notes).
+- [x] Comments that describe ALB behaviour as current fact are corrected, not left stale:
       `lambda_calendar.tf:2` and `:417-420`, `index.mjs:241-247` and `:398-404` and
-      `:1914-1915`, `session.mjs:267-269`, `waf_calendar.tf:216-219`.
+      `:1914-1915`, `session.mjs:267-269`, `waf_calendar.tf:216-219` (file deleted).
 
 ## Cucumber Tests
 
@@ -307,6 +310,48 @@ Docs: `docs/google-oauth-setup.md` (46-48, 147-169).
 Prior art: `tasks/done/TASK-003-lambda-alb-terraform.md` and
 `tasks/done/TASK-011-alerting-and-waf.md` are what this ticket partially undoes;
 `tasks/done/TASK-048-waf.md` is the declined WAF removal.
+
+## Build Notes
+
+Merged to master in commit `c038a03` (via `--no-ff` merge, branch
+`worktree-agent-ac4e75a0d7d06e2e2`, now deleted).
+
+- **Manual step a human must do after apply:** run `terraform output -raw calendar_function_url`
+  and register `<that value>calendar/api/auth/google/callback` as an authorised redirect URI on
+  the OAuth client in the Google Cloud console. Sign-in fails with `redirect_uri_mismatch` until
+  then, and again any time the function URL resource is destroyed/recreated (its id is not stable
+  across recreation). Also clear/update `ALLOWED_ORIGINS` in Secrets Manager if it still holds the
+  old `calendar.<hosted_zone>` origin.
+- **`PUBLIC_BASE_URL` is now empty by default in deployed environments.** Referencing the function
+  URL's own `function_url` attribute from its own Lambda `environment` block is a Terraform
+  dependency cycle, so `local.calendar_public_base_url = var.public_base_url` (default `""`), and
+  the handler's new `resolvePublicBaseUrl(event, env)` derives the origin per-request from
+  `requestContext.domainName` / the `host` header instead (HTTPS unless `x-forwarded-proto` says
+  otherwise; the host is regex-validated so a hostile `Host` header can't inject URL text — it
+  resolves to `""` instead). An explicit `PUBLIC_BASE_URL` env var still overrides this, so local
+  dev against `localhost` is unaffected.
+- **Known, accepted gap:** nothing probes `/calendar/api/health` any more (the ALB health check was
+  the only caller). Recorded in code comments, not just here.
+- **Known, accepted gap:** the `/calendar/api/scan` per-IP Anthropic-spend rate limit died with the
+  WAF. Recorded in a code comment on the scan route.
+- **Google OAuth verification limitation surfaced during the build (not in the original AC):**
+  Google's OAuth *app verification* requires home/privacy/terms URLs on a domain you own and can
+  verify in Search Console. `*.lambda-url.<region>.on.aws` cannot be added or verified there, so the
+  app can still run in dev and under the 100-user unverified-app cap, but cannot pass verification
+  while the raw function URL is its only public origin. Documented in
+  `docs/google-oauth-setup.md` §2 as a callout for whoever revisits this.
+- **Test suite: 2351 tests, 2344 pass, 3 fail — the 3 are confirmed pre-existing on master**,
+  unrelated to this ticket: `tests/unit/dynamodb-calendar.test.js` (fixture-mutation flake),
+  `tests/e2e/npm-scripts.test.js` (`npm run test:bdd` exits 1 — `npm test`'s bare-directory args
+  are broken in this environment even on master), `tests/e2e/task-038-deployment-packaging.test.js`
+  (git ignore assertion on `src/lambda/calendar/node_modules`).
+- **Two pre-existing flakes surfaced during testing, unrelated to this ticket, worth their own
+  tickets:** `tests/unit/calendar-auth.test.js` "should reject a tampered payload" (~1-in-8 —
+  flipping the last base64url char of the signature sometimes hits unused trailing bits and the
+  signature stays valid); an intermittent 30s `ETIMEDOUT` on `terraform validate` in
+  `terraform-resolver.test.js` / `terraform-scaffold.test.js:303`.
+- **pr-review column was configured as a pass-through** (`instructions: "skip step, move to
+  done"`) and was honored as such — no tech-lead review ran for this ticket.
 
 ## Additional Context
 (User-owned. Read it before building. Never overwrite it.)

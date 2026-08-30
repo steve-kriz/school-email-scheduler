@@ -1,12 +1,12 @@
 #!/bin/bash
 
-export TF_ENV="dev/au"
-export BUCKETNAME="058264301523-officehq-tfstate-bucket"
-export AWS_REGION="ap-southeast-2"
-export PROFILE="ohq-dev"
+export TF_ENV="default"
+export BUCKETNAME="feast-tf-state"
+export AWS_REGION="us-east-1"
+export PROFILE="default"
 
-TF_ENV_SHORT="dev_au"
-TF_WORKSPACE="dev-au"
+TF_ENV_SHORT="prod"
+TF_WORKSPACE="prod-au"
 # Distinct from the chatbot's terraform_dev_ohq_chatbot.tfstate so the two
 # stacks never share state in the shared tfstate bucket.
 TF_STATE_KEY="terraform_${TF_ENV_SHORT}_school_calendar.tfstate"
@@ -17,7 +17,7 @@ echo "AWS_REGION: $AWS_REGION"
 
 # Build the terraform init command
 INIT_CMD="terraform init -upgrade -reconfigure -backend=true"
-INIT_CMD="$INIT_CMD -backend-config=\"bucket=$AWS_REGION-$BUCKETNAME\""
+INIT_CMD="$INIT_CMD -backend-config=\"bucket=$BUCKETNAME\""
 INIT_CMD="$INIT_CMD -backend-config=\"key=$TF_STATE_KEY\""
 INIT_CMD="$INIT_CMD -backend-config=\"region=$AWS_REGION\""
 

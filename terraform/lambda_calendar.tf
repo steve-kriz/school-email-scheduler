@@ -105,6 +105,13 @@ resource "null_resource" "calendar_lambda_npm_install" {
 
   provisioner "local-exec" {
     working_dir = local.calendar_lambda_dir
+    # Without an explicit interpreter, Windows hosts fall back to cmd.exe,
+    # which does not strip the embedded double-quotes below the way bash
+    # does - node then receives the quote characters as part of its argument
+    # and fails to resolve the module. This repo's other scripts already
+    # assume bash (every terraform_init_*.sh has a #!/bin/bash shebang), so
+    # force it here too rather than depend on the OS-default shell.
+    interpreter = ["bash", "-c"]
     command     = "npm ci --omit=dev --ignore-scripts && node \"${local.calendar_deps_verifier}\" \"${local.calendar_lambda_dir}\""
   }
 
