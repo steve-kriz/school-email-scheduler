@@ -338,6 +338,13 @@ export function normaliseInstant(value) {
  * The content-derived range key. See the module docblock for why it is derived
  * rather than generated, and why the parts are normalised before hashing.
  *
+ * THE INPUTS ARE FIXED: sourceMessageId, title and startsAt, and nothing else.
+ * `processingJobId` is deliberately NOT hashed in (TASK-056) - two processing
+ * jobs that both match one email must derive the SAME id so the row collapses to
+ * one, and every extra input to this hash is another way for the same event to
+ * be stored twice, which is exactly the live bug the derived key was introduced
+ * to fix.
+ *
  * @param {object} args
  * @param {string} args.sourceMessageId
  * @param {string} args.title
@@ -394,16 +401,30 @@ export function computeTtl(startsAtEpochMs) {
 /**
  * Turn one model event into a storable row, or explain why it cannot be one.
  *
+ * ATTRIBUTION (TASK-056). `processingJobId` records WHICH processing job's search
+ * turned this email up. It is the job's stable `id`, never its `name`, so
+ * renaming a job later does not orphan its events. It is stamped on the row but
+ * is deliberately NOT part of `deriveEventId`: the same email found by two jobs
+ * must still collapse to ONE row, and changing what the hash is derived from
+ * risks reopening the live duplication bug an earlier session fixed. A blank or
+ * absent value leaves the attribute UNDEFINED (the document client is configured
+ * with `removeUndefinedValues`, so it is simply absent) rather than "" or null.
+ *
  * @param {object} args
  * @param {string} args.userId
  * @param {object} args.message The source message from gmail.mjs.
  * @param {object} args.event One entry from the model's `events` array.
+ * @param {string|null} [args.processingJobId] The job whose search found this
+ *   email (TASK-056).
  * @param {object} [options]
  * @param {() => number} [options.now] Epoch-ms clock; used for the audit stamps
  *   and as the horizon anchor of LAST resort (see below).
  * @returns {{ item: object|null, skipped: { reason: string, eventId: string|null }|null }}
  */
-export function buildEventItem({ userId, message = {}, event = {} } = {}, { now = () => Date.now() } = {}) {
+export function buildEventItem(
+  { userId, message = {}, event = {}, processingJobId = null } = {},
+  { now = () => Date.now() } = {}
+) {
   if (typeof userId !== "string" || !userId) throw new Error("buildEventItem: userId is required");
 
   const skip = (reason) => ({ item: null, skipped: { reason, eventId: null } });
@@ -452,6 +473,8 @@ export function buildEventItem({ userId, message = {}, event = {} } = {}, { now 
     sourceSubject: cleanText(message.subject, MAX_SUBJECT_LENGTH) || undefined,
     sourceFrom: cleanText(message.from, MAX_FROM_LENGTH) || undefined,
     sourceReceivedAt: received ? received.iso : undefined,
+    // Absent rather than "" when unattributed - see the ATTRIBUTION note above.
+    processingJobId: String(processingJobId ?? "").trim() || undefined,
     confidence: clampConfidence(event.confidence),
     createdAt: nowIso,
     updatedAt: nowIso,
@@ -475,17 +498,23 @@ export function buildEventItem({ userId, message = {}, event = {} } = {}, { now 
  * key. The first occurrence wins and the rest are recorded as DUPLICATE skips, so
  * one repeated event cannot fail the batch it happens to share.
  *
+ * Every row built here carries the same `processingJobId` (TASK-056): one call is
+ * one job's extraction pass. A pair may override it (`pair.processingJobId`) for
+ * a caller that mixes jobs in one batch, but the scan loop does not - it calls
+ * once per job, which is what makes the attribution meaningful.
+ *
  * @param {object} args
  * @param {string} args.userId
  * @param {object} [args.message] Source message, when passing `events`.
  * @param {object[]} [args.events] Model events belonging to `message`.
- * @param {Array<{ message: object, event: object }>} [args.extractions]
+ * @param {Array<{ message: object, event: object, processingJobId?: string }>} [args.extractions]
+ * @param {string|null} [args.processingJobId] The job that found these emails.
  * @param {object} [options]
  * @param {() => number} [options.now]
  * @returns {{ items: object[], skipped: Array<{ messageId: string, reason: string }>, counts: Record<string, number> }}
  */
 export function buildEventItems(
-  { userId, message = null, events = null, extractions = null } = {},
+  { userId, message = null, events = null, extractions = null, processingJobId = null } = {},
   { now = () => Date.now() } = {}
 ) {
   const pairs = Array.isArray(extractions)
@@ -505,7 +534,15 @@ export function buildEventItems(
   for (const pair of pairs) {
     const source = pair.message || message || {};
     const messageId = String(source.id ?? "");
-    const built = buildEventItem({ userId, message: source, event: pair.event || {} }, { now });
+    const built = buildEventItem(
+      {
+        userId,
+        message: source,
+        event: pair.event || {},
+        processingJobId: pair.processingJobId ?? processingJobId,
+      },
+      { now }
+    );
     if (!built.item) {
       record(messageId, built.skipped.reason);
       continue;
@@ -682,18 +719,25 @@ export async function putEvents(
  * than resurrecting a handled one. Pass `preserveHandled: false` to skip it
  * entirely (a first-ever scan of a mailbox has nothing to preserve).
  *
+ * ATTRIBUTES TO A PROCESSING JOB (TASK-056). `processingJobId` is stamped on every
+ * row this call writes, and `applyPreservedLifecycle` keeps the FIRST job that
+ * ever wrote a given `eventId` on later rescans - so an email two jobs both match
+ * is stored once, attributed to whichever job saw it first, whatever order the
+ * jobs run in afterwards.
+ *
  * @param {object} args
  * @param {string} args.userId
  * @param {object} [args.message]
  * @param {object[]} [args.events]
  * @param {Array<{ message: object, event: object }>} [args.extractions]
+ * @param {string|null} [args.processingJobId] The job that found these emails.
  * @param {string} [args.tableName]
  * @param {object} [deps] `batchWrite`, `batchGet`, `preserveHandled`, `now`,
  *   `sleep`, `random`, `maxAttempts`, `baseDelayMs`, `maxDelayMs`, `env`, `log`.
  * @returns {Promise<{ written: number, items: object[], preserved: number, skipped: Array<{ messageId: string, reason: string }>, counts: Record<string, number>, unprocessed: object[], requests: number }>}
  */
 export async function storeEvents(
-  { userId, message = null, events = null, extractions = null, tableName = null } = {},
+  { userId, message = null, events = null, extractions = null, processingJobId = null, tableName = null } = {},
   deps = {}
 ) {
   const {
@@ -706,7 +750,7 @@ export async function storeEvents(
   } = deps;
   const logLine = typeof log === "function" ? log : makeLogger(env);
 
-  const built = buildEventItems({ userId, message, events, extractions }, { now });
+  const built = buildEventItems({ userId, message, events, extractions, processingJobId }, { now });
   const { skipped, counts } = built;
   let items = built.items;
   let preserved = 0;
@@ -731,8 +775,18 @@ export async function storeEvents(
       if (states.size > 0) {
         items = items.map((item) => {
           const merged = applyPreservedLifecycle(item, states.get(item.eventId));
-          // Same reference means nothing was preserved - see the function's note.
-          if (merged !== item) preserved += 1;
+          // `preserved` counts HANDLED events carried forward, and only those:
+          // since TASK-056 the merge also carries `processingJobId`/`createdAt`
+          // on a still-pending row (first-seen-wins attribution), which changes
+          // the reference without the user having handled anything. Counting by
+          // identity alone would inflate this number on every rescan and make
+          // "how many acknowledgements did this scan protect" meaningless.
+          if (
+            merged !== item &&
+            (merged.status === EVENT_STATUS.ACKNOWLEDGED || merged.status === EVENT_STATUS.DISMISSED)
+          ) {
+            preserved += 1;
+          }
           return merged;
         });
       }
@@ -784,7 +838,7 @@ export async function storeEvents(
  * as `EventNotFoundError` -> HTTP 404, never 403: a 403 would confirm that
  * someone else's event exists, which is exactly the fact being protected.
  *
- * THE RESPONSE PROJECTION IS AN ALLOW-LIST. `toEventJson` names the sixteen
+ * THE RESPONSE PROJECTION IS AN ALLOW-LIST. `toEventJson` names the seventeen
  * fields the UI renders and copies nothing else, so `sourceMessageId` (a Gmail
  * handle with no purpose in a browser), `attentionKey`, `ttl` and anything a
  * later ticket adds to the row are absent BY CONSTRUCTION rather than by
@@ -869,9 +923,13 @@ const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
  * Row attributes the re-scan pre-read fetches. Deliberately narrow: the write
- * path only needs to know whether the user has already handled this event, so
- * projecting the whole row would pull titles and descriptions through a code path
- * that has no use for them.
+ * path only needs to know whether the user has already handled this event and
+ * who saw it first, so projecting the whole row would pull titles and
+ * descriptions through a code path that has no use for them.
+ *
+ * `processingJobId` is here for first-seen-wins attribution (TASK-056): without
+ * it the pre-read cannot tell `applyPreservedLifecycle` which job stored the row
+ * originally, and a rescan by a second job would silently take the attribution.
  */
 export const LIFECYCLE_ATTRIBUTES = Object.freeze([
   "userId",
@@ -881,12 +939,18 @@ export const LIFECYCLE_ATTRIBUTES = Object.freeze([
   "dismissedAt",
   "dueBy",
   "createdAt",
+  "processingJobId",
 ]);
 
 /**
  * The exact fields a response may carry. `sourceMessageId` is absent on purpose -
  * the UI shows provenance with the subject and sender, and the Gmail handle would
  * be a live API identifier sitting in a browser.
+ *
+ * `processingJobId` IS public (TASK-056): the calendar and attention views filter
+ * by processing job, and the id is an opaque handle to a job the same user
+ * configured - it discloses nothing they did not type themselves. The job's
+ * `name` stays out; the browser already has it from the settings endpoint.
  */
 export const PUBLIC_EVENT_FIELDS = Object.freeze([
   "eventId",
@@ -905,6 +969,7 @@ export const PUBLIC_EVENT_FIELDS = Object.freeze([
   "sourceSubject",
   "sourceFrom",
   "sourceReceivedAt",
+  "processingJobId",
 ]);
 
 /**
@@ -1165,6 +1230,11 @@ export function toEventJson(item) {
     sourceSubject: item.sourceSubject ?? null,
     sourceFrom: item.sourceFrom ?? null,
     sourceReceivedAt: item.sourceReceivedAt ?? null,
+    // Which processing job's search found this email (TASK-056). Null for a row
+    // stored before jobs existed, and it can name a job the user has since
+    // deleted - nothing rewrites stored rows when a job goes away, so the UI
+    // must treat an unknown id as "no filter matches", not as an error.
+    processingJobId: item.processingJobId ?? null,
   };
 }
 
@@ -1810,15 +1880,33 @@ export async function readLifecycleStates(
 }
 
 /**
- * Carry a stored acknowledge/dismiss forward onto a freshly extracted row.
+ * Carry a stored row's lifecycle AND its first-seen facts forward onto a freshly
+ * extracted row.
  *
- * Returns the SAME object reference when there is nothing to preserve, so callers
- * can count preservations by identity instead of deep-comparing.
+ * Two separate things are preserved here, and they apply under different
+ * conditions:
  *
- * `attentionKey` is dropped rather than recomputed: a handled event is not
- * pending, so by the sparse-GSI contract it carries no `attentionKey` and is
- * absent from the attention list by construction. `dueBy` is kept, because the
- * month view still displays the deadline of an event the user has handled.
+ *  1. THE USER'S DECISION, when the stored row is `acknowledged`/`dismissed`:
+ *     the status, `acknowledgedAt`/`dismissedAt`, and `dueBy` when the new
+ *     extraction has none. `attentionKey` is dropped rather than recomputed - a
+ *     handled event is not pending, so by the sparse-GSI contract it carries no
+ *     `attentionKey` and is absent from the attention list by construction.
+ *     `dueBy` is kept, because the month view still displays the deadline of an
+ *     event the user has handled.
+ *
+ *  2. FIRST-SEEN-WINS FACTS, whatever the stored status: `createdAt` and
+ *     `processingJobId`. This is why the function does NOT early-return for a
+ *     still-pending row (TASK-056). The same email can legitimately match more
+ *     than one processing job's query - two jobs sharing a domain, one newsletter
+ *     matching two jobs' search terms - and every one of those passes writes the
+ *     same content-derived `eventId`. Without this branch the last job to run
+ *     would take the attribution and reset the creation stamp on every single
+ *     scan, so an event's "which school is this from" would flicker as the user
+ *     reorders their jobs. The FIRST job that ever stored the row keeps it.
+ *
+ * Returns the SAME object reference when there is genuinely nothing to preserve,
+ * so callers can cheaply tell a merge from a pass-through (see `storeEvents`,
+ * which counts only case 1 as a `preserved`).
  *
  * @param {object} item Freshly built row from `buildEventItem`.
  * @param {object|undefined} existing Stored lifecycle attributes, if any.
@@ -1826,8 +1914,20 @@ export async function readLifecycleStates(
  */
 export function applyPreservedLifecycle(item, existing) {
   if (!existing || typeof existing !== "object") return item;
+
   const status = existing.status;
-  if (status !== EVENT_STATUS.ACKNOWLEDGED && status !== EVENT_STATUS.DISMISSED) return item;
+  const handled = status === EVENT_STATUS.ACKNOWLEDGED || status === EVENT_STATUS.DISMISSED;
+
+  // First-seen-wins: the stored value wins whenever there IS one.
+  const firstSeenJobId = String(existing.processingJobId ?? "").trim() || undefined;
+  const processingJobId = firstSeenJobId ?? item.processingJobId;
+  const createdAt = existing.createdAt ?? item.createdAt;
+
+  if (!handled) {
+    // Nothing preserved at all: same reference out, same reference in.
+    if (processingJobId === item.processingJobId && createdAt === item.createdAt) return item;
+    return { ...item, processingJobId, createdAt };
+  }
 
   return {
     ...item,
@@ -1837,7 +1937,8 @@ export function applyPreservedLifecycle(item, existing) {
     acknowledgedAt: existing.acknowledgedAt ?? undefined,
     dismissedAt: existing.dismissedAt ?? undefined,
     // First-seen time belongs to the first extraction, not to this re-scan.
-    createdAt: existing.createdAt ?? item.createdAt,
+    createdAt,
+    processingJobId,
   };
 }
 

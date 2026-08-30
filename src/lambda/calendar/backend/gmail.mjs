@@ -7,10 +7,20 @@
  * happens here.
  *
  * Shape of a scan:
- *   buildQuery      -> a Gmail search string from the user's stored searchDomains
+ *   buildJobQuery   -> a Gmail search string for ONE processing job (TASK-056)
+ *   buildQuery      -> the legacy whole-connection form, kept for callers that
+ *                      still search by sender domain alone
  *   listMessageIds  -> every id the query matches, paged, capped
  *   getMessage      -> one message, decoded to plain text
  *   fetchCandidateMessages -> the three above, for one user, plus a watermark
+ *
+ * ONE SEARCH PER PROCESSING JOB (TASK-056). A job carries its own
+ * `{ id, name, schoolName, domain, searchTerms }`, and its query ORs the sender
+ * domain together with QUOTED TEXT searches for the school name and each search
+ * term. That widens matching from "sender domain only" to "sender domain or this
+ * text anywhere in the subject or body", deliberately: it is what lets a school's
+ * mail be found when it arrives via a newsletter relay. The caller therefore must
+ * NOT assume every returned message came from the job's domain.
  *
  * WHY THE CAP AND THE WINDOW: a first scan of an unfiltered mailbox is unbounded
  * work against a rate-limited API. Every query is therefore domain-filtered and
@@ -33,8 +43,10 @@
  * `sleep: async () => {}` and `random: () => 0`.
  *
  * SECURITY: message bodies, subjects, snippets, sender addresses and access
- * tokens are NEVER logged, at any level. The only things this module logs are
- * counts, statuses and Gmail message ids (opaque identifiers, not content).
+ * tokens are NEVER logged, at any level. Neither is the query, a job's `name`,
+ * its `schoolName` or any of its `searchTerms` - those are the user's own words
+ * about their own children's school. The only things this module logs are
+ * counts, statuses, Gmail message ids and a job's opaque `processingJobId`.
  */
 
 import { normalizeDomain } from "./settings.mjs";
@@ -268,6 +280,162 @@ export function buildQuery({ searchDomains, since = null, sinceDays = DEFAULT_SI
   const start = toDate(since) || new Date(now().getTime() - days * 24 * 60 * 60 * 1000);
 
   return `(${fromClause}) after:${formatGmailDate(start)}`;
+}
+
+/**
+ * Coerce a stored `searchTerms` value into a clean list of phrases.
+ *
+ * Same shape-tolerance as `toDomainList` (JS `Set` from the document client,
+ * `{ SS: [...] }` from the low-level one, a plain array, or a lone string), but
+ * deliberately NOT the same normalisation: a search term is the user's own free
+ * text, so it is neither lower-cased nor split on commas - "Year 4, Kindy" is one
+ * phrase the user typed, and splitting it would search for something they never
+ * asked for. settings.mjs (TASK-055) owns the validation rules; this only
+ * tolerates whatever is in the table.
+ *
+ * @param {unknown} value
+ * @returns {string[]} Trimmed, non-blank phrases, in the stored order.
+ */
+export function toSearchTermList(value) {
+  let entries = [];
+  if (value instanceof Set) entries = [...value];
+  else if (Array.isArray(value)) entries = value;
+  else if (value && typeof value === "object" && Array.isArray(value.SS)) entries = value.SS;
+  else if (typeof value === "string") entries = [value];
+
+  const terms = [];
+  for (const entry of entries) {
+    const term = String(entry ?? "").trim();
+    if (term) terms.push(term);
+  }
+  return terms;
+}
+
+/**
+ * Turn one free-text value (a school name, a search term) into a QUOTED Gmail
+ * clause, or "" when there is nothing usable left.
+ *
+ * Gmail has no escape syntax inside a quoted phrase, so an embedded `"` cannot be
+ * escaped - it can only END the phrase early, after which the rest of the user's
+ * text is read as OPERATORS (`... OR from:@evil.example` being the obvious
+ * abuse). NEUTRALISATION IS THEREFORE BY STRIPPING: every double quote (straight
+ * or typographic) is removed before the value is wrapped, so the emitted clause is
+ * always exactly one quoted token. A value that is left empty by the stripping is
+ * treated as blank and dropped by the caller.
+ *
+ * Newlines and control characters are collapsed to spaces first (a query is a
+ * single line; a raw newline would truncate it), and runs of whitespace are
+ * collapsed so the phrase matches the way the user would expect.
+ *
+ * @param {unknown} value
+ * @returns {string} e.g. `"St Mary's Primary"`, or "".
+ */
+export function toQueryPhrase(value) {
+  const text = String(value ?? "")
+    // Control characters (newline, tab, NUL, DEL) become spaces before
+    // anything else: a Gmail query is a single line.
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001F\u007F]+/g, " ")
+    // Straight AND typographic quotes: a smart quote pasted out of a word
+    // processor terminates a Gmail phrase just as a straight one does.
+    .replace(/["\u201C\u201D\u201E\u201F\u2033]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text ? `"${text}"` : "";
+}
+
+/**
+ * The OR clauses one processing job contributes to a Gmail query.
+ *
+ * Order is fixed and contractual (the regression guard in TASK-056 compares the
+ * emitted string byte for byte): the sender-domain clause first, then the school
+ * name, then each search term in stored order. The domain goes through the SAME
+ * `toDomainList`/`normalizeDomain` path the old single-query builder used, so
+ * there is still exactly one definition of "what a domain is" in this codebase.
+ *
+ * Blank entries are dropped and duplicate clauses are emitted once (compared
+ * case-insensitively, since Gmail's text search is case-insensitive anyway and a
+ * repeated clause only costs query length).
+ *
+ * @param {{ domain?: unknown, schoolName?: unknown, searchTerms?: unknown }} [job]
+ * @returns {string[]}
+ */
+export function buildJobClauses(job = {}) {
+  const clauses = [];
+  const seen = new Set();
+
+  const add = (clause) => {
+    if (!clause) return;
+    const key = clause.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    clauses.push(clause);
+  };
+
+  for (const domain of toDomainList([job?.domain])) add(`from:@${domain}`);
+  add(toQueryPhrase(job?.schoolName));
+  for (const term of toSearchTermList(job?.searchTerms)) add(toQueryPhrase(term));
+
+  return clauses;
+}
+
+/**
+ * Can this job be searched at all? True when it contributes at least one clause.
+ *
+ * Exported so the scan loop can decide "usable" WITHOUT building a query or
+ * catching an exception - it needs the count of usable jobs up front to split the
+ * message budget between them.
+ *
+ * @param {object} [job]
+ * @returns {boolean}
+ */
+export function hasJobQueryClauses(job) {
+  return buildJobClauses(job).length > 0;
+}
+
+/**
+ * Compose the Gmail search string for ONE processing job.
+ *
+ * Example:
+ *   `(from:@stmarys.edu.au OR "St Mary's Primary" OR "Year 4") after:2026/05/19`
+ *
+ * This is the per-job sibling of `buildQuery` and follows exactly the same
+ * bracketing rule: the clauses are OR-joined inside ONE pair of parentheses and
+ * the `after:` floor is appended OUTSIDE the group, because Gmail's implicit
+ * operator is AND and an unbracketed `after:` would bind to the last clause only.
+ * A job whose only clause is its domain therefore emits `(from:@d) after:...`,
+ * byte-identical to what the single-domain query emitted before this ticket.
+ *
+ * DELIBERATE WIDENING: unlike `buildQuery`, this matches on TEXT as well as on
+ * sender - a quoted school name or search term matches subject and body. That is
+ * the point of a processing job, not an accident. It also means the caller must
+ * not assume every returned message came from `job.domain`.
+ *
+ * A job with NO usable clause THROWS (`code: "no_job_query"`) rather than
+ * emitting a bare `after:` query: that query would return the user's entire
+ * personal mailbox and put it through extraction. Upstream validation (TASK-055)
+ * makes all three fields required, but this refuses the empty case anyway rather
+ * than trusting that validation never regresses.
+ *
+ * @param {object} args
+ * @param {{ id?: string, name?: string, schoolName?: unknown, domain?: unknown, searchTerms?: unknown }} args.job
+ * @param {Date|string|number|null} [args.since] Watermark; the window starts here.
+ * @param {number} [args.sinceDays] Lookback used when `since` is absent.
+ * @param {() => Date} [args.now] Injectable clock.
+ * @returns {string}
+ */
+export function buildJobQuery({ job, since = null, sinceDays = DEFAULT_SINCE_DAYS, now = () => new Date() } = {}) {
+  const clauses = buildJobClauses(job);
+  if (clauses.length === 0) {
+    const error = new Error("buildJobQuery: the job has no usable search domain, school name or search term");
+    error.code = "no_job_query";
+    throw error;
+  }
+
+  const days = Number.isFinite(sinceDays) && sinceDays > 0 ? sinceDays : DEFAULT_SINCE_DAYS;
+  const start = toDate(since) || new Date(now().getTime() - days * 24 * 60 * 60 * 1000);
+
+  return `(${clauses.join(" OR ")}) after:${formatGmailDate(start)}`;
 }
 
 /**
@@ -858,8 +1026,19 @@ export async function getMessage(
 /**
  * The scan-facing entry point: every candidate message for one user.
  *
- * Sequence: resolve the user's stored `searchDomains`, mint an access token,
- * build the query, list the ids, then fetch the messages one at a time.
+ * Sequence: resolve WHAT to search for, mint an access token, build the query,
+ * list the ids, then fetch the messages one at a time.
+ *
+ * THREE WAYS TO SAY WHAT TO SEARCH FOR, in precedence order:
+ *   1. `query` - a Gmail search string the caller already built. Used verbatim.
+ *   2. `job` - one processing job (TASK-056); the query comes from
+ *      `buildJobQuery`, which throws `no_job_query` for a job with no usable
+ *      field rather than searching the whole mailbox.
+ *   3. `searchDomains` (or, failing that, the stored connection) - the legacy
+ *      sender-domain-only form, via `buildQuery`.
+ * Everything after that step is identical in all three cases: the return
+ * contract, the sequential fetching, the per-message error collection, the
+ * `ReauthRequiredError` rethrow and `newestReceivedAt` do not vary.
  *
  * Fetching is SEQUENTIAL on purpose. The bottleneck of a scan is Gmail's
  * per-user rate limit, and firing a batch concurrently mostly buys a burst of
@@ -884,6 +1063,9 @@ export async function getMessage(
  * @param {number} [args.maxBodyChars]
  * @param {string[]|Set<string>|null} [args.searchDomains] Pass what the caller
  *   already read, to save a second table lookup.
+ * @param {{ id?: string, name?: string, schoolName?: unknown, domain?: unknown, searchTerms?: unknown }|null} [args.job]
+ *   One processing job to search for (TASK-056).
+ * @param {string|null} [args.query] A pre-built Gmail query, used verbatim.
  * @param {object} [deps]
  * @param {(userId: string, options?: object) => Promise<string>} [deps.getAccessToken]
  * @param {(userId: string, options?: object) => Promise<object|null>} [deps.getConnection]
@@ -901,7 +1083,7 @@ export async function getMessage(
  * @returns {Promise<{ messages: object[], truncated: boolean, errors: Array<{id: string, error: string}>, newestReceivedAt: string|null }>}
  */
 export async function fetchCandidateMessages(
-  { userId, since = null, maxMessages = null, maxBodyChars = null, searchDomains = null } = {},
+  { userId, since = null, maxMessages = null, maxBodyChars = null, searchDomains = null, job = null, query: prebuiltQuery = null } = {},
   {
     getAccessToken = mintAccessToken,
     getConnection = getStoredConnection,
@@ -928,14 +1110,27 @@ export async function fetchCandidateMessages(
   const cap = positiveInt(maxMessages, config.maxMessages);
   const bodyCap = positiveInt(maxBodyChars, config.maxBodyChars);
 
-  let domains = toDomainList(searchDomains);
-  if (domains.length === 0) {
-    const connection = await getConnection(userId, { env });
-    domains = toDomainList(connection?.searchDomains);
+  // The job's opaque id is the only part of a job this module may log: `name`,
+  // `schoolName` and `searchTerms` are the user's own words. See the SECURITY
+  // note in the module docblock.
+  const processingJobId = String(job?.id ?? "");
+
+  // Throws with code "no_search_domains"/"no_job_query" - a configuration
+  // problem, not a per-message one, so it is NOT reported through `errors`. See
+  // buildQuery/buildJobQuery.
+  let query;
+  if (typeof prebuiltQuery === "string" && prebuiltQuery.trim()) {
+    query = prebuiltQuery.trim();
+  } else if (job) {
+    query = buildJobQuery({ job, since, sinceDays: config.sinceDays, now: () => new Date(now()) });
+  } else {
+    let domains = toDomainList(searchDomains);
+    if (domains.length === 0) {
+      const connection = await getConnection(userId, { env });
+      domains = toDomainList(connection?.searchDomains);
+    }
+    query = buildQuery({ searchDomains: domains, since, sinceDays: config.sinceDays, now: () => new Date(now()) });
   }
-  // Throws with code "no_search_domains" - a configuration problem, not a
-  // per-message one, so it is NOT reported through `errors`. See buildQuery.
-  const query = buildQuery({ searchDomains: domains, since, sinceDays: config.sinceDays, now: () => new Date(now()) });
 
   // Any ReauthRequiredError from here propagates untouched: it is the one failure
   // the user can actually fix.
@@ -990,6 +1185,9 @@ export async function fetchCandidateMessages(
 
   logLine("calendar.gmail.scan_complete", {
     userId,
+    // Counts, statuses and opaque ids only - never the query itself, which
+    // carries the school name and every search term the user typed.
+    processingJobId,
     listed: ids.length,
     fetched: messages.length,
     failed: errors.length,
