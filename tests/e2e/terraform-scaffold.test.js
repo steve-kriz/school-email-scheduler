@@ -309,7 +309,14 @@ describe('Terraform Scaffold E2E Tests', () => {
               cwd: TERRAFORM_DIR,
               encoding: 'utf-8',
               stdio: ['pipe', 'pipe', 'pipe'],
-              timeout: 30000
+              // Several e2e suites run a full-config `terraform validate` in
+              // this one shared directory concurrently, each loading the 800MB+
+              // AWS provider schema. Under that contention this run exceeded the
+              // old 30s ceiling and was killed - surfacing as "failed with
+              // status null" and an empty stderr, indistinguishable from a
+              // genuinely broken config. The ceiling is now generous so a kill
+              // means a real hang, not a busy machine.
+              timeout: 300000
             }
           );
         } catch (error) {
@@ -317,7 +324,10 @@ describe('Terraform Scaffold E2E Tests', () => {
           const stderr = error.stderr || '';
           console.error('Terraform validate output:', output);
           console.error('Terraform validate stderr:', stderr);
-          assert.fail(`terraform validate failed with status ${error.status}: ${stderr}`);
+          assert.fail(
+            `terraform validate failed with status ${error.status} (signal ${error.signal}): ` +
+            `${stderr || output || error.message}`
+          );
         }
 
         // `terraform validate` exits 0 on warnings alone, so the exit code by
@@ -354,10 +364,16 @@ describe('Terraform Scaffold E2E Tests', () => {
           `Expected terraform to evaluate local.name_prefix to "au-dev-receptionhq", got "${namePrefix}"`);
       });
 
-      it('Given the dev/au tfvars are loaded, When the name_prefix_short local is evaluated, Then it equals "au-dev-rhq"', () => {
-        const namePrefixShort = evaluateTerraformExpression(workspace, 'local.name_prefix_short');
-        assert.equal(namePrefixShort, 'au-dev-rhq',
-          `Expected terraform to evaluate local.name_prefix_short to "au-dev-rhq", got "${namePrefixShort}"`);
+      it('Given local.name_prefix_short was removed with the ALB target group, When it is evaluated, Then terraform rejects it as an unsupported local', () => {
+        // TASK-051 deleted local.name_prefix_short (and var.project_name_short)
+        // because TASK-049 removed its only consumer, the 32-char-capped ALB
+        // target group name. Asserting the failure - rather than deleting the
+        // test - is what proves the local is really gone rather than merely
+        // no longer looked at.
+        assert.throws(
+          () => evaluateTerraformExpression(workspace, 'local.name_prefix_short'),
+          /name_prefix_short|Unsupported attribute|not been declared/,
+          'local.name_prefix_short still evaluates; TASK-051 was supposed to remove it');
       });
 
       it('Given the dev/au tfvars are loaded, When the secret_name local is evaluated, Then it equals "dev-au/app-config/school_calendar_services"', () => {
@@ -397,19 +413,21 @@ describe('Terraform Scaffold E2E Tests', () => {
 
     describe('Scenario: Stale DNS does not silently serve nothing (TASK-049)', () => {
       it('Given the Route53 A-ALIAS previously pointed at the shared ALB, When the listener rule for this app is removed, Then the record is removed too', () => {
-        // sub_domain is still a real variable other things may use, so it is
-        // still asserted; what must NOT survive is the A-ALIAS built from it,
-        // because the /calendar* listener rule it depended on is gone. Leaving
-        // it would hand users a hostname that resolves to a load balancer with
-        // no matching rule.
+        // TASK-049 removed the A-ALIAS; TASK-051 then removed the now-orphaned
+        // sub_domain variable and its tfvars key. So sub_domain is no longer
+        // asserted to equal "calendar" - it is asserted to be absent from both
+        // sides at once, which is the only state terraform accepts (a declared
+        // variable with no value is a hard error; a tfvars key with no
+        // declaration is an "undeclared variable" warning).
         const tfvarsPath = path.join(CONFIG_DIR, 'dev', 'au.tfvars');
         assert.ok(fs.existsSync(tfvarsPath), 'dev/au.tfvars not found');
         const tfvarsContent = fs.readFileSync(tfvarsPath, 'utf-8');
 
-        const subDomainMatch = tfvarsContent.match(/sub_domain\s*=\s*"([^"]+)"/);
-        assert.ok(subDomainMatch, 'sub_domain not found in tfvars');
-        assert.equal(subDomainMatch[1], 'calendar',
-          `Expected sub_domain to be "calendar", got "${subDomainMatch[1]}"`);
+        assert.ok(!/^\s*sub_domain\s*=/m.test(tfvarsContent),
+          'dev/au.tfvars still assigns sub_domain, but variable "sub_domain" was removed');
+        const variablesTf = fs.readFileSync(path.join(TERRAFORM_DIR, 'variables.tf'), 'utf-8');
+        assert.ok(!/^\s*variable\s+"sub_domain"/m.test(variablesTf),
+          'variable "sub_domain" is still declared, but nothing sets or reads it');
 
         const mainTfPath = path.join(TERRAFORM_DIR, 'main.tf');
         const mainTfContent = fs.readFileSync(mainTfPath, 'utf-8');
@@ -551,15 +569,20 @@ describe('Terraform Scaffold E2E Tests', () => {
       });
     });
 
-    describe('Scenario Outline: Every tenant has a config file', () => {
-      const examples = [
-        { path: 'config/dev/au.tfvars', desc: 'dev/au' },
+    describe('Scenario Outline: Every deployable tenant has a config file, and only deployable tenants do', () => {
+      // TASK-051 cut this stack to one deployable environment. The outline used
+      // to have four examples; the three prod rows moved to the "removed" table
+      // below so their absence is asserted, not merely unvisited.
+      const present = [
+        { path: 'config/dev/au.tfvars', desc: 'dev/au' }
+      ];
+      const removed = [
         { path: 'config/prod/au.tfvars', desc: 'prod/au' },
         { path: 'config/prod/uk.tfvars', desc: 'prod/uk' },
         { path: 'config/prod/us.tfvars', desc: 'prod/us' }
       ];
 
-      examples.forEach(example => {
+      present.forEach(example => {
         it(`Given the terraform config directory, Then a tfvars file exists at "${example.path}" (${example.desc})`, () => {
           const fullPath = path.join(TERRAFORM_DIR, example.path);
           assert.ok(fs.existsSync(fullPath),
@@ -568,6 +591,23 @@ describe('Terraform Scaffold E2E Tests', () => {
           const content = fs.readFileSync(fullPath, 'utf-8');
           assert.ok(content.length > 0, `tfvars file is empty: ${fullPath}`);
         });
+      });
+
+      removed.forEach(example => {
+        it(`Given the terraform config directory, Then no tfvars file exists at "${example.path}" (${example.desc} is no longer deployable)`, () => {
+          const fullPath = path.join(TERRAFORM_DIR, example.path);
+          assert.ok(!fs.existsSync(fullPath),
+            `${example.path} still exists, but TASK-051 removed ${example.desc} as a deployable tenant`);
+        });
+      });
+
+      it('And terraform/config/ contains no directory other than dev/', () => {
+        const dirs = fs.readdirSync(CONFIG_DIR, { withFileTypes: true })
+          .filter(entry => entry.isDirectory())
+          .map(entry => entry.name)
+          .sort();
+        assert.deepEqual(dirs, ['dev'],
+          `terraform/config/ should contain only dev/ after TASK-051, found: ${dirs.join(', ')}`);
       });
     });
   });

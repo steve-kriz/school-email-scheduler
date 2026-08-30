@@ -4,7 +4,7 @@
  *
  * Usage:
  *   npm run check:oauth-config -- --env dev --tenant au
- *   node scripts/check-oauth-config.mjs --env prod --tenant uk [--region eu-west-2]
+ *   node scripts/check-oauth-config.mjs --env dev --tenant au [--region ap-southeast-2]
  *
  * Reads `${environment}-${tenant}/app-config/school_calendar_services` from AWS
  * Secrets Manager and reports **key presence and shape only**:
@@ -51,12 +51,14 @@ export const MIN_SESSION_SECRET_BYTES = 32;
  * Region each environment/tenant pair is deployed to, mirroring
  * terraform/config/<environment>/<tenant>.tfvars. Used only as a default for
  * the real AWS lookup; an unknown pair falls back to the ambient region.
+ *
+ * Since TASK-051 there is exactly one tfvars file - terraform/config/dev/au.tfvars
+ * - so dev-au is the only pair with a known region. The prod au/uk/us entries
+ * were removed with their tfvars files. This script still works for any pair:
+ * an unlisted one just needs --region (or AWS_REGION) supplied explicitly.
  */
 export const TENANT_REGIONS = {
-  'dev-au': 'ap-southeast-2',
-  'prod-au': 'ap-southeast-2',
-  'prod-uk': 'eu-west-2',
-  'prod-us': 'us-west-1'
+  'dev-au': 'ap-southeast-2'
 };
 
 const DEFAULT_REGION = 'ap-southeast-2';

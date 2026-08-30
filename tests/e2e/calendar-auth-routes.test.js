@@ -1306,9 +1306,22 @@ describe('Calendar OAuth Routes - E2E Tests', () => {
         { secret: sessionSecret, nowSeconds: now, ttlSeconds: 3600 }
       );
 
-      // Tamper with only the last byte of the signature
+      // Tamper with only the last BYTE of the signature.
+      //
+      // This is done by decoding, flipping a bit in the final byte, and
+      // re-encoding - NOT by swapping the final base64url CHARACTER. A 32-byte
+      // HMAC-SHA256 encodes to 43 base64url characters (43 x 6 = 258 bits), so
+      // the last character carries only 2 significant bits and 4 unused padding
+      // bits. Swapping it for a neighbouring character therefore decodes to the
+      // *identical* 32 bytes about 6% of the time, the tampered token verifies
+      // cleanly, and the assertion below fails with 200 !== 401 on a run that
+      // changed nothing. Flipping a real bit makes the tamper unconditional.
       const [payload, signature] = validToken.split('.');
-      const tamperedSig = signature.slice(0, -1) + (signature[signature.length - 1] === 'A' ? 'B' : 'A');
+      const sigBytes = Buffer.from(signature, 'base64url');
+      sigBytes[sigBytes.length - 1] ^= 0x01;
+      const tamperedSig = sigBytes.toString('base64url');
+      assert.notEqual(tamperedSig, signature,
+        'the signature tamper did not change the signature - this test would prove nothing');
       const tamperedToken = payload + '.' + tamperedSig;
 
       const event = {

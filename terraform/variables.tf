@@ -3,10 +3,6 @@ locals {
 }
 
 locals {
-  name_prefix_short = "${var.tenant}-${var.environment}-${var.project_name_short}"
-}
-
-locals {
   secret_name = "${var.environment}-${var.tenant}/app-config/school_calendar_services"
 }
 
@@ -15,17 +11,15 @@ variable "project_name" {
   type        = string
 }
 
+# var.project_name_short (and local.name_prefix_short, built from it) was removed
+# by TASK-051. Its only consumer was the ALB target group's 32-character-capped
+# name, which TASK-049 deleted along with the rest of the ALB ingress.
 
-variable "project_name_short" {
-  description = "Name of Project abbreviated, for resource names with a short length limit"
-  type        = string
-}
-
-
-variable "account_id" {
-  description = "AWS Account ID"
-  type        = string
-}
+# var.account_id was removed by TASK-051. The two places that still needed an
+# account id in a constructed ARN - local.calendar_function_arn in
+# lambda_calendar.tf and the ManageScanSchedules resource scope in
+# scheduler_calendar.tf - now read data.aws_caller_identity.current.account_id,
+# the same source kms_calendar.tf already used.
 
 variable "environment" {
   description = "Name of Environment"
@@ -47,71 +41,30 @@ variable "terraform_remote_state_basestack_config" {
   type        = map(string)
 }
 
-variable "terraform_remote_state_legacystack_config" {
-  description = "Terraform Remote State Config"
-  type        = map(string)
-}
+# var.terraform_remote_state_legacystack_config and its
+# data.terraform_remote_state.legacystack in provider.tf were removed by
+# TASK-051 - nothing in this stack ever read an output from that state.
+# data.terraform_remote_state.basestack above is NOT dead: the Lambda's
+# vpc_config and security group are built from its private_subnet_ids and
+# vpc_id outputs.
 
-variable "timezone" {
-  description = "Timezone of the tenant"
-  type        = map(string)
-  default = {
-    au = "AUS Eastern Standard Time"
-    uk = "GMT Standard Time"
-    us = "US Mountain Standard Time"
-  }
-}
-
-variable "geo_id" {
-  description = "Geo ID of the tenant"
-  type        = map(number)
-  default = {
-    au = 12
-    uk = 242
-    us = 244
-  }
-}
-
-variable "language" {
-  description = "Language of the tenant"
-  type        = map(string)
-  default = {
-    au = "en-AU"
-    uk = "en-GB"
-    us = "en-US"
-  }
-}
+# var.timezone, var.geo_id and var.language - per-tenant maps keyed au/uk/us -
+# were removed by TASK-051. Nothing referenced them, and this stack now deploys
+# a single environment (dev/au), so there is no per-tenant lookup to serve.
 
 variable "Alert_SNS_ARN" {
   description = "The ARN the alerts will go"
   type        = string
 }
 
-variable "hosted_zone_id" {
-  description = "the zone id to attach the sub-domain to like (Z01295023U1SROTEMSPWK)"
-  type        = string
-}
-
-variable "hosted_zone" {
-  description = "the hosted zone like au.dev.receptionhq.com that the domain will live on"
-  type        = string
-}
-
-# NOT USED BY THIS CONFIGURATION SINCE TASK-049, like alb_name/hosted_zone/
-# hosted_zone_id below and above: the app is served from a Lambda function URL,
-# so there is no ALB listener rule host condition and no Route53 record built
-# from this any more. It stays declared because all four config/*.tfvars set it
-# and an undeclared variable in a .tfvars file warns on every plan.
-variable "sub_domain" {
-  description = "the sub domain to be created for the web app (unused since TASK-049 - the calendar is served from aws_lambda_function_url.calendar, see lambda_calendar.tf)"
-  type        = string
-}
-
-variable "alb_name" {
-  description = "the name of the alb to attach to"
-  type        = string
-}
-
+# var.hosted_zone_id, var.hosted_zone, var.sub_domain and var.alb_name were
+# removed by TASK-051. TASK-049 replaced the ALB + Route53 ingress with
+# aws_lambda_function_url.calendar, which left all four declared but read by
+# nothing; TASK-051 deleted the declarations and the tfvars keys that set them
+# in the same change (an orphaned tfvars key only warns, but a declaration with
+# no default and no value is a hard error, so the two sides must move together).
+# There is no repo-owned hostname in front of the function URL - if one is ever
+# put there, PUBLIC_BASE_URL is the knob, not these.
 
 variable "manage_lambda_log_groups" {
   description = <<-EOT

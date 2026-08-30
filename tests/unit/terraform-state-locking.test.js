@@ -161,7 +161,16 @@ describe('TASK-050 unit: S3-native state locking replaces the DynamoDB lock tabl
 
   // -------------------------------------------------------------------------
   describe('the terraform_remote_state data sources drop the inert lock table key', () => {
-    for (const dataSource of ['basestack', 'legacystack']) {
+    // Only basestack now: TASK-051 deleted data.terraform_remote_state.legacystack
+    // (nothing in this stack ever read an output from it). Its absence is asserted
+    // explicitly below rather than left as a silently shorter loop.
+    it('legacystack is gone entirely, so there is no second remote state to check', () => {
+      assert.ok(
+        !extractLabelledBlock(providerContent, 'data\\s+"terraform_remote_state"\\s+"legacystack"'),
+        'data "terraform_remote_state" "legacystack" is still declared in provider.tf; TASK-051 removed it');
+    });
+
+    for (const dataSource of ['basestack']) {
       it(`${dataSource} indexes exactly bucket, key and region`, () => {
         const body = extractLabelledBlock(
           providerContent, `data\\s+"terraform_remote_state"\\s+"${dataSource}"`);

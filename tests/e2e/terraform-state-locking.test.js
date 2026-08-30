@@ -409,13 +409,19 @@ describe('Feature: Terraform state locking uses S3 alone', () => {
     });
 
     it('Given terraform/provider.tf, Then no data source indexes a dynamodb_table key', () => {
-      for (const dataSource of ['basestack', 'legacystack']) {
+      // basestack is the only remote state left: TASK-051 deleted the
+      // legacystack one. Its absence is asserted below so a shorter loop cannot
+      // be mistaken for dropped coverage.
+      for (const dataSource of ['basestack']) {
         const body = extractLabelledBlock(
           providerContent, `data\\s+"terraform_remote_state"\\s+"${dataSource}"`);
         assert.ok(body, `no terraform_remote_state "${dataSource}" data source found`);
         assert.ok(!maskCommentsAndStrings(body).includes('dynamodb_table'),
           `the ${dataSource} data source still indexes ["dynamodb_table"]`);
       }
+      assert.ok(
+        !extractLabelledBlock(providerContent, 'data\\s+"terraform_remote_state"\\s+"legacystack"'),
+        'data "terraform_remote_state" "legacystack" is still declared; TASK-051 removed it');
     });
 
     for (const varFile of TFVARS_FILES) {
@@ -461,8 +467,8 @@ describe('Feature: Terraform state locking uses S3 alone', () => {
     //
     // So the full-config validate is deliberately left to those existing
     // suites (the ticket names them as must-stay-green), and this scenario
-    // validates the part THIS ticket actually edited - variables.tf plus all
-    // four tfvars - in an isolated, provider-free workspace that costs
+    // validates the part THIS ticket actually edited - variables.tf plus every
+    // surviving tfvars file - in an isolated, provider-free workspace that costs
     // milliseconds and contends with nothing.
     let workspace;
 

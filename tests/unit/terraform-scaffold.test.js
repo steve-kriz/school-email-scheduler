@@ -10,6 +10,28 @@ const PROJECT_ROOT = path.join(__dirname, '..', '..');
 const TERRAFORM_DIR = path.join(PROJECT_ROOT, 'terraform');
 const CONFIG_DIR = path.join(TERRAFORM_DIR, 'config');
 
+/**
+ * Drop every `#` / `//` comment line from HCL text. TASK-051 left long
+ * explanatory comments naming the things it removed (var.account_id,
+ * allowed_account_ids, legacystack, aws_global). A plain `includes()` over the
+ * raw file would see those names and conclude the code is still there, so the
+ * "is it gone?" assertions must look at code only.
+ */
+function stripHclComments(content) {
+  return content
+    .split('\n')
+    .filter(line => !/^\s*(#|\/\/)/.test(line))
+    .join('\n');
+}
+
+/** The inverse: only the comment text, for asserting a removal is documented. */
+function hclCommentText(content) {
+  return content
+    .split('\n')
+    .filter(line => /^\s*(#|\/\/)/.test(line))
+    .join('\n');
+}
+
 describe('Terraform Scaffold Unit Tests', () => {
   describe('provider.tf validation', () => {
     let providerContent;
@@ -49,20 +71,42 @@ describe('Terraform Scaffold Unit Tests', () => {
         'required_version >= 1.10 not declared in the terraform block');
     });
 
-    it('should declare regional provider constrained by allowed_account_ids', () => {
+    // TASK-051 removed the allowed_account_ids wrong-account guard along with
+    // var.account_id. That is an accepted, informed regression, NOT an
+    // oversight, so what is asserted now is (a) the argument really is gone and
+    // (b) a comment says so - a silent removal would leave the next reader
+    // unable to tell a deliberate drop from a botched refactor.
+    it('should declare exactly one regional aws provider with no allowed_account_ids argument', () => {
       assert.ok(providerContent.includes('provider "aws"'),
         'aws provider not declared');
-      assert.ok(providerContent.includes('allowed_account_ids = [var.account_id]'),
-        'allowed_account_ids constraint not found');
+
+      const providerBlocks = providerContent.match(/^provider\s+"aws"\s*\{/gm) || [];
+      assert.equal(providerBlocks.length, 1,
+        `expected exactly one provider "aws" block, found ${providerBlocks.length}`);
+
+      const uncommented = stripHclComments(providerContent);
+      assert.ok(!uncommented.includes('allowed_account_ids'),
+        'allowed_account_ids is still an active argument; TASK-051 removed it');
+      assert.ok(!uncommented.includes('var.account_id'),
+        'provider.tf still references var.account_id, which no longer exists');
     });
 
-    it('should declare aws_global (us-east-1) aliased provider', () => {
-      assert.ok(providerContent.includes('alias'),
-        'alias not declared for second provider');
-      assert.ok(providerContent.includes('aws_global'),
-        'aws_global alias not found');
-      assert.ok(providerContent.includes('us-east-1'),
-        'us-east-1 region not declared for global provider');
+    it('should document the dropped account-mismatch guard rather than leave it silently missing', () => {
+      const comments = hclCommentText(providerContent);
+      assert.ok(comments.includes('allowed_account_ids'),
+        'no comment in provider.tf mentions allowed_account_ids; the dropped guard is silently missing');
+      assert.match(comments, /deliberate|deliberately|accepted|informed regression/i,
+        'the allowed_account_ids comment does not state the removal was deliberate');
+    });
+
+    it('should NOT declare an aws_global (us-east-1) aliased provider', () => {
+      const uncommented = stripHclComments(providerContent);
+      assert.ok(!uncommented.includes('aws_global'),
+        'the aws_global provider alias survives, but no resource ever set provider = aws.aws_global');
+      assert.ok(!/^\s*alias\s*=/m.test(uncommented),
+        'a provider alias is still declared in provider.tf');
+      assert.ok(!uncommented.includes('us-east-1'),
+        'us-east-1 is still hardcoded in provider.tf; the global provider was removed');
     });
 
     it('should declare basestack terraform_remote_state data source', () => {
@@ -72,11 +116,12 @@ describe('Terraform Scaffold Unit Tests', () => {
         'terraform_remote_state_basestack_config not used in basestack data source');
     });
 
-    it('should declare legacystack terraform_remote_state data source', () => {
-      assert.ok(providerContent.includes('data "terraform_remote_state" "legacystack"'),
-        'legacystack remote state data source not found');
-      assert.ok(providerContent.includes('terraform_remote_state_legacystack_config'),
-        'terraform_remote_state_legacystack_config not used in legacystack data source');
+    it('should NOT declare a legacystack terraform_remote_state data source', () => {
+      const uncommented = stripHclComments(providerContent);
+      assert.ok(!uncommented.includes('data "terraform_remote_state" "legacystack"'),
+        'legacystack remote state data source still declared; nothing ever read an output from it');
+      assert.ok(!uncommented.includes('terraform_remote_state_legacystack_config'),
+        'terraform_remote_state_legacystack_config still referenced in provider.tf');
     });
   });
 
@@ -122,17 +167,16 @@ describe('Terraform Scaffold Unit Tests', () => {
         'local.name_prefix must interpolate var.tenant, var.environment then var.project_name in that order');
     });
 
-    it('should define local.name_prefix_short', () => {
-      assert.ok(variablesContent.includes('name_prefix_short'),
-        'name_prefix_short local not defined');
-      assert.ok(variablesContent.includes('project_name_short'),
-        'local.name_prefix_short does not reference var.project_name_short');
-    });
-
-    it('should interpolate local.name_prefix_short as tenant-environment-project_name_short in that order', () => {
-      assert.equal(localAssignment('name_prefix_short'),
-        '"${var.tenant}-${var.environment}-${var.project_name_short}"',
-        'local.name_prefix_short must interpolate var.tenant, var.environment then var.project_name_short in that order');
+    // TASK-051 removed local.name_prefix_short and var.project_name_short. Its
+    // only consumer was the ALB target group's 32-char-capped name, which
+    // TASK-049 deleted with the rest of the ALB ingress. local.name_prefix is
+    // NOT affected - it is asserted byte-for-byte above and must not drift.
+    it('should NOT define local.name_prefix_short any more', () => {
+      const code = stripHclComments(variablesContent);
+      assert.ok(!code.includes('name_prefix_short'),
+        'local.name_prefix_short is still defined, but the ALB target group it named is gone');
+      assert.ok(!code.includes('project_name_short'),
+        'var.project_name_short is still referenced in variables.tf');
     });
 
     it('should define local.secret_name', () => {
@@ -157,16 +201,6 @@ describe('Terraform Scaffold Unit Tests', () => {
         'project_name variable not declared');
     });
 
-    it('should declare variable.project_name_short', () => {
-      assert.ok(variablesContent.includes('variable "project_name_short"'),
-        'project_name_short variable not declared');
-    });
-
-    it('should declare variable.account_id', () => {
-      assert.ok(variablesContent.includes('variable "account_id"'),
-        'account_id variable not declared');
-    });
-
     it('should declare variable.environment', () => {
       assert.ok(variablesContent.includes('variable "environment"'),
         'environment variable not declared');
@@ -187,34 +221,67 @@ describe('Terraform Scaffold Unit Tests', () => {
         'terraform_remote_state_basestack_config variable not declared');
     });
 
-    it('should declare variable.terraform_remote_state_legacystack_config', () => {
-      assert.ok(variablesContent.includes('variable "terraform_remote_state_legacystack_config"'),
-        'terraform_remote_state_legacystack_config variable not declared');
-    });
-
-    it('should declare variable.sub_domain', () => {
-      assert.ok(variablesContent.includes('variable "sub_domain"'),
-        'sub_domain variable not declared');
-    });
-
-    it('should declare variable.hosted_zone_id', () => {
-      assert.ok(variablesContent.includes('variable "hosted_zone_id"'),
-        'hosted_zone_id variable not declared');
-    });
-
-    it('should declare variable.hosted_zone', () => {
-      assert.ok(variablesContent.includes('variable "hosted_zone"'),
-        'hosted_zone variable not declared');
-    });
-
-    it('should declare variable.alb_name', () => {
-      assert.ok(variablesContent.includes('variable "alb_name"'),
-        'alb_name variable not declared');
-    });
-
     it('should declare variable.Alert_SNS_ARN', () => {
       assert.ok(variablesContent.includes('variable "Alert_SNS_ARN"'),
         'Alert_SNS_ARN variable not declared');
+    });
+
+    // TASK-051 deleted these ten declarations. A declaration with no default
+    // and no tfvars value is a hard `No value for required variable` error, and
+    // a `var.X` reference to an undeclared variable is a hard `Reference to
+    // undeclared input variable` error - so declaration and reference had to
+    // move together, and that is exactly what is asserted here.
+    const REMOVED_VARIABLES = [
+      'sub_domain',
+      'hosted_zone',
+      'hosted_zone_id',
+      'alb_name',
+      'project_name_short',
+      'timezone',
+      'geo_id',
+      'language',
+      'account_id',
+      'terraform_remote_state_legacystack_config'
+    ];
+
+    REMOVED_VARIABLES.forEach(name => {
+      it(`should NOT declare variable.${name} any more`, () => {
+        assert.ok(!new RegExp(`^\\s*variable\\s+"${name}"`, 'm').test(variablesContent),
+          `variable "${name}" is still declared in variables.tf; TASK-051 removed it`);
+      });
+    });
+
+    it('should leave zero var.X references to any removed variable in any .tf file', () => {
+      const tfFiles = fs.readdirSync(TERRAFORM_DIR).filter(f => f.endsWith('.tf'));
+      assert.ok(tfFiles.length > 0, 'no .tf files found to scan');
+
+      const offenders = [];
+      tfFiles.forEach(file => {
+        const code = stripHclComments(fs.readFileSync(path.join(TERRAFORM_DIR, file), 'utf-8'));
+        REMOVED_VARIABLES.forEach(name => {
+          // \b on the right stops var.hosted_zone matching var.hosted_zone_id
+          // (and vice versa) and reporting a phantom offender.
+          if (new RegExp(`var\\.${name}\\b`).test(code)) {
+            offenders.push(`${file} -> var.${name}`);
+          }
+        });
+      });
+
+      assert.deepEqual(offenders, [],
+        `these .tf files still reference removed variables, which terraform rejects as ` +
+        `"Reference to undeclared input variable": ${offenders.join(', ')}`);
+    });
+
+    it('should keep every still-needed variable declared', () => {
+      const KEPT_VARIABLES = [
+        'region', 'environment', 'tenant', 'project_name', 'Alert_SNS_ARN', 'tags',
+        'manage_lambda_log_groups', 'calendar_log_level', 'anthropic_model',
+        'public_base_url', 'terraform_remote_state_basestack_config'
+      ];
+      KEPT_VARIABLES.forEach(name => {
+        assert.ok(new RegExp(`^\\s*variable\\s+"${name}"`, 'm').test(variablesContent),
+          `variable "${name}" must still be declared, but is missing from variables.tf`);
+      });
     });
   });
 
@@ -295,45 +362,57 @@ describe('Terraform Scaffold Unit Tests', () => {
   });
 
   describe('tfvars files validation', () => {
-    it('dev/au.tfvars should exist with sub_domain = "calendar"', () => {
+    it('dev/au.tfvars should exist and be the only tfvars file in the repo', () => {
       const tfvarsPath = path.join(CONFIG_DIR, 'dev', 'au.tfvars');
       assert.ok(fs.existsSync(tfvarsPath), 'dev/au.tfvars not found');
-      const content = fs.readFileSync(tfvarsPath, 'utf-8');
-      assert.ok(content.includes('sub_domain         = "calendar"'),
-        'sub_domain not set to "calendar" in dev/au.tfvars');
+
+      const found = [];
+      const walk = dir => {
+        fs.readdirSync(dir, { withFileTypes: true }).forEach(entry => {
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) walk(full);
+          else if (entry.name.endsWith('.tfvars')) found.push(path.relative(CONFIG_DIR, full).replace(/\\/g, '/'));
+        });
+      };
+      walk(CONFIG_DIR);
+
+      assert.deepEqual(found.sort(), ['dev/au.tfvars'],
+        `terraform/config/ should contain exactly one tfvars file after TASK-051, found: ${found.join(', ')}`);
     });
 
-    it('dev/au.tfvars should have terraform_remote_state_*_config maps', () => {
-      const tfvarsPath = path.join(CONFIG_DIR, 'dev', 'au.tfvars');
-      const content = fs.readFileSync(tfvarsPath, 'utf-8');
+    it('dev/au.tfvars should no longer assign any removed key', () => {
+      // sub_domain used to be asserted as "calendar" here. Its variable is gone,
+      // and an orphaned tfvars key produces a "Value for undeclared variable"
+      // warning, so the key had to go with the declaration.
+      const content = fs.readFileSync(path.join(CONFIG_DIR, 'dev', 'au.tfvars'), 'utf-8');
+      const code = stripHclComments(content);
+      ['sub_domain', 'hosted_zone', 'hosted_zone_id', 'alb_name', 'project_name_short',
+        'timezone', 'geo_id', 'language', 'account_id',
+        'terraform_remote_state_legacystack_config'].forEach(key => {
+        assert.ok(!new RegExp(`^\\s*${key}\\s*=`, 'm').test(code),
+          `dev/au.tfvars still assigns "${key}", whose variable declaration was removed - ` +
+          'terraform would warn "Value for undeclared variable"');
+      });
+    });
+
+    it('dev/au.tfvars should keep the basestack remote state map with bucket, key and region', () => {
+      const content = fs.readFileSync(path.join(CONFIG_DIR, 'dev', 'au.tfvars'), 'utf-8');
       assert.ok(content.includes('terraform_remote_state_basestack_config'),
-        'terraform_remote_state_basestack_config not found');
-      assert.ok(content.includes('terraform_remote_state_legacystack_config'),
-        'terraform_remote_state_legacystack_config not found');
+        'terraform_remote_state_basestack_config not found - the Lambda would lose its VPC wiring');
+      ['bucket', 'key', 'region'].forEach(key => {
+        assert.match(content, new RegExp(`^\\s*${key}\\s*=\\s*"[^"]+"`, 'm'),
+          `terraform_remote_state_basestack_config is missing a non-empty ${key}`);
+      });
     });
 
-    it('prod/au.tfvars should exist with sub_domain = "calendar"', () => {
-      const tfvarsPath = path.join(CONFIG_DIR, 'prod', 'au.tfvars');
-      assert.ok(fs.existsSync(tfvarsPath), 'prod/au.tfvars not found');
-      const content = fs.readFileSync(tfvarsPath, 'utf-8');
-      assert.ok(content.includes('sub_domain         = "calendar"'),
-        'sub_domain not set to "calendar" in prod/au.tfvars');
-    });
-
-    it('prod/uk.tfvars should exist with sub_domain = "calendar"', () => {
-      const tfvarsPath = path.join(CONFIG_DIR, 'prod', 'uk.tfvars');
-      assert.ok(fs.existsSync(tfvarsPath), 'prod/uk.tfvars not found');
-      const content = fs.readFileSync(tfvarsPath, 'utf-8');
-      assert.ok(content.includes('sub_domain         = "calendar"'),
-        'sub_domain not set to "calendar" in prod/uk.tfvars');
-    });
-
-    it('prod/us.tfvars should exist with sub_domain = "calendar"', () => {
-      const tfvarsPath = path.join(CONFIG_DIR, 'prod', 'us.tfvars');
-      assert.ok(fs.existsSync(tfvarsPath), 'prod/us.tfvars not found');
-      const content = fs.readFileSync(tfvarsPath, 'utf-8');
-      assert.ok(content.includes('sub_domain         = "calendar"'),
-        'sub_domain not set to "calendar" in prod/us.tfvars');
+    it('terraform/config/prod/ should not exist at all', () => {
+      const prodDir = path.join(CONFIG_DIR, 'prod');
+      assert.ok(!fs.existsSync(prodDir),
+        'terraform/config/prod/ still exists; TASK-051 removed prod as a deployable environment');
+      ['au', 'uk', 'us'].forEach(tenant => {
+        assert.ok(!fs.existsSync(path.join(prodDir, `${tenant}.tfvars`)),
+          `terraform/config/prod/${tenant}.tfvars still exists`);
+      });
     });
   });
 
@@ -345,25 +424,22 @@ describe('Terraform Scaffold Unit Tests', () => {
       assert.ok(stats.isFile(), 'terraform_init_dev_au.sh is not a file');
     });
 
-    it('terraform_init_prod_au.sh should exist and be executable', () => {
-      const scriptPath = path.join(TERRAFORM_DIR, 'terraform_init_prod_au.sh');
-      assert.ok(fs.existsSync(scriptPath), 'terraform_init_prod_au.sh not found');
-      const stats = fs.statSync(scriptPath);
-      assert.ok(stats.isFile(), 'terraform_init_prod_au.sh is not a file');
+    // The three prod init scripts were deleted by TASK-051 - with their tfvars
+    // gone, running one would fail at plan time on missing required variables.
+    ['au', 'uk', 'us'].forEach(tenant => {
+      it(`terraform_init_prod_${tenant}.sh should NOT exist any more`, () => {
+        const scriptPath = path.join(TERRAFORM_DIR, `terraform_init_prod_${tenant}.sh`);
+        assert.ok(!fs.existsSync(scriptPath),
+          `terraform_init_prod_${tenant}.sh still exists, but its config/prod/${tenant}.tfvars is gone`);
+      });
     });
 
-    it('terraform_init_prod_uk.sh should exist and be executable', () => {
-      const scriptPath = path.join(TERRAFORM_DIR, 'terraform_init_prod_uk.sh');
-      assert.ok(fs.existsSync(scriptPath), 'terraform_init_prod_uk.sh not found');
-      const stats = fs.statSync(scriptPath);
-      assert.ok(stats.isFile(), 'terraform_init_prod_uk.sh is not a file');
-    });
-
-    it('terraform_init_prod_us.sh should exist and be executable', () => {
-      const scriptPath = path.join(TERRAFORM_DIR, 'terraform_init_prod_us.sh');
-      assert.ok(fs.existsSync(scriptPath), 'terraform_init_prod_us.sh not found');
-      const stats = fs.statSync(scriptPath);
-      assert.ok(stats.isFile(), 'terraform_init_prod_us.sh is not a file');
+    it('terraform_init_dev_au.sh should be the only init script left', () => {
+      const scripts = fs.readdirSync(TERRAFORM_DIR)
+        .filter(f => /^terraform_init_.*\.sh$/.test(f))
+        .sort();
+      assert.deepEqual(scripts, ['terraform_init_dev_au.sh'],
+        `expected exactly one init script after TASK-051, found: ${scripts.join(', ')}`);
     });
 
     it('dev/au init script should export TF_STATE_KEY with "school_calendar"', () => {
@@ -395,31 +471,15 @@ describe('Terraform Scaffold Unit Tests', () => {
         'terraform workspace select not found in dev/au init script');
     });
 
-    it('prod/au init script should export TF_STATE_KEY with "school_calendar"', () => {
-      const scriptPath = path.join(TERRAFORM_DIR, 'terraform_init_prod_au.sh');
-      const content = fs.readFileSync(scriptPath, 'utf-8');
-      assert.ok(content.includes('TF_STATE_KEY'),
-        'TF_STATE_KEY not exported in prod/au init script');
-      assert.ok(content.includes('school_calendar'),
-        'school_calendar not in TF_STATE_KEY in prod/au init script');
-    });
-
-    it('prod/uk init script should export TF_STATE_KEY with "school_calendar"', () => {
-      const scriptPath = path.join(TERRAFORM_DIR, 'terraform_init_prod_uk.sh');
-      const content = fs.readFileSync(scriptPath, 'utf-8');
-      assert.ok(content.includes('TF_STATE_KEY'),
-        'TF_STATE_KEY not exported in prod/uk init script');
-      assert.ok(content.includes('school_calendar'),
-        'school_calendar not in TF_STATE_KEY in prod/uk init script');
-    });
-
-    it('prod/us init script should export TF_STATE_KEY with "school_calendar"', () => {
-      const scriptPath = path.join(TERRAFORM_DIR, 'terraform_init_prod_us.sh');
-      const content = fs.readFileSync(scriptPath, 'utf-8');
-      assert.ok(content.includes('TF_STATE_KEY'),
-        'TF_STATE_KEY not exported in prod/us init script');
-      assert.ok(content.includes('school_calendar'),
-        'school_calendar not in TF_STATE_KEY in prod/us init script');
+    it('the surviving dev/au init script should not reference a removed prod tenant', () => {
+      const content = fs.readFileSync(path.join(TERRAFORM_DIR, 'terraform_init_dev_au.sh'), 'utf-8');
+      const activeCode = content.split('\n')
+        .filter(line => !line.trim().startsWith('#'))
+        .join('\n');
+      ['prod-au', 'prod-uk', 'prod-us', 'prod_au', 'prod_uk', 'prod_us'].forEach(token => {
+        assert.ok(!activeCode.includes(token),
+          `terraform_init_dev_au.sh's active code mentions "${token}", a tenant that can no longer be deployed`);
+      });
     });
   });
 
@@ -532,11 +592,9 @@ describe('Terraform Scaffold Unit Tests', () => {
     });
 
     it('tfvars files should use variables, not hardcoded values for sensitive data', () => {
+      // dev/au is the only tfvars file left after TASK-051.
       const tfvarsFiles = [
-        path.join(CONFIG_DIR, 'dev', 'au.tfvars'),
-        path.join(CONFIG_DIR, 'prod', 'au.tfvars'),
-        path.join(CONFIG_DIR, 'prod', 'uk.tfvars'),
-        path.join(CONFIG_DIR, 'prod', 'us.tfvars')
+        path.join(CONFIG_DIR, 'dev', 'au.tfvars')
       ];
 
       tfvarsFiles.forEach(tfvarsPath => {
@@ -555,11 +613,9 @@ describe('Terraform Scaffold Unit Tests', () => {
     });
 
     it('init scripts should not contain hardcoded AWS credentials', () => {
+      // dev/au is the only init script left after TASK-051.
       const scripts = [
-        path.join(TERRAFORM_DIR, 'terraform_init_dev_au.sh'),
-        path.join(TERRAFORM_DIR, 'terraform_init_prod_au.sh'),
-        path.join(TERRAFORM_DIR, 'terraform_init_prod_uk.sh'),
-        path.join(TERRAFORM_DIR, 'terraform_init_prod_us.sh')
+        path.join(TERRAFORM_DIR, 'terraform_init_dev_au.sh')
       ];
 
       scripts.forEach(scriptPath => {
