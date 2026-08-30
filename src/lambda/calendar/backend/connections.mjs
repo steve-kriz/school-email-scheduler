@@ -47,13 +47,14 @@ export const SECRET_ATTRIBUTES = ["refreshTokenEnc", "refreshTokenKeyId"];
  */
 export const PUBLIC_ATTRIBUTES = [
   "email",
-  // TASK-005 settings: what the user asked us to watch for. Both are string sets;
-  // `schoolNames` replaced a single `schoolName` scalar in TASK-053, which
-  // `toPublicJson` still reads back as a one-element list for a row that has not
-  // been saved since. The legacy attribute is deliberately NOT in this list - it
-  // is projected UNDER the new name, so no response body ever carries it.
-  "schoolNames",
-  "searchDomains",
+  // TASK-005 settings: what the user asked us to watch for. TASK-055 replaced the
+  // `schoolNames`/`searchDomains` string sets with `processingJobs`, a List of
+  // Maps - one named "search + extract" configuration per entry. The three legacy
+  // attributes (`schoolNames`, `searchDomains` and the pre-TASK-053 `schoolName`
+  // scalar) are deliberately NOT in this list: `toPublicJson` migrates them on
+  // read into one synthesised job, so they are projected UNDER the new name and no
+  // response body ever carries them.
+  "processingJobs",
   // Schedule preferences (written by TASK-005's settings route and TASK-008).
   "scheduleEnabled",
   "scheduleFrequency",
@@ -74,10 +75,17 @@ export const PUBLIC_ATTRIBUTES = [
  * `ddbUpdateItem` instead of a `SET`. Do not "simplify" this back into writing
  * `[]` or `new Set()`.
  *
- * Also how a superseded attribute is retired: a settings save SETs `schoolNames`
- * and REMOVEs the legacy `schoolName` scalar in ONE UpdateItem, which is why
- * `buildUpdateParams` compiles a mixed SET/REMOVE expression rather than one or
- * the other.
+ * Also how a superseded attribute is retired: a settings save SETs
+ * `processingJobs` and REMOVEs the legacy `schoolNames`, `searchDomains` and
+ * `schoolName` attributes in ONE UpdateItem, which is why `buildUpdateParams`
+ * compiles a mixed SET/REMOVE expression rather than one or the other.
+ *
+ * THE EMPTY-SET REASON DOES NOT APPLY TO A LIST (TASK-055). `processingJobs` is
+ * an `L` of `M`, and an empty `L` stores perfectly well - so a job's empty
+ * `searchTerms` is written as an empty list, not a removal. `buildConnectionPatch`
+ * does still use this sentinel for a whole-list-empty `processingJobs`, but purely
+ * so "unset" has ONE representation on the row; that is a consistency choice, not
+ * a DynamoDB constraint.
  *
  * A Symbol cannot appear in a JSON request body, so no client can smuggle a
  * removal through a route that forwards a parsed payload as a patch.
@@ -305,11 +313,92 @@ export function stripSecrets(item) {
  */
 function jsonSafeValue(value) {
   if (value instanceof Set) return [...value].map(String).sort();
+  // A List (`processingJobs`, TASK-055) is already JSON-safe, and its ORDER IS
+  // THE USER'S - unlike a Set, a DynamoDB List preserves it - so it passes
+  // through unsorted and untouched, objects and all.
   if (Array.isArray(value)) return value;
   if (value && typeof value === "object" && Array.isArray(value.SS)) {
     return [...value.SS].map(String).sort();
   }
   return value;
+}
+
+/**
+ * Read a legacy string-set attribute in whatever shape it arrives in.
+ *
+ * `getConnection` returns RAW stored values, so a string set is a JS `Set` from
+ * the document client, `{ SS: [...] }` from the low-level client, or a plain
+ * array if something already normalised it. Blank entries are dropped.
+ *
+ * SORTED, ALWAYS. A DynamoDB string set is UNORDERED, so "the first entry" is only
+ * well defined after sorting - without this, the job synthesised below could name a
+ * different school on two reads of the same unchanged row. Matches the sort
+ * `jsonSafeValue` already applies to a set.
+ *
+ * @param {unknown} value
+ * @returns {string[]} Trimmed, non-empty, sorted.
+ */
+function legacyStringList(value) {
+  const raw = value instanceof Set
+    ? [...value]
+    : Array.isArray(value)
+      ? value
+      : value && typeof value === "object" && Array.isArray(value.SS)
+        ? value.SS
+        : [];
+  return raw
+    .map((entry) => (typeof entry === "string" ? entry.trim() : String(entry).trim()))
+    .filter((entry) => entry !== "")
+    .sort();
+}
+
+/**
+ * Synthesise one "Default" processing job from a row's legacy attributes.
+ *
+ * MIGRATE ON READ, WRITE NOTHING (TASK-055, following TASK-053's precedent). A row
+ * saved before processing jobs existed carries `schoolNames`/`searchDomains` string
+ * sets, or - if it has not been saved since TASK-053 either - a lone `schoolName`
+ * scalar. Rather than run a batch migration, the old shape is folded into the new
+ * one here, on every read, until its owner's next save clears the legacy
+ * attributes for good (see `buildConnectionPatch`). No write is issued by a GET.
+ *
+ * The REMAINING legacy entries are folded in as `searchTerms` rather than dropped:
+ * under the new model a job's school name, domain and search terms are all OR'd
+ * together (TASK-056), so this preserves the full search coverage the user had.
+ *
+ * The result is NOT necessarily valid PUT input - a row with only domains yields
+ * `schoolName: ""`, which the validator refuses. That is intended: the user fills
+ * the gap before their first real save, and the rules are not relaxed to let a
+ * half-migrated job through.
+ *
+ * @param {object} source Raw stored row.
+ * @param {object} fallback
+ * @returns {Array<object>|null} A one-element list, or null when there is no
+ *   legacy data at all.
+ */
+function synthesizeLegacyProcessingJob(source, fallback) {
+  let names = legacyStringList(source.schoolNames !== undefined ? source.schoolNames : fallback.schoolNames);
+  if (names.length === 0) {
+    // TASK-053's own fallback, still needed: a pre-TASK-053 row's school is a
+    // bare scalar string, which reads as a one-element names list.
+    const scalar = source.schoolName !== undefined ? source.schoolName : fallback.schoolName;
+    if (typeof scalar === "string" && scalar.trim() !== "") names = [scalar.trim()];
+  }
+  const domains = legacyStringList(source.searchDomains !== undefined ? source.searchDomains : fallback.searchDomains);
+
+  if (names.length === 0 && domains.length === 0) return null;
+
+  return [
+    {
+      // A placeholder id, not a real one: it is re-synthesised on every read and
+      // is replaced with a server-generated UUID the first time the user saves.
+      id: "default",
+      name: "Default",
+      schoolName: names[0] || "",
+      domain: domains[0] || "",
+      searchTerms: [...names.slice(1), ...domains.slice(1)],
+    },
+  ];
 }
 
 /**
@@ -326,13 +415,15 @@ function jsonSafeValue(value) {
  * inviting the user to re-authorise a grant they already hold. `connected` stays
  * a plain boolean, and is only ever `true` when a stored grant was actually seen.
  *
- * THE ONE LEGACY READ IN THIS MODULE (TASK-053): a row written before
- * `schoolName` became the `schoolNames` string set still carries the old scalar.
- * It is projected here as a one-element `schoolNames` list, so both `/settings`
- * and `/auth/me` - which share this function - see the new shape and nothing
- * downstream has to know the old one existed. `schoolNames` WINS when both are
- * somehow present, and the legacy key is never emitted under its own name. The
- * fallback stays until it can be shown no row still has the scalar; rows migrate
+ * THE ONE LEGACY READ IN THIS MODULE (TASK-053, extended by TASK-055): a row
+ * written before processing jobs existed carries `schoolNames`/`searchDomains`
+ * string sets, or a lone pre-TASK-053 `schoolName` scalar. It is projected here as
+ * a single synthesised "Default" job (see `synthesizeLegacyProcessingJob`), so
+ * both `/settings` and `/auth/me` - which share this function - see the new shape
+ * and nothing downstream has to know the old one existed. A STORED
+ * `processingJobs` list ALWAYS WINS; synthesis only runs when there is none or it
+ * is empty, and no legacy key is ever emitted under its own name. The fallback
+ * stays until it can be shown no row still has the old attributes; rows migrate
  * one at a time as their owners save (see `buildConnectionPatch`).
  *
  * @param {object|null} connection A row from `getConnection`, or null.
@@ -354,9 +445,9 @@ export function toPublicJson(connection, fallback = {}, { lookupFailed = false }
     out[attribute] = value === undefined || value === null || value === "" ? null : jsonSafeValue(value);
   }
 
-  if (out.schoolNames === null) {
-    const legacy = source.schoolName !== undefined ? source.schoolName : fallback.schoolName;
-    if (typeof legacy === "string" && legacy.trim() !== "") out.schoolNames = [legacy.trim()];
+  if (!Array.isArray(out.processingJobs) || out.processingJobs.length === 0) {
+    const synthesized = synthesizeLegacyProcessingJob(source, fallback);
+    if (synthesized) out.processingJobs = synthesized;
   }
 
   const known = lookupFailed !== true;

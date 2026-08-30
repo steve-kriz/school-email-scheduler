@@ -1048,7 +1048,7 @@ export async function handleAuthDisconnect(event, options = {}) {
 /**
  * GET /calendar/api/auth/me - who is signed in, and are they connected?
  *
- * Response body is the `toPublicJson` projection: `email`, `schoolNames`,
+ * Response body is the `toPublicJson` projection: `email`, `processingJobs`,
  * `connected` and `connectionStatus`. No token, no ciphertext, no key id -
  * `connected` is derived from whether a wrapped refresh token exists, so the
  * answer never requires touching the token itself.
@@ -1244,7 +1244,14 @@ export async function handleGetSettings(event, options = {}) {
 }
 
 /**
- * PUT /calendar/api/settings - save the school name and search domains.
+ * PUT /calendar/api/settings - save the user's processing jobs.
+ *
+ * The body carries `processingJobs`: the WHOLE list, always, since this is a
+ * replace and not a merge - a job the caller left out is deleted, and each job
+ * keeps its id only because the client echoed it back (see
+ * `validateProcessingJobs`). The superseded `schoolNames`/`searchDomains` keys are
+ * no longer read at all (TASK-055), so a body carrying only those is a 400 naming
+ * `processingJobs`.
  *
  * Order of checks, and why:
  *  1. Session (401/500). See `resolveSession`: validation feedback is only ever
@@ -1317,11 +1324,12 @@ export async function handlePutSettings(event, options = {}) {
     return jsonResponse(500, { error: "Could not save your settings" }, { origin, allowlist });
   }
 
-  // COUNTS ONLY, for the same reason as the catch above: the names and domains
-  // themselves are personal data and never appear in a log line.
+  // COUNTS ONLY, for the same reason as the catch above: a job name, a school
+  // name, a domain and a search term are all personal data and never appear in a
+  // log line.
   logBasic("[Calendar] Connection settings saved", {
-    schoolNameCount: settings.schoolNames.length,
-    domainCount: settings.searchDomains.length,
+    jobCount: settings.processingJobs.length,
+    searchTermCount: settings.processingJobs.reduce((total, job) => total + job.searchTerms.length, 0),
   });
 
   // The just-validated values are the fallback, so the response echoes what was
