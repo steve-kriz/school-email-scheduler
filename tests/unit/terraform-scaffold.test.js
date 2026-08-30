@@ -109,11 +109,24 @@ describe('Terraform Scaffold Unit Tests', () => {
         'us-east-1 is still hardcoded in provider.tf; the global provider was removed');
     });
 
-    it('should declare basestack terraform_remote_state data source', () => {
-      assert.ok(providerContent.includes('data "terraform_remote_state" "basestack"'),
-        'basestack remote state data source not found');
-      assert.ok(providerContent.includes('terraform_remote_state_basestack_config'),
-        'terraform_remote_state_basestack_config not used in basestack data source');
+    // INVERTED BY TASK-052 (was: "should declare basestack terraform_remote_state
+    // data source"). TASK-052 removed the Lambda's vpc_config and
+    // aws_security_group.calendar_sg - the only two readers of the basestack
+    // state's private_subnet_ids and vpc_id outputs - and deleted the data
+    // source, its variable and its tfvars key in the same change. This stack now
+    // reads NO remote state at all, so the assertion is the exact inverse.
+    it('should NOT declare a basestack terraform_remote_state data source', () => {
+      const uncommented = stripHclComments(providerContent);
+      assert.ok(!uncommented.includes('data "terraform_remote_state" "basestack"'),
+        'basestack remote state data source still declared; TASK-052 removed its last reader');
+      assert.ok(!uncommented.includes('terraform_remote_state_basestack_config'),
+        'terraform_remote_state_basestack_config still referenced in provider.tf');
+    });
+
+    it('should declare no terraform_remote_state data source of any name', () => {
+      const uncommented = stripHclComments(providerContent);
+      assert.ok(!/data\s+"terraform_remote_state"/.test(uncommented),
+        'provider.tf still declares a terraform_remote_state data source; this stack reads no remote state');
     });
 
     it('should NOT declare a legacystack terraform_remote_state data source', () => {
@@ -216,9 +229,15 @@ describe('Terraform Scaffold Unit Tests', () => {
         'tenant variable not declared');
     });
 
-    it('should declare variable.terraform_remote_state_basestack_config', () => {
-      assert.ok(variablesContent.includes('variable "terraform_remote_state_basestack_config"'),
-        'terraform_remote_state_basestack_config variable not declared');
+    // INVERTED BY TASK-052 (was: "should declare
+    // variable.terraform_remote_state_basestack_config"). The declaration went
+    // with data.terraform_remote_state.basestack and the tfvars key, in one
+    // change - a declaration with no default and no value is a hard error, so
+    // the two sides had to move together.
+    it('should NOT declare variable.terraform_remote_state_basestack_config', () => {
+      assert.ok(!/^\s*variable\s+"terraform_remote_state_basestack_config"/m
+        .test(stripHclComments(variablesContent)),
+      'variable "terraform_remote_state_basestack_config" is still declared, but nothing sets or reads it');
     });
 
     it('should declare variable.Alert_SNS_ARN', () => {
@@ -276,7 +295,10 @@ describe('Terraform Scaffold Unit Tests', () => {
       const KEPT_VARIABLES = [
         'region', 'environment', 'tenant', 'project_name', 'Alert_SNS_ARN', 'tags',
         'manage_lambda_log_groups', 'calendar_log_level', 'anthropic_model',
-        'public_base_url', 'terraform_remote_state_basestack_config'
+        // terraform_remote_state_basestack_config was in this list until
+        // TASK-052 deleted the declaration along with its data source and
+        // tfvars key; it is asserted absent above instead.
+        'public_base_url'
       ];
       KEPT_VARIABLES.forEach(name => {
         assert.ok(new RegExp(`^\\s*variable\\s+"${name}"`, 'm').test(variablesContent),
@@ -388,21 +410,31 @@ describe('Terraform Scaffold Unit Tests', () => {
       const code = stripHclComments(content);
       ['sub_domain', 'hosted_zone', 'hosted_zone_id', 'alb_name', 'project_name_short',
         'timezone', 'geo_id', 'language', 'account_id',
-        'terraform_remote_state_legacystack_config'].forEach(key => {
+        'terraform_remote_state_legacystack_config',
+        // Added by TASK-052: removed together with its variable declaration.
+        'terraform_remote_state_basestack_config'].forEach(key => {
         assert.ok(!new RegExp(`^\\s*${key}\\s*=`, 'm').test(code),
           `dev/au.tfvars still assigns "${key}", whose variable declaration was removed - ` +
           'terraform would warn "Value for undeclared variable"');
       });
     });
 
-    it('dev/au.tfvars should keep the basestack remote state map with bucket, key and region', () => {
+    // INVERTED BY TASK-052 (was: "dev/au.tfvars should keep the basestack remote
+    // state map with bucket, key and region", whose failure message claimed "the
+    // Lambda would lose its VPC wiring"). The Lambda no longer HAS VPC wiring -
+    // TASK-052 removed vpc_config, aws_security_group.calendar_sg, the data
+    // source and the variable - so the map is dead config and its bucket/key/
+    // region values must be gone, not merely non-empty.
+    it('dev/au.tfvars should no longer carry the basestack remote state map', () => {
       const content = fs.readFileSync(path.join(CONFIG_DIR, 'dev', 'au.tfvars'), 'utf-8');
-      assert.ok(content.includes('terraform_remote_state_basestack_config'),
-        'terraform_remote_state_basestack_config not found - the Lambda would lose its VPC wiring');
-      ['bucket', 'key', 'region'].forEach(key => {
-        assert.match(content, new RegExp(`^\\s*${key}\\s*=\\s*"[^"]+"`, 'm'),
-          `terraform_remote_state_basestack_config is missing a non-empty ${key}`);
-      });
+      const code = stripHclComments(content);
+      assert.ok(!code.includes('terraform_remote_state_basestack_config'),
+        'terraform_remote_state_basestack_config is still assigned in dev/au.tfvars, but its ' +
+        'variable declaration was removed - terraform would warn "Value for undeclared variable"');
+      assert.ok(!/officehq-tfstate-bucket/.test(code),
+        'the basestack tfstate bucket is still named in dev/au.tfvars');
+      assert.ok(!/terraform_dev_au_basestack\.tfstate/.test(code),
+        'the basestack tfstate object key is still named in dev/au.tfvars');
     });
 
     it('terraform/config/prod/ should not exist at all', () => {

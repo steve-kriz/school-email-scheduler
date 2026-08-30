@@ -301,18 +301,24 @@ export const REMOVED_TFVARS_FILES = [
 ];
 
 /**
- * terraform_remote_state config map variable names still declared. TASK-051
+ * terraform_remote_state config map variable names still declared.
+ *
+ * EMPTY SINCE TASK-052, and that is the assertion, not an oversight. TASK-051
  * deleted data.terraform_remote_state.legacystack and its
  * terraform_remote_state_legacystack_config variable (nothing ever read an
- * output from it); basestack is load-bearing and survives.
+ * output from it) and kept basestack, which at the time really was load-bearing:
+ * the Lambda's vpc_config read outputs.private_subnet_ids and
+ * aws_security_group.calendar_sg read outputs.vpc_id. TASK-052 removed the VPC
+ * attachment and the security group, so basestack lost its last reader and was
+ * removed with its variable and its tfvars key. This stack now reads NO remote
+ * state, so there is no map left whose keys could carry a lock table.
  */
-export const REMOTE_STATE_MAPS = [
-  'terraform_remote_state_basestack_config'
-];
+export const REMOTE_STATE_MAPS = [];
 
-/** The remote state removed by TASK-051, asserted absent. */
+/** The remote states removed by TASK-051 (legacystack) and TASK-052 (basestack), asserted absent. */
 export const REMOVED_REMOTE_STATE_MAPS = [
-  'terraform_remote_state_legacystack_config'
+  'terraform_remote_state_legacystack_config',
+  'terraform_remote_state_basestack_config'
 ];
 
 /**

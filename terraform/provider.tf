@@ -59,15 +59,17 @@ data "aws_partition" "current" {}
 data "aws_region" "current" {}
 data "aws_default_tags" "current" {}
 
-# Read (not written) by this stack: outputs.vpc_id and outputs.private_subnet_ids
-# wire the Lambda into the VPC in lambda_calendar.tf. Do not remove - the
-# companion `legacystack` remote state was dead and was deleted by TASK-051,
-# this one is load-bearing.
-data "terraform_remote_state" "basestack" {
-  backend = "s3"
-  config = {
-    bucket = var.terraform_remote_state_basestack_config["bucket"]
-    key    = var.terraform_remote_state_basestack_config["key"]
-    region = var.terraform_remote_state_basestack_config["region"]
-  }
-}
+# THIS STACK READS NO REMOTE STATE. data.terraform_remote_state.basestack used
+# to sit here and was removed by TASK-052, together with
+# var.terraform_remote_state_basestack_config and the tfvars block that set it.
+# Its only two readers were in lambda_calendar.tf - outputs.private_subnet_ids
+# fed the Lambda's vpc_config and outputs.vpc_id fed
+# aws_security_group.calendar_sg - and TASK-052 removed the VPC attachment and
+# the security group, leaving the state with no reader at all. (The companion
+# `legacystack` remote state had already been deleted as dead by TASK-051.)
+#
+# Nothing here depends on the basestack outputs any more, so this stack no
+# longer needs read access to the basestack state object. If a future ticket
+# genuinely needs a basestack value, re-add the data source AND its variable AND
+# the tfvars key in the same change - a variable with no default and no value is
+# a hard error.

@@ -50,7 +50,11 @@ const REMOVED_VARIABLES = [
   'geo_id',
   'language',
   'account_id',
-  'terraform_remote_state_legacystack_config'
+  'terraform_remote_state_legacystack_config',
+  // Appended by TASK-052: same rule, later ticket. Its declaration, its data
+  // source and its tfvars key were removed in one change once the Lambda's
+  // vpc_config and security group - the only readers - were deleted.
+  'terraform_remote_state_basestack_config'
 ];
 
 // -----------------------------------------------------------------------------
@@ -412,43 +416,63 @@ describe('TASK-051 e2e', () => {
     });
 
     // -------------------------------------------------------------------------
-    describe("Scenario: The basestack remote state survives (it is not per-tenant, it is dev/au's own)", () => {
-      it('Given data.terraform_remote_state.basestack, When lambda_calendar.tf is read, Then it still reads outputs.private_subnet_ids and outputs.vpc_id', () => {
-        const lambdaTf = readTf('lambda_calendar.tf');
-        assert.ok(lambdaTf.includes('data.terraform_remote_state.basestack.outputs.private_subnet_ids'),
-          "the Lambda's vpc_config no longer reads private_subnet_ids from the basestack remote state");
-        assert.ok(lambdaTf.includes('data.terraform_remote_state.basestack.outputs.vpc_id'),
-          "the security group no longer reads vpc_id from the basestack remote state");
+    // REVERSED BY TASK-052. This scenario used to be titled "The basestack
+    // remote state survives (it is not per-tenant, it is dev/au's own)" and
+    // guarded three things: that lambda_calendar.tf still read
+    // outputs.private_subnet_ids and outputs.vpc_id, that the variable and the
+    // data source were still declared, and that dev/au.tfvars still evaluated
+    // the map to a non-empty bucket/key/region.
+    //
+    // TASK-051 was right AT THE TIME: basestack still had two readers. TASK-052
+    // deliberately deleted BOTH of them - the Lambda's vpc_config and
+    // aws_security_group.calendar_sg - which left the remote state with no
+    // reader at all, so the state, its variable and its tfvars key went too.
+    // The guard is kept, pointed the other way, so a future accidental
+    // RE-INTRODUCTION is caught just as the accidental removal used to be.
+    describe('Scenario: The basestack remote state is gone, together with its last reader (TASK-052 reverses TASK-051)', () => {
+      it('Given the VPC attachment was removed, When lambda_calendar.tf is read, Then it reads neither outputs.private_subnet_ids nor outputs.vpc_id', () => {
+        const lambdaTf = codeOnly(readTf('lambda_calendar.tf'));
+        assert.ok(!lambdaTf.includes('data.terraform_remote_state.basestack.outputs.private_subnet_ids'),
+          "the Lambda's vpc_config still reads private_subnet_ids, but the remote state is gone");
+        assert.ok(!lambdaTf.includes('data.terraform_remote_state.basestack.outputs.vpc_id'),
+          'a security group still reads vpc_id, but the remote state is gone');
       });
 
-      it('And variable "terraform_remote_state_basestack_config" is still declared', () => {
-        assert.ok(/^\s*variable\s+"terraform_remote_state_basestack_config"/m.test(readTf('variables.tf')),
-          'variable "terraform_remote_state_basestack_config" was removed along with legacystack');
-        assert.ok(/data\s+"terraform_remote_state"\s+"basestack"/.test(codeOnly(readTf('provider.tf'))),
-          'data "terraform_remote_state" "basestack" was removed from provider.tf');
+      it('And variable "terraform_remote_state_basestack_config" is no longer declared, nor is the data source', () => {
+        assert.ok(!/^\s*variable\s+"terraform_remote_state_basestack_config"/m.test(codeOnly(readTf('variables.tf'))),
+          'variable "terraform_remote_state_basestack_config" survives with nothing reading it');
+        assert.ok(!/data\s+"terraform_remote_state"\s+"basestack"/.test(codeOnly(readTf('provider.tf'))),
+          'data "terraform_remote_state" "basestack" survives in provider.tf');
       });
 
-      it('And dev/au.tfvars still declares a terraform_remote_state_basestack_config block with bucket, key and region', () => {
+      it('And terraform itself reports terraform_remote_state_basestack_config as undeclared when a fixture var file sets it', () => {
+        // Proven by execution, not by string matching: the real variables.tf is
+        // loaded into a throwaway workspace with a var file that still assigns
+        // the deleted key. Terraform must warn "Value for undeclared variable" -
+        // exactly the orphaned-tfvars desync TASK-051 warned about, and the
+        // reason TASK-052 removed declaration and tfvars key in one change.
         let workspace;
         try {
           workspace = makeWorkspace({ 'variables.tf': readTf('variables.tf') }, { copyConfig: true });
-          // Evaluated by terraform, so this is what a plan would really see.
-          const result = tryConsole(
-            workspace,
-            'jsonencode(var.terraform_remote_state_basestack_config)',
-            [`-var-file=${DEV_AU_VAR_FILE}`]
-          );
-          assert.ok(result.ok, `terraform could not evaluate the basestack map: ${result.error}`);
-          const jsonMatch = result.raw.match(/\{[^\n]*\}/);
-          assert.ok(jsonMatch, `could not find the encoded map in console output: ${JSON.stringify(result.raw)}`);
-          const map = JSON.parse(jsonMatch[0].replace(/\\"/g, '"').replace(/^"|"$/g, ''));
+          fs.writeFileSync(path.join(workspace, 'orphan.tfvars'), [
+            'terraform_remote_state_basestack_config = {',
+            '  region = "ap-southeast-2"',
+            '  bucket = "some-bucket"',
+            '  key    = "env:/dev-au/terraform_dev_au_basestack.tfstate"',
+            '}',
+            ''
+          ].join('\n'), 'utf-8');
 
-          assert.deepEqual(Object.keys(map).sort(), ['bucket', 'key', 'region'],
-            `basestack map evaluated to keys ${Object.keys(map).sort().join(', ')}`);
-          for (const key of ['bucket', 'key', 'region']) {
-            assert.ok(typeof map[key] === 'string' && map[key].length > 0,
-              `basestack map's ${key} is empty; "removed legacystack" must not have meant "emptied basestack"`);
-          }
+          const plan = tryPlan(workspace, [`-var-file=${DEV_AU_VAR_FILE}`, '-var-file=orphan.tfvars']);
+          assert.match(plan.output, /Value for undeclared variable/,
+            `terraform did not warn about the orphaned tfvars key; output was: ${plan.output}`);
+          assert.match(plan.output, /terraform_remote_state_basestack_config/,
+            'the warning does not name terraform_remote_state_basestack_config');
+
+          // And the REAL tfvars does not carry that key, so the real tree is clean.
+          assert.ok(!codeOnly(readTf('config', 'dev', 'au.tfvars'))
+            .includes('terraform_remote_state_basestack_config'),
+          'the real config/dev/au.tfvars still assigns the deleted variable');
         } finally {
           removeWorkspace(workspace);
         }
@@ -713,7 +737,15 @@ describe('TASK-051 e2e', () => {
     });
 
     // -------------------------------------------------------------------------
-    describe('Scenario: FAILURE - the basestack remote state is removed along with legacystack', () => {
+    // RETAINED, WITH ITS CONCLUSION REVERSED BY TASK-052. The mechanism this
+    // scenario proves is unchanged and still worth guarding: deleting a
+    // terraform_remote_state data source while a reader survives is a hard
+    // "Reference to undeclared resource" error, not a silent degradation.
+    // What TASK-052 changes is the VERDICT. Under TASK-051 the correct fix was
+    // "keep the data source". Under TASK-052 it is "delete the readers FIRST,
+    // then the data source" - which is what was done - so the closing assertion
+    // that the real tree still holds those reads is inverted below.
+    describe('Scenario: FAILURE - the data source is deleted while a reader survives', () => {
       // Fixture mirroring lambda_calendar.tf's two reads. It is a copy, not the
       // real file, precisely because this scenario has to DELETE the data source
       // to show what breaks - the real terraform/ directory is never touched.
@@ -764,7 +796,7 @@ describe('TASK-051 e2e', () => {
         }
       });
 
-      it('And this must not happen - only legacystack is dead, so the real basestack reads still validate', () => {
+      it('And the intact fixture (data source + readers together) still validates, so the error above really is about the deletion', () => {
         let workspace;
         try {
           workspace = makeWorkspace({ 'main.tf': BASESTACK_FIXTURE });
@@ -774,14 +806,25 @@ describe('TASK-051 e2e', () => {
         } finally {
           removeWorkspace(workspace);
         }
+      });
 
-        // And the real tree really does keep both reads and the data source.
-        const lambdaTf = readTf('lambda_calendar.tf');
-        assert.ok(lambdaTf.includes('data.terraform_remote_state.basestack.outputs.private_subnet_ids')
-          && lambdaTf.includes('data.terraform_remote_state.basestack.outputs.vpc_id'),
-        'lambda_calendar.tf lost a basestack read - the Lambda would lose its VPC attachment');
-        assert.ok(/data\s+"terraform_remote_state"\s+"basestack"/.test(codeOnly(readTf('provider.tf'))),
-          'provider.tf lost data "terraform_remote_state" "basestack"');
+      // INVERTED BY TASK-052. This used to close with "the real tree really does
+      // keep both reads and the data source". It no longer does, and must not:
+      // TASK-052 removed the readers and the data source TOGETHER, which is the
+      // only ordering that avoids the failure the fixture above demonstrates.
+      it('And the real terraform/ tree contains no such dangling reference - readers and data source went together', () => {
+        const lambdaTf = codeOnly(readTf('lambda_calendar.tf'));
+        assert.ok(!lambdaTf.includes('data.terraform_remote_state.basestack'),
+          'lambda_calendar.tf still reads the deleted basestack remote state - this is the dangling ' +
+          'reference the fixture above proves terraform rejects');
+        assert.ok(!/data\s+"terraform_remote_state"\s+"basestack"/.test(codeOnly(readTf('provider.tf'))),
+          'provider.tf still declares data "terraform_remote_state" "basestack"');
+
+        // No .tf file anywhere may reference it in code.
+        const offenders = listTfFiles().filter(
+          file => codeOnly(readTf(file)).includes('terraform_remote_state.basestack'));
+        assert.deepEqual(offenders, [],
+          `these files still reference data.terraform_remote_state.basestack: ${offenders.join(', ')}`);
       });
     });
 

@@ -62,7 +62,10 @@ const REMOVED_VARIABLES = [
   'geo_id',
   'language',
   'account_id',
-  'terraform_remote_state_legacystack_config'
+  'terraform_remote_state_legacystack_config',
+  // Added by TASK-052, which removed the basestack remote state after deleting
+  // the Lambda's vpc_config and security group - its only two readers.
+  'terraform_remote_state_basestack_config'
 ];
 
 const KEPT_VARIABLES = [
@@ -75,8 +78,9 @@ const KEPT_VARIABLES = [
   'manage_lambda_log_groups',
   'calendar_log_level',
   'anthropic_model',
-  'public_base_url',
-  'terraform_remote_state_basestack_config'
+  // terraform_remote_state_basestack_config lived here until TASK-052; it has
+  // moved to REMOVED_VARIABLES above.
+  'public_base_url'
 ];
 
 describe('TASK-051 unit: terraform reduced to a single deployable environment', () => {
@@ -222,15 +226,31 @@ describe('TASK-051 unit: terraform reduced to a single deployable environment', 
       assert.ok(!code.includes('us-east-1'), 'us-east-1 is still hardcoded in provider.tf');
     });
 
-    it('declares no legacystack remote state and keeps the basestack one', () => {
+    // INVERTED BY TASK-052 (was "declares no legacystack remote state and keeps
+    // the basestack one", whose failure message claimed "the Lambda would lose
+    // its VPC wiring"). TASK-051 kept basestack because the Lambda's vpc_config
+    // and security group read it; TASK-052 deleted BOTH of those readers and so
+    // deleted the state too. This stack now reads no remote state at all.
+    it('declares neither the legacystack nor the basestack remote state', () => {
       const code = codeOnly(providerTf);
       assert.ok(!code.includes('legacystack'), 'the legacystack remote state or its config variable survives');
-      assert.ok(/data\s+"terraform_remote_state"\s+"basestack"/.test(code),
-        'the basestack remote state was removed; the Lambda would lose its VPC wiring');
-      for (const key of ['bucket', 'key', 'region']) {
-        assert.ok(code.includes(`var.terraform_remote_state_basestack_config["${key}"]`),
-          `the basestack data source no longer indexes ["${key}"]`);
-      }
+      assert.ok(!/data\s+"terraform_remote_state"\s+"basestack"/.test(code),
+        'the basestack remote state survives, but TASK-052 removed its last reader (vpc_config + security group)');
+      assert.ok(!code.includes('terraform_remote_state_basestack_config'),
+        'provider.tf still indexes var.terraform_remote_state_basestack_config, which no longer exists');
+      assert.ok(!/data\s+"terraform_remote_state"/.test(code),
+        'provider.tf still declares some terraform_remote_state data source');
+    });
+
+    it('and provider.tf carries no stale "load-bearing, do not remove" claim about the deleted state', () => {
+      // The comment that used to sit above data.terraform_remote_state.basestack
+      // said it was load-bearing and must not be removed. Leaving that in place
+      // above a deletion is worse than no comment.
+      const commentsOnly = providerTf.split('\n').filter(l => /^\s*(#|\/\/)/.test(l)).join('\n');
+      assert.ok(!/load[- ]bearing/i.test(commentsOnly),
+        'provider.tf still claims something is "load-bearing" after TASK-052 deleted it');
+      assert.ok(!/do not remove/i.test(commentsOnly),
+        'provider.tf still carries a "do not remove" comment for a thing that was removed');
     });
 
     it('keeps data.aws_caller_identity.current, which the two ARNs now depend on', () => {
@@ -277,12 +297,18 @@ describe('TASK-051 unit: terraform reduced to a single deployable environment', 
       }
     });
 
-    it('lambda_calendar.tf still reads both basestack outputs', () => {
-      const lambdaTf = readTf('lambda_calendar.tf');
-      assert.ok(lambdaTf.includes('subnet_ids         = data.terraform_remote_state.basestack.outputs.private_subnet_ids'),
-        "the Lambda's vpc_config no longer takes subnet_ids from the basestack remote state");
-      assert.ok(lambdaTf.includes('vpc_id      = data.terraform_remote_state.basestack.outputs.vpc_id'),
-        'the security group no longer takes vpc_id from the basestack remote state');
+    // INVERTED BY TASK-052 (was "lambda_calendar.tf still reads both basestack
+    // outputs", requiring the exact `subnet_ids = ...private_subnet_ids` and
+    // `vpc_id = ...vpc_id` lines). Both readers were deleted with the VPC
+    // attachment, so the file must now read NEITHER output.
+    it('lambda_calendar.tf reads neither basestack output any more', () => {
+      const lambdaTf = codeOnly(readTf('lambda_calendar.tf'));
+      assert.ok(!lambdaTf.includes('data.terraform_remote_state.basestack.outputs.private_subnet_ids'),
+        "the Lambda's vpc_config still takes subnet_ids from the basestack remote state, which is gone");
+      assert.ok(!lambdaTf.includes('data.terraform_remote_state.basestack.outputs.vpc_id'),
+        'a security group still takes vpc_id from the basestack remote state, which is gone');
+      assert.ok(!lambdaTf.includes('terraform_remote_state'),
+        'lambda_calendar.tf still references a terraform_remote_state in code');
     });
   });
 
@@ -326,20 +352,25 @@ describe('TASK-051 unit: terraform reduced to a single deployable environment', 
         assert.ok(new RegExp(`^\\s*${name}\\s*=`, 'm').test(tfvars),
           `dev/au.tfvars no longer sets required variable "${name}"`);
       }
-      assert.ok(tfvars.includes('terraform_remote_state_basestack_config'),
-        'dev/au.tfvars no longer sets terraform_remote_state_basestack_config');
+      // INVERTED BY TASK-052: this used to require the tfvars to SET
+      // terraform_remote_state_basestack_config. The variable declaration is
+      // gone, so an assignment here would only produce a "Value for undeclared
+      // variable" warning.
+      assert.ok(!tfvars.includes('terraform_remote_state_basestack_config'),
+        'dev/au.tfvars still sets terraform_remote_state_basestack_config, whose declaration was removed');
     });
 
-    it('dev/au.tfvars keeps bucket, key and region in the basestack map', () => {
-      const tfvars = readTf('config', 'dev', 'au.tfvars');
-      const mapStart = tfvars.indexOf('terraform_remote_state_basestack_config');
-      assert.ok(mapStart >= 0, 'basestack map not found');
-      const mapBody = tfvars.slice(mapStart, tfvars.indexOf('}', mapStart));
-      for (const key of ['bucket', 'key', 'region']) {
-        const match = mapBody.match(new RegExp(`^\\s*${key}\\s*=\\s*"([^"]*)"`, 'm'));
-        assert.ok(match, `basestack map has no ${key}`);
-        assert.ok(match[1].length > 0, `basestack map's ${key} is an empty string`);
-      }
+    // INVERTED BY TASK-052 (was "dev/au.tfvars keeps bucket, key and region in
+    // the basestack map"). The map itself is gone, so there is no map to check
+    // keys inside - the assertion is that no trace of it survives in code.
+    it('dev/au.tfvars carries no basestack map at all, not even an emptied one', () => {
+      const tfvars = codeOnly(readTf('config', 'dev', 'au.tfvars'));
+      assert.ok(!tfvars.includes('terraform_remote_state_basestack_config'),
+        'the basestack map survives in dev/au.tfvars');
+      assert.ok(!/basestack/.test(tfvars),
+        'dev/au.tfvars still names basestack in code');
+      assert.ok(!/tfstate/.test(tfvars),
+        'dev/au.tfvars still names a tfstate object; the remote-state config was meant to go entirely');
     });
 
     it('keeps the dev/au tfvars pinned to the values local.name_prefix and local.secret_name are built from', () => {
