@@ -56,6 +56,15 @@ export const FETCH_CREDENTIALS = "same-origin";
 /** How many event chips a day cell shows before it offers "+N more". */
 export const MAX_CHIPS_PER_DAY = 3;
 
+/**
+ * How many attention rows the panel shows before it offers "Show N more".
+ *
+ * The overflow is hidden rather than dropped, so nothing a parent has to act on
+ * is ever unreachable - it just stops the panel growing without limit down a
+ * phone screen, which is the whole reason the cap exists.
+ */
+export const MAX_ATTENTION_ITEMS = 5;
+
 /** Background refresh cadence for the two lists. */
 export const REFRESH_INTERVAL_MS = 60000;
 
@@ -749,6 +758,7 @@ export function renderConnectionCards(doc, container, me) {
  * @param {() => number} [options.now] Epoch-ms clock.
  * @param {string} [options.locale]
  * @param {number} [options.maxChipsPerDay]
+ * @param {number} [options.maxAttentionItems]
  * @param {number} [options.refreshIntervalMs]
  * @param {Function} [options.setIntervalImpl]
  * @param {Function} [options.clearIntervalImpl]
@@ -763,6 +773,9 @@ export function createCalendarApp(options = {}) {
   const maxChips = Number.isInteger(options.maxChipsPerDay) && options.maxChipsPerDay > 0
     ? options.maxChipsPerDay
     : MAX_CHIPS_PER_DAY;
+  const maxAttentionItems = Number.isInteger(options.maxAttentionItems) && options.maxAttentionItems > 0
+    ? options.maxAttentionItems
+    : MAX_ATTENTION_ITEMS;
   const refreshIntervalMs = Number.isFinite(options.refreshIntervalMs)
     ? options.refreshIntervalMs
     : REFRESH_INTERVAL_MS;
@@ -784,6 +797,10 @@ export function createCalendarApp(options = {}) {
     viewMonth: startOfView.getMonth(),
     events: [],
     attention: [],
+    // Survives every re-render - poll, reload, optimistic mutation - so an
+    // expanded panel does not silently collapse under the user. Only
+    // `renderAttention` clears it, and only once there is nothing left to hide.
+    attentionExpanded: false,
     truncated: false,
     lastRange: null,
     scanInFlight: false,
@@ -975,16 +992,70 @@ export function createCalendarApp(options = {}) {
     return item;
   }
 
+  /**
+   * Render the attention panel, capped at `maxAttentionItems` visible rows.
+   *
+   * Rows past the cap are HIDDEN, never removed: every deadline stays in
+   * `#attention-list` under its `data-event-id`, so nothing the user has to act
+   * on becomes unreachable. `hidden` on the `<li>` takes the whole row - action
+   * buttons included - out of the tab order, which a `visibility` or `height: 0`
+   * approach would not.
+   *
+   * The "Show N more" control is static markup in index.html. Building it here
+   * would append a fresh button on every poll and every optimistic mutation;
+   * this function only ever updates its text, its `hidden` and its
+   * `aria-expanded`.
+   */
   function renderAttention() {
     const list = byId("attention-list");
     const ordered = state.attention.slice().sort(compareByDueBy);
+    // Always with an explicit, valid max: `overflowCount` falls back to
+    // MAX_CHIPS_PER_DAY (3), which is not this cap.
+    const hiddenCount = overflowCount(ordered.length, maxAttentionItems);
+    // Nothing left to hide - forget that the list was expanded, so a later
+    // refill comes back collapsed rather than remembering a stale choice.
+    if (hiddenCount === 0) state.attentionExpanded = false;
+
     if (list) {
       clear(list);
       const nowMs = now();
-      for (const event of ordered) list.appendChild(renderAttentionItem(event, nowMs));
+      ordered.forEach((event, index) => {
+        const item = renderAttentionItem(event, nowMs);
+        item.hidden = index >= maxAttentionItems && !state.attentionExpanded;
+        list.appendChild(item);
+      });
     }
+
+    const more = byId("attention-more");
+    if (more) {
+      more.hidden = hiddenCount === 0;
+      // The label carries a count, so it is data: textContent, never markup.
+      // Blank when there is nothing to offer, so empty text and `hidden` stay
+      // paired the way the message helpers above keep them.
+      if (hiddenCount === 0) more.textContent = "";
+      else more.textContent = state.attentionExpanded ? "Show less" : `Show ${hiddenCount} more`;
+      // A string attribute, not a boolean property: only setAttribute produces
+      // the `aria-expanded` a screen reader reads.
+      more.setAttribute("aria-expanded", state.attentionExpanded ? "true" : "false");
+    }
+
     const empty = byId("attention-empty");
     if (empty) empty.hidden = ordered.length > 0;
+  }
+
+  /**
+   * Flip the attention panel between collapsed and expanded.
+   *
+   * Two-way, unlike the day-cell "+N more" which reveals once and retires: the
+   * attention panel is the thing most likely to overrun a phone screen, so the
+   * user needs to be able to put it back.
+   *
+   * @returns {boolean} The new expanded state.
+   */
+  function toggleAttentionExpanded() {
+    state.attentionExpanded = !state.attentionExpanded;
+    renderAttention();
+    return state.attentionExpanded;
   }
 
   function detailRow(label, value, id) {
@@ -1277,6 +1348,9 @@ export function createCalendarApp(options = {}) {
     bind("next-month", () => nextMonth());
     bind("today", () => goToToday());
     bind("scan-now", () => runScanNow());
+    // Bound once, here. Binding it inside renderAttention would stack one more
+    // handler on the same button with every poll.
+    bind("attention-more", () => toggleAttentionExpanded());
   }
 
   async function start() {
@@ -1302,6 +1376,7 @@ export function createCalendarApp(options = {}) {
     refreshAll,
     renderMonth,
     renderAttention,
+    toggleAttentionExpanded,
     goToMonth,
     previousMonth,
     nextMonth,

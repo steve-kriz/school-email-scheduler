@@ -71,6 +71,14 @@ body {
   color: var(--accent);
 }
 
+/* A bare text link is a ~22px tap target; give the header nav a real one. */
+.nav-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 0.5rem;
+}
+
 .app-main {
   display: grid;
   grid-template-columns: minmax(0, 3fr) minmax(260px, 1fr);
@@ -139,7 +147,14 @@ body {
   border-left-color: var(--line);
 }
 
-/* --- Buttons and links-as-buttons --- */
+/* --- Buttons and links-as-buttons ---
+ *
+ * TOUCH TARGETS ARE NOT A PHONE-ONLY CONCERN, so the 44px minimum below is
+ * deliberately OUTSIDE any media query. A trackpad, a shaky hand and a stylus
+ * all benefit at desktop widths too, and a control that changes size at a
+ * breakpoint is a control whose hit area you cannot reason about. The one
+ * documented exception is .chip - see the note on it.
+ */
 
 .btn {
   font: inherit;
@@ -149,6 +164,10 @@ body {
   background: var(--surface);
   color: var(--ink);
   cursor: pointer;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .btn:hover {
@@ -167,7 +186,10 @@ body {
 }
 
 .btn-link {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
   font: inherit;
   padding: 0.4rem 0.85rem;
   border: 1px solid var(--accent);
@@ -177,9 +199,14 @@ body {
   text-decoration: none;
 }
 
+/* Smaller type and tighter padding, but NOT a smaller hit area. */
 .btn-small {
   font-size: 0.85rem;
   padding: 0.25rem 0.6rem;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 /* --- Calendar --- */
@@ -294,9 +321,18 @@ body {
   gap: 2px;
 }
 
+/*
+ * DELIBERATE EXCEPTION to the 44px touch-target minimum above: a chip gets
+ * 28px. A day cell shows up to three of them, and at 44px each the cell would
+ * be over 150px tall - a month would not fit on a phone screen at all, which
+ * costs more usability than it buys. 28px stays comfortably tappable, and every
+ * chip has a full-size alternative route: tapping it opens the detail panel,
+ * and the same event is reachable from the attention list's 44px buttons.
+ */
 .chip {
   font: inherit;
   font-size: 0.78rem;
+  min-height: 28px;
   text-align: left;
   padding: 0.15rem 0.3rem;
   border: 1px solid var(--line);
@@ -327,6 +363,11 @@ body {
   margin-right: 0.3rem;
 }
 
+/*
+ * Still reads as an underlined link - no border, no background - but it is a
+ * real button, so it gets a real hit area rather than the 18px a bare inline
+ * control would give it.
+ */
 .more-toggle {
   font: inherit;
   font-size: 0.75rem;
@@ -334,7 +375,8 @@ body {
   background: none;
   color: var(--accent);
   text-align: left;
-  padding: 0.1rem 0.2rem;
+  padding: 0.1rem 0.6rem;
+  min-height: 44px;
   cursor: pointer;
   text-decoration: underline;
 }
@@ -375,6 +417,13 @@ body {
 .attention-actions {
   display: flex;
   gap: 0.4rem;
+}
+
+/* Panel-level expander: spans the panel so the whole strip under the list is
+ * the tap target, rather than a few characters of underlined text. */
+.attention-more {
+  width: 100%;
+  margin-top: 0.25rem;
 }
 
 .badge {
@@ -504,6 +553,17 @@ body {
   width: auto;
 }
 
+/*
+ * 24px, not 44px: a natively-rendered radio or checkbox blown up to 44px looks
+ * broken on every platform. The associated <label> is the large hit area - it
+ * is clickable by virtue of its `for`, and every one of these controls has one.
+ */
+input[type="radio"],
+input[type="checkbox"] {
+  min-width: 24px;
+  min-height: 24px;
+}
+
 .field-hint {
   margin: 0;
   font-size: 0.85rem;
@@ -517,6 +577,43 @@ body {
   color: var(--alarm);
 }
 
+/* --- Settings: disconnect section ---
+ *
+ * Same visual language as .panel, which is what the settings form next to it
+ * uses: this section was previously unstyled and read as loose text hanging off
+ * the bottom of a card.
+ */
+
+.settings__section {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.disconnect__choice {
+  margin: 0.75rem 0;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+/* Radio in the first column, its label in the second: the label text wraps
+ * under itself rather than under the control. */
+.disconnect__option {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.5rem;
+  align-items: start;
+  margin: 0 0 0.75rem;
+}
+
+.disconnect__confirm {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0 0 0.75rem;
+}
+
 [hidden] {
   display: none !important;
 }
@@ -524,5 +621,64 @@ body {
 @media (max-width: 860px) {
   .app-main {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/*
+ * Phone width. The 860px rule above has already put the panels in one column;
+ * this block buys back horizontal room inside them.
+ *
+ * THE MONTH GRID STAYS A MONTH GRID: seven columns, compressed in place. It is
+ * NOT given overflow-x, and it is NOT swapped for an agenda list. A calendar
+ * whose weeks you have to scroll sideways stops being something you can read at
+ * a glance, which is the only reason to show a month rather than a list.
+ *
+ * WHAT IS NOT REDUCED HERE, ON PURPOSE: body font-size stays 16px and
+ * .field-input keeps `font: inherit`. iOS Safari zooms the page in when a text
+ * field smaller than 16px takes focus, and the user is then left scrolled and
+ * zoomed on a form they were part-way through. Shrinking type is not worth
+ * that; the padding reductions below reclaim the same space.
+ */
+@media (max-width: 600px) {
+  .app-header {
+    padding: 0.75rem;
+  }
+
+  .app-main {
+    padding: 0.75rem 0.75rem 2rem;
+    gap: 0.75rem;
+  }
+
+  .panel {
+    padding: 0.6rem;
+  }
+
+  /* Full width and no auto-margin, so the buttons wrap into a block of their
+   * own under the month heading instead of being crushed beside it. */
+  .toolbar-actions {
+    margin-left: 0;
+    width: 100%;
+  }
+
+  .day-cell {
+    min-height: 64px;
+    padding: 0.15rem;
+  }
+
+  .chip {
+    font-size: 0.7rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .weekday {
+    padding: 0.15rem 0;
+    font-size: 0.7rem;
+  }
+
+  /* Acknowledge / Dismiss / Details are 44px tall each: at 360px they wrap
+   * rather than shrink. */
+  .attention-actions {
+    flex-wrap: wrap;
   }
 }

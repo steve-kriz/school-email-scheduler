@@ -55,6 +55,13 @@
           <h2 id="attention-heading">Needs attention</h2>
           <p id="attention-message" class="notice" role="status" aria-live="polite" hidden></p>
           <ul id="attention-list" class="attention-list"></ul>
+          <!--
+            The attention expander. It is a sibling of the list, never a child
+            of it: a <button> is not valid as a direct child of <ul>. It ships
+            hidden and unlabelled because its label is a count - app.js sets the
+            text, the hidden flag and aria-expanded on every render.
+          -->
+          <button id="attention-more" class="more-toggle attention-more" type="button" hidden aria-expanded="false" aria-controls="attention-list"></button>
           <p id="attention-empty" class="empty-state empty-state--success" hidden>
             Nothing needs attention. You are all caught up.
           </p>
