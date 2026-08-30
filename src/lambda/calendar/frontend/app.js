@@ -14,10 +14,12 @@
  *    them. So the DOM is built exclusively with `document.createElement` and
  *    `textContent`. No HTML string is ever assembled and assigned into the
  *    document - not from data, not from constants. The same rule is applied to
- *    every `schoolNames` entry, which comes from settings rather than from mail:
- *    they are still stored raw (see backend/settings.mjs, which names
- *    escaping-on-render as its mitigation), so they are still rendered as text
- *    here - the joined list goes into ONE `textContent`, never into markup.
+ *    every `schoolNames` entry and every processing-job NAME, which come from
+ *    settings rather than from mail: they are still stored raw (see
+ *    backend/settings.mjs, which names escaping-on-render as its mitigation), so
+ *    they are still rendered as text here - the joined school list goes into ONE
+ *    `textContent`, and a job name goes into an `<option>`'s `textContent`,
+ *    never into markup.
  *
  * 2. A DATE-ONLY DAY IS A CALENDAR DATE, NOT AN INSTANT. `new Date("2026-09-04")`
  *    parses as UTC midnight, which in Denver is 2026-09-03 at 18:00 - so an
@@ -67,6 +69,25 @@ export const MAX_ATTENTION_ITEMS = 5;
 
 /** Background refresh cadence for the two lists. */
 export const REFRESH_INTERVAL_MS = 60000;
+
+/**
+ * Empty-state copy for the month grid and the attention panel.
+ *
+ * There are two of each because AN EMPTY STATE MUST NOT LIE. "No events this
+ * month. Nothing to keep track of just yet." is simply false when the user has
+ * a processing-job filter on and it has hidden three events; saying so would
+ * tell a parent there is nothing on when there is. The unfiltered wording is
+ * byte-for-byte what index.html ships, so a page whose script never runs still
+ * reads correctly and this constant cannot drift away from the markup.
+ *
+ * Neither filtered message names the selected job: the dropdown immediately
+ * above already shows which one it is, so interpolating a raw settings value
+ * into a sentence would buy nothing.
+ */
+export const CALENDAR_EMPTY_MESSAGE = "No events this month. Nothing to keep track of just yet.";
+export const CALENDAR_EMPTY_FILTERED_MESSAGE = "No events from that processing job this month.";
+export const ATTENTION_EMPTY_MESSAGE = "Nothing needs attention. You are all caught up.";
+export const ATTENTION_EMPTY_FILTERED_MESSAGE = "Nothing from that processing job needs attention.";
 
 /** `lastScanStatus` value meaning the stored Gmail grant no longer works. */
 export const REAUTH_SCAN_STATUS = "reauth_required";
@@ -605,6 +626,66 @@ export function schoolNameList(value) {
 }
 
 /**
+ * Read the configured processing jobs off an `/auth/me` body, as `{ id, name }`.
+ *
+ * THIS IS THE ONLY SOURCE OF A JOB'S NAME IN THIS APP. Events carry a
+ * `processingJobId` and nothing else (see backend/events.mjs `toEventJson`), so
+ * the label on the filter control is a CLIENT-SIDE JOIN against the list the
+ * page already fetched with `/auth/me`. Nothing here makes a request, and no
+ * name is ever read off an event: an id survives a rename, a denormalised name
+ * would not, and only the settings-sourced list can name a job that happens to
+ * have no events in the month on screen.
+ *
+ * Tolerant in exactly the same way as `schoolNameList` above, and for the same
+ * reason: `/auth/me` projects an unset attribute as `null` rather than `[]`
+ * (see backend/connections.mjs `toPublicJson`), so a non-array is the ordinary
+ * first-run case, not a defensive afterthought. An entry with no usable id or
+ * no usable name is dropped rather than rendered as a blank option nobody can
+ * identify.
+ *
+ * @param {unknown} value The `processingJobs` field of an `/auth/me` body.
+ * @returns {Array<{ id: string, name: string }>}
+ */
+export function processingJobList(value) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") continue;
+    const id = typeof entry.id === "string" ? entry.id.trim() : "";
+    const name = typeof entry.name === "string" ? entry.name.trim() : "";
+    if (id === "" || name === "") continue;
+    out.push({ id, name });
+  }
+  return out;
+}
+
+/**
+ * Narrow an event list to one processing job, or leave it alone.
+ *
+ * The match is on `processingJobId` and NEVER on a name, so renaming a job in
+ * settings keeps every event it found. An event with no `processingJobId` - any
+ * row stored before jobs existed, and any row the scanner could not attribute -
+ * therefore matches no job at all: it is visible under "all jobs" and hidden
+ * under a specific one. That is deliberate. Leaking unattributed rows into a
+ * job's view would put another school's mail on the screen, and inventing an
+ * "unattributed" pseudo-job would put a bucket in the dropdown that the user
+ * never created.
+ *
+ * Pure, and it never touches its input: `state.events` and `state.attention`
+ * keep every row the API returned, because `mutateAttention` splices by index
+ * into `state.attention` and restores by that same index when a request fails.
+ *
+ * @param {object[]} events
+ * @param {string|null} [jobId] `null`/`undefined`/`""` all mean "all jobs".
+ * @returns {object[]}
+ */
+export function filterEventsByJob(events, jobId) {
+  if (!Array.isArray(events)) return [];
+  if (jobId === null || jobId === undefined || jobId === "") return events;
+  return events.filter((event) => event && event.processingJobId === jobId);
+}
+
+/**
  * Decide, from `GET /calendar/api/auth/me`, which prompts the page owes the user.
  *
  * Pure so the decision can be tested on its own. `null` means the call came back
@@ -801,6 +882,13 @@ export function createCalendarApp(options = {}) {
     // expanded panel does not silently collapse under the user. Only
     // `renderAttention` clears it, and only once there is nothing left to hide.
     attentionExpanded: false,
+    // The `{ id, name }` jobs from the last `/auth/me`, and which one the user
+    // is looking at. `null` means "all jobs" - the default, and what a reload
+    // always comes back to: this is a view scope, not a preference, so it is
+    // deliberately NOT persisted anywhere. Like `attentionExpanded` it is pure
+    // client-side render state; changing it never costs a request.
+    processingJobs: [],
+    jobFilter: null,
     truncated: false,
     lastRange: null,
     scanInFlight: false,
@@ -919,10 +1007,16 @@ export function createCalendarApp(options = {}) {
     if (heading) heading.textContent = monthLabel(state.viewYear, state.viewMonth, locale);
     renderWeekdayHeader();
 
+    // Filtered on the way INTO the render, never in place: `state.events` keeps
+    // every row the API returned. Grouping the filtered list is also what makes
+    // each cell's "+N more" count the filtered set - `renderDayCell` never sees
+    // a hidden event, so it cannot count one or reveal one.
+    const visible = filterEventsByJob(state.events, state.jobFilter);
+
     const grid = byId("calendar-grid");
     if (grid) {
       clear(grid);
-      const byDay = groupEventsByDay(state.events);
+      const byDay = groupEventsByDay(visible);
       const todayKey = localDateKey(new Date(now()));
       for (const week of buildMonthMatrix(state.viewYear, state.viewMonth)) {
         const row = el(doc, "div", "calendar-week");
@@ -934,11 +1028,19 @@ export function createCalendarApp(options = {}) {
 
     const empty = byId("calendar-empty");
     // Reads as a good outcome, not as a failure: an empty month means there is
-    // nothing to do, and the wording and styling both say so.
-    if (empty) empty.hidden = state.events.length > 0;
+    // nothing to do, and the wording and styling both say so. Under a filter it
+    // says the FILTER is why, because "nothing to keep track of" would be a lie
+    // about a month that has events the user simply is not looking at.
+    if (empty) {
+      empty.textContent = state.jobFilter === null ? CALENDAR_EMPTY_MESSAGE : CALENDAR_EMPTY_FILTERED_MESSAGE;
+      empty.hidden = visible.length > 0;
+    }
 
     const truncated = byId("calendar-truncated");
     if (truncated) {
+      // Driven by `state.truncated` ALONE, never by the filter: truncation is a
+      // fact about the server-side range query, so hiding rows locally neither
+      // creates it nor clears it.
       // `truncated` is reported by the API observing one row past its cap, not
       // guessed from the row count - so saying so here is a fact, not a hint.
       truncated.className = "notice notice--info";
@@ -1005,10 +1107,23 @@ export function createCalendarApp(options = {}) {
    * would append a fresh button on every poll and every optimistic mutation;
    * this function only ever updates its text, its `hidden` and its
    * `aria-expanded`.
+   *
+   * The cap, the count and the label all apply to the FILTERED list, so a row
+   * belonging to another processing job never contributes to an "N more" that
+   * expanding would not reveal. One accepted consequence: narrowing to a job
+   * with fewer rows than the cap leaves nothing to hide, which trips the
+   * forget-that-it-was-expanded rule below, so widening back to "all jobs"
+   * returns collapsed with a correct count. That is the documented behaviour -
+   * do not add state to defeat it.
    */
   function renderAttention() {
     const list = byId("attention-list");
-    const ordered = state.attention.slice().sort(compareByDueBy);
+    // Two different kinds of hiding meet here and must not be confused. A row
+    // past the CAP is rendered and `hidden`, so "Show N more" can reveal it. A
+    // row hidden by the FILTER is not rendered at all - it belongs to another
+    // job, so it is a different list, not a collapsed part of this one, and
+    // #attention-list must contain no <li> for it.
+    const ordered = filterEventsByJob(state.attention, state.jobFilter).slice().sort(compareByDueBy);
     // Always with an explicit, valid max: `overflowCount` falls back to
     // MAX_CHIPS_PER_DAY (3), which is not this cap.
     const hiddenCount = overflowCount(ordered.length, maxAttentionItems);
@@ -1040,7 +1155,10 @@ export function createCalendarApp(options = {}) {
     }
 
     const empty = byId("attention-empty");
-    if (empty) empty.hidden = ordered.length > 0;
+    if (empty) {
+      empty.textContent = state.jobFilter === null ? ATTENTION_EMPTY_MESSAGE : ATTENTION_EMPTY_FILTERED_MESSAGE;
+      empty.hidden = ordered.length > 0;
+    }
   }
 
   /**
@@ -1056,6 +1174,92 @@ export function createCalendarApp(options = {}) {
     state.attentionExpanded = !state.attentionExpanded;
     renderAttention();
     return state.attentionExpanded;
+  }
+
+  /**
+   * Rebuild the processing-job dropdown from `state.me`.
+   *
+   * CALLED FROM `applyIdentity` AND NOWHERE ELSE. `renderMonth` and
+   * `renderAttention` run on every 60s poll and on every optimistic mutation;
+   * rebuilding the options there would clear and reset the control under a user
+   * who was part-way through choosing. The option list only changes when
+   * `/auth/me` is re-read, so that is the only place it is rebuilt.
+   *
+   * Every option is created with `createElement` and labelled with
+   * `textContent`. A job name is user-entered and stored raw (backend/
+   * settings.mjs names escaping-on-render as its mitigation, exactly as for
+   * `schoolNames`), so a name of `<img src=x onerror=alert(1)>` renders as those
+   * literal characters and creates no element.
+   *
+   * The row is revealed only at TWO OR MORE jobs. With zero or one there is
+   * nothing to choose between, so a first-time user with a single default job
+   * sees the page exactly as it was before this control existed.
+   */
+  function renderJobFilter() {
+    state.processingJobs = processingJobList(state.me?.processingJobs);
+
+    // A selection naming a job that has since been deleted or renamed away would
+    // be an invisible filter over an empty page, so it is dropped here. Nothing
+    // else refreshes the list - the poll fetches events only, deliberately - so
+    // this runs exactly when the list is actually re-read.
+    const stale =
+      state.jobFilter !== null && !state.processingJobs.some((job) => job.id === state.jobFilter);
+    if (stale) state.jobFilter = null;
+
+    const select = byId("job-filter");
+    if (select) {
+      clear(select);
+
+      // "All jobs" first, and with an EMPTY value: `setJobFilter` maps "" back
+      // to null, so the default selection and the default state agree.
+      const all = el(doc, "option", undefined, "All jobs");
+      all.value = "";
+      all.setAttribute("value", "");
+      select.appendChild(all);
+
+      for (const job of state.processingJobs) {
+        const option = el(doc, "option", undefined, job.name);
+        // The VALUE is the id, never the name: the filter matches on id, so a
+        // renamed job keeps its events.
+        option.value = job.id;
+        option.setAttribute("value", job.id);
+        select.appendChild(option);
+      }
+
+      // Replacing the children does not preserve the selection, so re-apply it.
+      select.value = state.jobFilter ?? "";
+    }
+
+    const row = byId("job-filter-row");
+    if (row) row.hidden = state.processingJobs.length < 2;
+
+    // Only when a stale selection was just cleared: the view was filtered by a
+    // job that no longer exists and has to come back unfiltered.
+    if (stale) {
+      renderMonth();
+      renderAttention();
+    }
+  }
+
+  /**
+   * Show one processing job's events, or all of them.
+   *
+   * Pure client-side state, like `toggleAttentionExpanded`: it re-renders the
+   * two panels and MAKES NO REQUEST. The events for the visible month and the
+   * attention list are already in memory, so narrowing the view is a render, not
+   * a fetch. It also does not close an open detail panel - filtering changes the
+   * scope of the view, not the data, and shutting a panel the user deliberately
+   * opened would be surprising.
+   *
+   * @param {string|null} jobId A job id, or `""`/`null` for all jobs.
+   * @returns {string|null} The new filter value.
+   */
+  function setJobFilter(jobId) {
+    const id = typeof jobId === "string" ? jobId.trim() : "";
+    state.jobFilter = id === "" ? null : id;
+    renderMonth();
+    renderAttention();
+    return state.jobFilter;
   }
 
   function detailRow(label, value, id) {
@@ -1152,6 +1356,9 @@ export function createCalendarApp(options = {}) {
     if (header) {
       header.textContent = schoolNames.length === 0 ? "" : `Watching mail for ${schoolNames.join(", ")}`;
     }
+
+    // The one place the job dropdown is (re)built - see `renderJobFilter`.
+    renderJobFilter();
 
     const body = byId("app-body");
     if (body) body.hidden = false;
@@ -1358,6 +1565,13 @@ export function createCalendarApp(options = {}) {
     // Bound once, here. Binding it inside renderAttention would stack one more
     // handler on the same button with every poll.
     bind("attention-more", () => toggleAttentionExpanded());
+
+    // Explicit rather than through `bind`, which is click-only: a <select>
+    // reports a choice with "change". Bound ONCE, here, for the same reason as
+    // the button above - binding it in a render function would stack a handler
+    // per poll, and after ten polls one choice would fire the handler ten times.
+    const jobFilter = byId("job-filter");
+    if (jobFilter) jobFilter.addEventListener("change", () => setJobFilter(jobFilter.value));
   }
 
   async function start() {
@@ -1384,6 +1598,7 @@ export function createCalendarApp(options = {}) {
     renderMonth,
     renderAttention,
     toggleAttentionExpanded,
+    setJobFilter,
     goToMonth,
     previousMonth,
     nextMonth,

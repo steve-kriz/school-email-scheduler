@@ -231,6 +231,52 @@ body {
   margin-left: auto;
 }
 
+/* --- The processing-job filter ---
+ *
+ * Same flex/wrap/gap idiom as .calendar-toolbar above, and for the same reason:
+ * at 360px the <select> wraps onto its own line UNDER the label rather than
+ * pushing the panel past the viewport. Nothing here is given overflow-x - see
+ * the phone block at the foot of this file.
+ *
+ * `display: flex` here does NOT defeat the `hidden` attribute the row ships
+ * with: `[hidden] { display: none !important }` below carries !important
+ * precisely so a layout rule cannot resurrect a hidden element. Do not weaken
+ * or reorder that rule, and do not swap `hidden` for visibility/height:0 - the
+ * <select> would stay focusable and tabbable while invisible.
+ */
+.calendar-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.calendar-filter__label {
+  font-weight: 600;
+}
+
+/* min-height is OUTSIDE any media query, exactly like .btn: a touch target is
+ * not a phone-only concern, and a control whose hit area changes at a
+ * breakpoint is one you cannot reason about.
+ *
+ * `font: inherit` keeps this at the 16px body size. iOS Safari zooms the whole
+ * viewport in when a form control smaller than 16px takes focus, and the user is
+ * left scrolled and zoomed - the same reason .field-input inherits its font.
+ *
+ * `max-width: 100%` so a long job name sizes the control to the panel rather
+ * than the panel to the name. */
+.calendar-filter__select {
+  font: inherit;
+  min-height: 44px;
+  max-width: 100%;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
 .calendar-weekdays,
 .calendar-week {
   display: grid;
@@ -657,6 +703,13 @@ input[type="checkbox"] {
    * own under the month heading instead of being crushed beside it. */
   .toolbar-actions {
     margin-left: 0;
+    width: 100%;
+  }
+
+  /* Same treatment as .toolbar-actions: a full-width row of its own under its
+   * label, rather than a narrow control squeezed beside it. Only the WIDTH
+   * changes here - the 44px height and the 16px type stay put. */
+  .calendar-filter__select {
     width: 100%;
   }
 
