@@ -14,9 +14,10 @@
  *    them. So the DOM is built exclusively with `document.createElement` and
  *    `textContent`. No HTML string is ever assembled and assigned into the
  *    document - not from data, not from constants. The same rule is applied to
- *    `schoolName`, which comes from settings rather than from mail: it is still
- *    stored raw (see backend/settings.mjs, which names escaping-on-render as
- *    its mitigation), so it is still rendered as text here.
+ *    every `schoolNames` entry, which comes from settings rather than from mail:
+ *    they are still stored raw (see backend/settings.mjs, which names
+ *    escaping-on-render as its mitigation), so they are still rendered as text
+ *    here - the joined list goes into ONE `textContent`, never into markup.
  *
  * 2. A DATE-ONLY DAY IS A CALENDAR DATE, NOT AN INSTANT. `new Date("2026-09-04")`
  *    parses as UTC midnight, which in Denver is 2026-09-03 at 18:00 - so an
@@ -579,6 +580,22 @@ export function createApiClient({ fetchImpl, onUnauthorized } = {}) {
 // --- Connection state --------------------------------------------------------
 
 /**
+ * Read the saved school names off an `/auth/me` body.
+ *
+ * Tolerant on purpose: the attribute is null on a row that has never had one, and
+ * this page must not throw on the shape it is guaranteed to meet on a first run.
+ * Blank entries are dropped so a stray one cannot render as "Watching mail for ,
+ * St Mary's".
+ *
+ * @param {unknown} value
+ * @returns {string[]}
+ */
+export function schoolNameList(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((entry) => (typeof entry === "string" ? entry.trim() : "")).filter((entry) => entry !== "");
+}
+
+/**
  * Decide, from `GET /calendar/api/auth/me`, which prompts the page owes the user.
  *
  * Pure so the decision can be tested on its own. `null` means the call came back
@@ -589,6 +606,11 @@ export function createApiClient({ fetchImpl, onUnauthorized } = {}) {
  * still needs the setup prompt even though it is also not connected. Treating
  * them as one enum would drop one of the two messages in exactly those cases.
  *
+ * `needsSchool` is true whenever `schoolNames` is absent, is not an array, or is
+ * empty. `/auth/me` projects an unset attribute as null rather than `[]` (see
+ * backend/connections.mjs), so "not an array" is the ordinary first-run case here,
+ * not a defensive afterthought.
+ *
  * @param {object|null} me
  * @returns {{ signedIn: boolean, needsConnect: boolean, needsSchool: boolean, needsReauth: boolean }}
  */
@@ -596,14 +618,14 @@ export function connectionView(me) {
   if (!me || typeof me !== "object") {
     return { signedIn: false, needsConnect: true, needsSchool: false, needsReauth: false };
   }
-  const schoolName = typeof me.schoolName === "string" ? me.schoolName.trim() : "";
+  const schoolNames = schoolNameList(me.schoolNames);
   return {
     signedIn: true,
     // "unknown" (the connections table could not be read) is deliberately NOT
     // treated as "not connected": prompting a reconnect there would mint a
     // second grant over a working one to fix what was a blip.
     needsConnect: me.connectionStatus === "not_connected",
-    needsSchool: schoolName === "",
+    needsSchool: schoolNames.length === 0,
     needsReauth: me.lastScanStatus === REAUTH_SCAN_STATUS,
   };
 }
@@ -669,14 +691,16 @@ function identityCard(doc, me) {
   email.textContent = `Signed in as ${textOr(me?.email, "your Google account")}`;
   card.appendChild(email);
 
-  const schoolName = typeof me?.schoolName === "string" ? me.schoolName.trim() : "";
-  if (schoolName !== "") {
-    // schoolName is stored raw and is rendered as TEXT here, exactly as an email
-    // subject is. It is the user's own value, so an injection is self-inflicted,
-    // but the storage layer names this escaping as its mitigation.
+  const schoolNames = schoolNameList(me?.schoolNames);
+  if (schoolNames.length > 0) {
+    // Each name is stored raw and the JOINED list is rendered as TEXT here,
+    // exactly as an email subject is. They are the user's own values, so an
+    // injection is self-inflicted, but the storage layer names this escaping as
+    // its mitigation - and joining before assigning keeps it one text node rather
+    // than a list assembled out of markup.
     const school = el(doc, "p", "card-body");
     school.setAttribute("id", "identity-school-name");
-    school.textContent = `Watching mail for ${schoolName}`;
+    school.textContent = `Watching mail for ${schoolNames.join(", ")}`;
     card.appendChild(school);
   }
   return card;
@@ -1044,10 +1068,12 @@ export function createCalendarApp(options = {}) {
   function applyIdentity() {
     renderConnectionCards(doc, byId("connection-state"), state.me);
 
-    const schoolName = typeof state.me?.schoolName === "string" ? state.me.schoolName.trim() : "";
+    const schoolNames = schoolNameList(state.me?.schoolNames);
     const header = byId("school-name");
-    // Text, not markup - schoolName is stored raw (see backend/settings.mjs).
-    if (header) header.textContent = schoolName === "" ? "" : `Watching mail for ${schoolName}`;
+    // Text, not markup - every name is stored raw (see backend/settings.mjs).
+    if (header) {
+      header.textContent = schoolNames.length === 0 ? "" : `Watching mail for ${schoolNames.join(", ")}`;
+    }
 
     const body = byId("app-body");
     if (body) body.hidden = false;

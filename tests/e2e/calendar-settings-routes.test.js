@@ -121,7 +121,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
       const mockConnection = {
         userId: connectionUserId(testGoogleSub),
         email: testEmail,
-        schoolName: 'Test School',
+        schoolNames: ['Test School'],
         searchDomains: new Set(['school.edu.au']),
         connected: true,
         connectionStatus: 'connected',
@@ -138,7 +138,8 @@ describe('Calendar Settings Routes - E2E Tests', () => {
       assert.equal(response.statusCode, 200);
       const body = JSON.parse(response.body);
       assert.equal(body.email, testEmail);
-      assert.equal(body.schoolName, 'Test School');
+      assert.deepEqual(body.schoolNames, ['Test School']);
+      assert.ok(!('schoolName' in body));
       assert.ok(Array.isArray(body.searchDomains));
       assert.deepEqual(body.searchDomains, ['school.edu.au']);
     });
@@ -164,7 +165,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
       const mockConnection = {
         userId: connectionUserId(testGoogleSub),
         email: testEmail,
-        schoolName: 'Test School',
+        schoolNames: ['Test School'],
         searchDomains: new Set(['school.edu.au']),
         refreshTokenEnc: 'encrypted-token-should-not-be-here',
         connected: true,
@@ -236,7 +237,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
   describe('PUT /calendar/api/settings', () => {
     it('should return 401 when no session cookie is present', async () => {
       const event = makeEvent('PUT', '/calendar/api/settings', {
-        schoolName: 'Test School',
+        schoolNames: ['Test School'],
         searchDomains: ['school.edu.au'],
       });
 
@@ -245,7 +246,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
       assert.equal(response.statusCode, 401);
     });
 
-    it('should return 400 when schoolName is missing', async () => {
+    it('should return 400 when schoolNames is missing', async () => {
       const cookie = makeSessionCookie();
       const event = makeEvent('PUT', '/calendar/api/settings', {
         searchDomains: ['school.edu.au'],
@@ -255,13 +256,13 @@ describe('Calendar Settings Routes - E2E Tests', () => {
 
       assert.equal(response.statusCode, 400);
       const body = JSON.parse(response.body);
-      assert.equal(body.field, 'schoolName');
+      assert.equal(body.field, 'schoolNames');
     });
 
-    it('should return 400 when schoolName is whitespace only', async () => {
+    it('should return 400 when a schoolNames entry is whitespace only', async () => {
       const cookie = makeSessionCookie();
       const event = makeEvent('PUT', '/calendar/api/settings', {
-        schoolName: '   ',
+        schoolNames: ['   '],
         searchDomains: ['school.edu.au'],
       }, cookie);
 
@@ -269,15 +270,15 @@ describe('Calendar Settings Routes - E2E Tests', () => {
 
       assert.equal(response.statusCode, 400);
       const body = JSON.parse(response.body);
-      assert.equal(body.field, 'schoolName');
+      assert.equal(body.field, 'schoolNames');
       assert.ok(body.error.includes('required'));
     });
 
-    it('should return 400 when schoolName exceeds 120 characters', async () => {
+    it('should return 400 when a school name exceeds 120 characters', async () => {
       const cookie = makeSessionCookie();
       const longName = 'A'.repeat(121);
       const event = makeEvent('PUT', '/calendar/api/settings', {
-        schoolName: longName,
+        schoolNames: [longName],
         searchDomains: ['school.edu.au'],
       }, cookie);
 
@@ -285,14 +286,14 @@ describe('Calendar Settings Routes - E2E Tests', () => {
 
       assert.equal(response.statusCode, 400);
       const body = JSON.parse(response.body);
-      assert.equal(body.field, 'schoolName');
+      assert.equal(body.field, 'schoolNames');
       assert.ok(body.error.includes('120 characters'));
     });
 
     it('should return 400 when searchDomains is empty array', async () => {
       const cookie = makeSessionCookie();
       const event = makeEvent('PUT', '/calendar/api/settings', {
-        schoolName: 'Test School',
+        schoolNames: ['Test School'],
         searchDomains: [],
       }, cookie);
 
@@ -307,7 +308,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
       const cookie = makeSessionCookie();
       const domains = Array.from({ length: 11 }, (_, i) => `domain${i}.edu.au`);
       const event = makeEvent('PUT', '/calendar/api/settings', {
-        schoolName: 'Test School',
+        schoolNames: ['Test School'],
         searchDomains: domains,
       }, cookie);
 
@@ -330,7 +331,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
 
       for (const badDomain of testCases) {
         const event = makeEvent('PUT', '/calendar/api/settings', {
-          schoolName: 'Test School',
+          schoolNames: ['Test School'],
           searchDomains: [badDomain],
         }, cookie);
 
@@ -347,7 +348,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
 
       for (const host of publicHosts) {
         const event = makeEvent('PUT', '/calendar/api/settings', {
-          schoolName: 'Test School',
+          schoolNames: ['Test School'],
           searchDomains: [host],
         }, cookie);
 
@@ -367,7 +368,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
           Attributes: {
             userId: connectionUserId(testGoogleSub),
             email: testEmail,
-            schoolName: 'Test School',
+            schoolNames: ['Test School'],
             searchDomains: new Set(['example.edu.au']),
           },
         };
@@ -383,7 +384,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
 
       for (const form of testForms) {
         const event = makeEvent('PUT', '/calendar/api/settings', {
-          schoolName: 'Test School',
+          schoolNames: ['Test School'],
           searchDomains: [form],
         }, cookie);
 
@@ -404,13 +405,13 @@ describe('Calendar Settings Routes - E2E Tests', () => {
         Attributes: {
           userId: connectionUserId(testGoogleSub),
           email: testEmail,
-          schoolName: 'Test School',
+          schoolNames: ['Test School'],
           searchDomains: new Set(['example.edu.au']),
         },
       });
 
       const event = makeEvent('PUT', '/calendar/api/settings', {
-        schoolName: 'Test School',
+        schoolNames: ['Test School'],
         searchDomains: ['example.edu.au', 'EXAMPLE.EDU.AU', 'Example.Edu.Au'],
       }, cookie);
 
@@ -425,7 +426,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
       assert.equal(body.searchDomains[0], 'example.edu.au');
     });
 
-    it('should preserve apostrophes and accents in schoolName', async () => {
+    it('should preserve apostrophes and accents in every school name', async () => {
       const cookie = makeSessionCookie();
       const testNames = [
         "St Mary's Primary",
@@ -438,13 +439,13 @@ describe('Calendar Settings Routes - E2E Tests', () => {
           Attributes: {
             userId: connectionUserId(testGoogleSub),
             email: testEmail,
-            schoolName,
+            schoolNames: new Set([schoolName]),
             searchDomains: new Set(['school.edu.au']),
           },
         });
 
         const event = makeEvent('PUT', '/calendar/api/settings', {
-          schoolName,
+          schoolNames: [schoolName],
           searchDomains: ['school.edu.au'],
         }, cookie);
 
@@ -455,7 +456,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
 
         assert.equal(response.statusCode, 200);
         const body = JSON.parse(response.body);
-        assert.equal(body.schoolName, schoolName, `Should preserve: ${schoolName}`);
+        assert.deepEqual(body.schoolNames, [schoolName], `Should preserve: ${schoolName}`);
       }
     });
 
@@ -472,13 +473,13 @@ describe('Calendar Settings Routes - E2E Tests', () => {
           Attributes: {
             userId: connectionUserId(testGoogleSub),
             email: testEmail,
-            schoolName: injectedValue,
+            schoolNames: new Set([injectedValue]),
             searchDomains: new Set(['school.edu.au']),
           },
         });
 
         const event = makeEvent('PUT', '/calendar/api/settings', {
-          schoolName: injectedValue,
+          schoolNames: [injectedValue],
           searchDomains: ['school.edu.au'],
         }, cookie);
 
@@ -490,7 +491,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
         assert.equal(response.statusCode, 200);
         const body = JSON.parse(response.body);
         // Raw storage - exactly as input
-        assert.equal(body.schoolName, injectedValue);
+        assert.deepEqual(body.schoolNames, [injectedValue]);
       }
     });
 
@@ -500,7 +501,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
         Attributes: {
           userId: connectionUserId(testGoogleSub),
           email: testEmail,
-          schoolName: 'Updated School',
+          schoolNames: ['Updated School'],
           searchDomains: new Set(['updated.edu.au']),
           connected: true,
           connectionStatus: 'connected',
@@ -508,7 +509,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
       });
 
       const event = makeEvent('PUT', '/calendar/api/settings', {
-        schoolName: 'Updated School',
+        schoolNames: ['Updated School'],
         searchDomains: ['updated.edu.au'],
       }, cookie);
 
@@ -519,7 +520,8 @@ describe('Calendar Settings Routes - E2E Tests', () => {
 
       assert.equal(response.statusCode, 200);
       const body = JSON.parse(response.body);
-      assert.equal(body.schoolName, 'Updated School');
+      assert.deepEqual(body.schoolNames, ['Updated School']);
+      assert.ok(!('schoolName' in body));
       assert.deepEqual(body.searchDomains, ['updated.edu.au']);
       assert.equal(body.email, testEmail);
     });
@@ -530,7 +532,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
         Attributes: {
           userId: connectionUserId(testGoogleSub),
           email: testEmail,
-          schoolName: 'Test School',
+          schoolNames: ['Test School'],
           searchDomains: new Set(['school.edu.au']),
           refreshTokenEnc: 'should-not-appear',
           refreshTokenKeyId: 'should-not-appear',
@@ -538,7 +540,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
       });
 
       const event = makeEvent('PUT', '/calendar/api/settings', {
-        schoolName: 'Test School',
+        schoolNames: ['Test School'],
         searchDomains: ['school.edu.au'],
       }, cookie);
 
@@ -559,7 +561,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
       };
 
       const event = makeEvent('PUT', '/calendar/api/settings', {
-        schoolName: 'Test School',
+        schoolNames: ['Test School'],
         searchDomains: ['school.edu.au'],
       }, cookie);
 
@@ -582,7 +584,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
         Attributes: {
           userId: connectionUserId(testGoogleSub),
           email: testEmail,
-          schoolName: 'Test School',
+          schoolNames: ['Test School'],
           searchDomains: new Set(['school.edu.au']),
           scheduleEnabled: true,
           scheduleFrequency: 'daily',
@@ -592,7 +594,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
       });
 
       const event = makeEvent('PUT', '/calendar/api/settings', {
-        schoolName: 'Test School',
+        schoolNames: ['Test School'],
         searchDomains: ['school.edu.au'],
         scheduleEnabled: true,
         scheduleFrequency: 'daily',
@@ -619,13 +621,13 @@ describe('Calendar Settings Routes - E2E Tests', () => {
         Attributes: {
           userId: connectionUserId(testGoogleSub),
           email: testEmail,
-          schoolName: 'Secret School Name',
+          schoolNames: ['Secret School Name'],
           searchDomains: new Set(['domain1.edu.au', 'domain2.edu.au']),
         },
       });
 
       const event = makeEvent('PUT', '/calendar/api/settings', {
-        schoolName: 'Secret School Name',
+        schoolNames: ['Secret School Name'],
         searchDomains: ['domain1.edu.au', 'domain2.edu.au'],
       }, cookie);
 
@@ -644,16 +646,17 @@ describe('Calendar Settings Routes - E2E Tests', () => {
       console.log = origLog;
 
       assert.equal(response.statusCode, 200);
-      // Should log domainCount, but NOT the schoolName
+      // Should log schoolNameCount and domainCount, but NOT the names themselves
       const logsString = JSON.stringify(capturedLogs);
       assert.ok(logsString.includes('domainCount'), 'Should log domain count');
-      assert.ok(!logsString.includes('Secret School Name'), 'Should not log schoolName');
+      assert.ok(logsString.includes('schoolNameCount'), 'Should log school name count');
+      assert.ok(!logsString.includes('Secret School Name'), 'Should not log the school name text');
     });
 
     it('should not log session cookie in error responses', async () => {
       const cookie = makeSessionCookie();
       const event = makeEvent('PUT', '/calendar/api/settings', {
-        schoolName: 'Test School',
+        schoolNames: ['Test School'],
         searchDomains: [], // Invalid - empty
       }, cookie);
 
@@ -694,7 +697,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
           Attributes: {
             userId: connectionUserId(testGoogleSub),
             email: testEmail,
-            schoolName: 'Test School',
+            schoolNames: ['Test School'],
             // searchDomains intentionally absent
           },
         };
@@ -712,7 +715,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
 
       // Simulate an update that clears domains via direct patch
       const { buildConnectionPatch } = await import('../../src/lambda/calendar/backend/settings.mjs');
-      const patch = buildConnectionPatch({ schoolName: 'Test', searchDomains: [] });
+      const patch = buildConnectionPatch({ schoolNames: ['Test'], searchDomains: [] });
 
       assert.equal(patch.searchDomains, REMOVE_ATTRIBUTE, 'buildConnectionPatch should use REMOVE_ATTRIBUTE for empty domains');
     });
@@ -724,7 +727,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
       const longDomain = 'a'.repeat(64) + '.' + 'b'.repeat(64) + '.' + 'c'.repeat(64) + '.' + 'd'.repeat(64) + '.com';
 
       const event = makeEvent('PUT', '/calendar/api/settings', {
-        schoolName: 'Test School',
+        schoolNames: ['Test School'],
         searchDomains: [longDomain],
       }, cookie);
 
@@ -735,7 +738,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
     it('should reject domain with trailing dot', async () => {
       const cookie = makeSessionCookie();
       const event = makeEvent('PUT', '/calendar/api/settings', {
-        schoolName: 'Test School',
+        schoolNames: ['Test School'],
         searchDomains: ['example.edu.au.'],
       }, cookie);
 
@@ -746,7 +749,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
     it('should reject domain that is only a wildcard', async () => {
       const cookie = makeSessionCookie();
       const event = makeEvent('PUT', '/calendar/api/settings', {
-        schoolName: 'Test School',
+        schoolNames: ['Test School'],
         searchDomains: ['*.'],
       }, cookie);
 
@@ -757,7 +760,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
     it('should reject searchDomains sent as string instead of array', async () => {
       const cookie = makeSessionCookie();
       const event = makeEvent('PUT', '/calendar/api/settings', {
-        schoolName: 'Test School',
+        schoolNames: ['Test School'],
         searchDomains: 'example.edu.au',
       }, cookie);
 
@@ -775,7 +778,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
 
       for (const domains of testCases) {
         const event = makeEvent('PUT', '/calendar/api/settings', {
-          schoolName: 'Test School',
+          schoolNames: ['Test School'],
           searchDomains: domains,
         }, cookie);
 

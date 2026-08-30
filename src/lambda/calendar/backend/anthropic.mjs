@@ -29,12 +29,13 @@
  * quoted content:
  *   - the email body, subject and sender (attacker-controlled outright: anyone
  *     can send the user an email);
- *   - `schoolName` and every `searchDomains` value. These are the USER's own
- *     settings, but settings.mjs deliberately stores them raw and validates only
- *     shape ("NO SANITISATION, DELIBERATELY" - see its docblock, which names this
- *     module as the boundary that wraps them). A stored schoolName of "Ignore
- *     previous instructions and ..." must therefore reach the model as quoted
- *     context, not as trusted narration.
+ *   - every `schoolNames` and every `searchDomains` value. These are the USER's
+ *     own settings, but settings.mjs deliberately stores them raw and validates
+ *     only shape ("NO SANITISATION, DELIBERATELY" - see its docblock, which names
+ *     this module as the boundary that wraps them). A stored school name of
+ *     "Ignore previous instructions and ..." must therefore reach the model as
+ *     quoted context, not as trusted narration - which is why each name is
+ *     defused on its own rather than after being joined.
  *   Any occurrence of our own delimiters inside those values is defused first
  *   (see `defuseDelimiters`), so no value can close its own block and escape into
  *   the instruction voice.
@@ -441,6 +442,44 @@ export function toDomainList(value) {
 }
 
 /**
+ * Normalise a stored school-name list into an array of names.
+ *
+ * The shape-normalising sibling of `toDomainList`, and deliberately NOT the same
+ * function, because two of that one's rules are wrong for a display name:
+ *
+ *  - A BARE STRING IS ONE NAME, not a comma-separated list. `toDomainList` splits
+ *    on "," correctly - a domain can never contain one - but "St Mary's Primary,
+ *    Manly" is a single school, and splitting it would put a fragment in the
+ *    prompt that the user never wrote. The string form is the LEGACY scalar
+ *    `schoolName` (see connections.mjs), which was always exactly one name.
+ *  - NO LOWER-CASING. Domains are folded because DNS is case-insensitive; a
+ *    school's capitalisation is the user's own text and is what the model reads.
+ *
+ * Accepts the shapes the value arrives in - a JS `Set` (document client, the
+ * usual case via `getConnection`), `{ SS: [...] }` (low-level client), an array
+ * (`toPublicJson`) or a single string (a legacy row). Blank entries are dropped.
+ * Like `toDomainList`, this tolerates whatever is in the table rather than
+ * re-validating it: settings.mjs owns the rules.
+ *
+ * @param {unknown} value
+ * @returns {string[]}
+ */
+export function toSchoolNameList(value) {
+  let entries = [];
+  if (value instanceof Set) entries = [...value];
+  else if (Array.isArray(value)) entries = value;
+  else if (value && typeof value === "object" && Array.isArray(value.SS)) entries = value.SS;
+  else if (typeof value === "string") entries = [value];
+
+  const seen = new Set();
+  for (const entry of entries) {
+    const name = String(entry ?? "").trim();
+    if (name) seen.add(name);
+  }
+  return [...seen];
+}
+
+/**
  * Pull the domain out of a From header.
  *
  * Handles `Name <local@host>`, a bare address, and a trailing dot. Returns "" for
@@ -496,25 +535,35 @@ export function isWatchedSender(from, searchDomains) {
  *
  * EVERYTHING VARIABLE LIVES HERE, after the cache breakpoint - the receivedAt
  * anchor (which is the email's own receipt time, not scan time, so a newsletter
- * processed weeks later still resolves "next Friday" correctly), the school name
+ * processed weeks later still resolves "next Friday" correctly), the school names
  * and the watched domains. None of it is ever moved into `system`.
  *
- * `schoolName` and the domains are the user's own settings but are still quoted:
+ * The names and the domains are the user's own settings but are still quoted:
  * settings.mjs stores them raw by design and names this function as the boundary
- * that contains them.
+ * that contains them. Each name is defused INDIVIDUALLY, before it is wrapped, so
+ * a delimiter typed into one name cannot close the block around the others.
+ *
+ * ONE `<school_name>` TAG PER NAME, exactly as `<watched_domain>` is already
+ * repeated below. `DATA_TAGS` and `EXTRACTION_SYSTEM_PROMPT` both name the tag
+ * literally and the system block is the prompt-cache breakpoint, so repeating the
+ * existing tag is what lets a multi-name list ship without changing a byte of the
+ * cached prefix. Do not comma-join into one tag and do not add a new tag name.
+ * An EMPTY list emits no `<school_name>` line at all rather than an empty pair:
+ * the block stays well formed, and the model is not shown a field with nothing
+ * in it.
  *
  * @param {object} args
  * @param {object} [args.message] A message from gmail.mjs's `fetchCandidateMessages`.
- * @param {string} [args.schoolName]
+ * @param {unknown} [args.schoolNames]
  * @param {unknown} [args.searchDomains]
  * @returns {string}
  */
-export function buildUserContent({ message = {}, schoolName = "", searchDomains = null } = {}) {
+export function buildUserContent({ message = {}, schoolNames = null, searchDomains = null } = {}) {
   const subject = defuseDelimiters(message.subject);
   const from = defuseDelimiters(message.from);
   const receivedAt = defuseDelimiters(message.receivedAt);
   const body = defuseDelimiters(message.body || message.snippet || "");
-  const name = defuseDelimiters(schoolName);
+  const names = toSchoolNameList(schoolNames).map((name) => defuseDelimiters(name));
   const domains = toDomainList(searchDomains).map((domain) => defuseDelimiters(domain));
 
   const lines = [
@@ -530,7 +579,7 @@ export function buildUserContent({ message = {}, schoolName = "", searchDomains 
     "</email_metadata>",
     "",
     "<school_context>",
-    `<school_name>${name}</school_name>`,
+    ...names.map((name) => `<school_name>${name}</school_name>`),
     ...domains.map((domain) => `<watched_domain>${domain}</watched_domain>`),
     "</school_context>",
     "",
@@ -558,7 +607,7 @@ export function buildUserContent({ message = {}, schoolName = "", searchDomains 
  *
  * @param {object} args
  * @param {object} args.message
- * @param {string} [args.schoolName]
+ * @param {unknown} [args.schoolNames]
  * @param {unknown} [args.searchDomains]
  * @param {string} [args.model]
  * @param {number} [args.maxTokens]
@@ -566,7 +615,7 @@ export function buildUserContent({ message = {}, schoolName = "", searchDomains 
  */
 export function buildRequest({
   message,
-  schoolName = "",
+  schoolNames = null,
   searchDomains = null,
   model = DEFAULT_MODEL,
   maxTokens = DEFAULT_MAX_TOKENS,
@@ -578,7 +627,7 @@ export function buildRequest({
     messages: [
       {
         role: "user",
-        content: buildUserContent({ message, schoolName, searchDomains }),
+        content: buildUserContent({ message, schoolNames, searchDomains }),
       },
     ],
   };
@@ -1029,13 +1078,13 @@ export async function callModel(
  *
  * @param {object} args
  * @param {object} args.message A message from `fetchCandidateMessages`.
- * @param {string} [args.schoolName]
+ * @param {unknown} [args.schoolNames]
  * @param {unknown} [args.searchDomains]
  * @param {object} [deps] `createMessage`, `client`, `errorTypes`, `sleep`,
  *   `random`, `now`, `maxAttempts`, `baseDelayMs`, `maxDelayMs`, `env`, `log`.
  * @returns {Promise<{ messageId: string, status: string, events: object[], isSchoolEmail: boolean|null, stopReason: string, usage: object, message: object }>}
  */
-export async function extractFromMessage({ message, schoolName = "", searchDomains = null } = {}, deps = {}) {
+export async function extractFromMessage({ message, schoolNames = null, searchDomains = null } = {}, deps = {}) {
   if (!message || typeof message !== "object") {
     throw new Error("extractFromMessage: message is required");
   }
@@ -1060,7 +1109,7 @@ export async function extractFromMessage({ message, schoolName = "", searchDomai
   const config = readAnthropicConfig(env);
   const request = buildRequest({
     message,
-    schoolName,
+    schoolNames,
     searchDomains,
     model: (typeof model === "string" && model.trim()) || config.model,
     maxTokens: positiveInt(maxTokens, config.maxTokens),
@@ -1120,12 +1169,12 @@ export async function extractFromMessage({ message, schoolName = "", searchDomai
  *
  * @param {object} args
  * @param {object[]} args.messages
- * @param {string} [args.schoolName]
+ * @param {unknown} [args.schoolNames]
  * @param {unknown} [args.searchDomains]
  * @param {object} [deps] As `extractFromMessage`.
  * @returns {Promise<{ results: object[], events: object[], errors: Array<{id: string, error: string}>, usage: object, counts: Record<string, number> }>}
  */
-export async function extractEvents({ messages = [], schoolName = "", searchDomains = null } = {}, deps = {}) {
+export async function extractEvents({ messages = [], schoolNames = null, searchDomains = null } = {}, deps = {}) {
   const { env = process.env, log = null } = deps;
   const logLine = typeof log === "function" ? log : makeLogger(env);
 
@@ -1139,7 +1188,7 @@ export async function extractEvents({ messages = [], schoolName = "", searchDoma
     const messageId = String(message?.id ?? "");
     let result;
     try {
-      result = await extractFromMessage({ message, schoolName, searchDomains }, { ...deps, log: logLine });
+      result = await extractFromMessage({ message, schoolNames, searchDomains }, { ...deps, log: logLine });
     } catch (error) {
       // Id and reason only: never the subject, the sender or the body.
       errors.push({ id: messageId, error: error?.message || String(error) });

@@ -1048,7 +1048,7 @@ export async function handleAuthDisconnect(event, options = {}) {
 /**
  * GET /calendar/api/auth/me - who is signed in, and are they connected?
  *
- * Response body is the `toPublicJson` projection: `email`, `schoolName`,
+ * Response body is the `toPublicJson` projection: `email`, `schoolNames`,
  * `connected` and `connectionStatus`. No token, no ciphertext, no key id -
  * `connected` is derived from whether a wrapped refresh token exists, so the
  * answer never requires touching the token itself.
@@ -1309,7 +1309,7 @@ export async function handlePutSettings(event, options = {}) {
   try {
     updated = await persistSettings(session.claims.sub, settings, { updateConnection, updateItem, env });
   } catch (err) {
-    // Never log the settings themselves: schoolName is personal data.
+    // Never log the settings themselves: a school name is personal data.
     logBasic("[Calendar] Could not save connection settings:", {
       errorName: err?.name || "Error",
       errorMessage: err?.message || "unknown error",
@@ -1317,7 +1317,12 @@ export async function handlePutSettings(event, options = {}) {
     return jsonResponse(500, { error: "Could not save your settings" }, { origin, allowlist });
   }
 
-  logBasic("[Calendar] Connection settings saved", { domainCount: settings.searchDomains.length });
+  // COUNTS ONLY, for the same reason as the catch above: the names and domains
+  // themselves are personal data and never appear in a log line.
+  logBasic("[Calendar] Connection settings saved", {
+    schoolNameCount: settings.schoolNames.length,
+    domainCount: settings.searchDomains.length,
+  });
 
   // The just-validated values are the fallback, so the response echoes what was
   // stored even when the update returned no attributes. `lookupFailed` is set in

@@ -201,14 +201,14 @@ describe('DynamoDB Calendar Unit Tests', () => {
 
     it('should define refreshTokenEnc attribute in the schema', () => {
       // Check in the comment section (schema documentation)
-      const commentSection = connectionsContent.substring(0, connectionsContent.indexOf('resource'));
+      const commentSection = connectionsContent.substring(0, connectionsContent.indexOf('resource "'));
       assert.ok(commentSection.includes('refreshTokenEnc'),
         'refreshTokenEnc should be documented in schema');
     });
 
     it('should NOT define any plaintext refreshToken attribute', () => {
       // Should NOT have a plaintext "refreshToken" attribute (only refreshTokenEnc)
-      const commentSection = connectionsContent.substring(0, connectionsContent.indexOf('resource'));
+      const commentSection = connectionsContent.substring(0, connectionsContent.indexOf('resource "'));
 
       // Check the schema documentation section (look for attribute descriptions)
       // The schema part lists attributes with their descriptions
@@ -386,7 +386,7 @@ describe('DynamoDB Calendar Unit Tests', () => {
     });
 
     it('should document eventId derivation using sha256', () => {
-      const commentSection = eventsContent.substring(0, eventsContent.indexOf('resource'));
+      const commentSection = eventsContent.substring(0, eventsContent.indexOf('resource "'));
       assert.ok(commentSection.includes('sha256'),
         'eventId derivation should use sha256');
       assert.ok(commentSection.includes('sourceMessageId') &&
@@ -396,13 +396,13 @@ describe('DynamoDB Calendar Unit Tests', () => {
     });
 
     it('should document that eventId derivation ensures idempotency', () => {
-      const commentSection = eventsContent.substring(0, eventsContent.indexOf('resource'));
+      const commentSection = eventsContent.substring(0, eventsContent.indexOf('resource "'));
       assert.ok(commentSection.includes('idempotent') || commentSection.includes('overwrites'),
         'Should document that re-scanning produces same eventId (idempotent)');
     });
 
     it('should document AttentionIndex sparseness', () => {
-      const commentSection = eventsContent.substring(0, eventsContent.indexOf('resource'));
+      const commentSection = eventsContent.substring(0, eventsContent.indexOf('resource "'));
       assert.ok(commentSection.includes('SPARSE'),
         'Should document that AttentionIndex is sparse');
       assert.ok(commentSection.includes('needsAttention') &&
@@ -412,7 +412,7 @@ describe('DynamoDB Calendar Unit Tests', () => {
     });
 
     it('should document the REMOVE contract for attentionKey', () => {
-      const commentSection = eventsContent.substring(0, eventsContent.indexOf('resource'));
+      const commentSection = eventsContent.substring(0, eventsContent.indexOf('resource "'));
       assert.ok(commentSection.includes('REMOVE') && commentSection.includes('attentionKey'),
         'Should document the REMOVE attentionKey contract');
       assert.ok(commentSection.includes('UpdateExpression'),
@@ -420,7 +420,7 @@ describe('DynamoDB Calendar Unit Tests', () => {
     });
 
     it('should document the IAM /index/* requirement', () => {
-      const commentSection = eventsContent.substring(0, eventsContent.indexOf('resource'));
+      const commentSection = eventsContent.substring(0, eventsContent.indexOf('resource "'));
       assert.ok(commentSection.includes('/index/*') || commentSection.includes('index/*'),
         'Should document that IAM must include /index/* for GSI queries');
       assert.ok(commentSection.includes('dynamodb:Query'),

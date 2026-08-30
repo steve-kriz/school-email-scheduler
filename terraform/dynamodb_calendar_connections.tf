@@ -5,13 +5,30 @@
 # (the app's only copy of the OAuth grant), the school/domain matching config,
 # the scan watermark, and the user's scan schedule preferences.
 #
+# The table is schemaless beyond the `userId` hash key, so the attribute list
+# below is documentation rather than a declaration: adding, renaming or retyping
+# an attribute (as TASK-053 did for schoolName -> schoolNames) is an application
+# change and needs no change to this resource.
+#
 # Every access path is a GetItem or PutItem by `userId`, so there is deliberately
 # no GSI and no range key - adding one would only add write cost.
 #
 # Schema (all fields are strings unless noted):
 #   userId (PK)         : "google#<google sub claim>"
 #   email               : the connected Google account address
-#   schoolName          : free-text school name entered by the user
+#   schoolNames (SS)    : free-text school names entered by the user (up to 10),
+#                         e.g. ["St Mary's Primary", "St Mary's P&C"]. Used only
+#                         as descriptive context in the extraction prompt - the
+#                         Gmail query and the watched-sender check are built from
+#                         searchDomains alone.
+#                         LEGACY: before TASK-053 this was a single scalar string
+#                         attribute `schoolName`. A row whose owner has not saved
+#                         their settings since may still carry that scalar and no
+#                         schoolNames set; connections.mjs's toPublicJson reads it
+#                         back as a one-element list, and the next settings save
+#                         SETs schoolNames and REMOVEs schoolName in the same
+#                         UpdateItem. No row carries both, and there is no batch
+#                         migration - rows convert one at a time as they are saved.
 #   searchDomains (SS)  : domains to match senders against, e.g.
 #                         ["stmarys.nsw.edu.au", "schoolbytes.education"]
 #   refreshTokenEnc     : base64 KMS ciphertext of the Gmail refresh token. The

@@ -47,8 +47,12 @@ export const SECRET_ATTRIBUTES = ["refreshTokenEnc", "refreshTokenKeyId"];
  */
 export const PUBLIC_ATTRIBUTES = [
   "email",
-  "schoolName",
-  // TASK-005 settings: what the user asked us to watch for.
+  // TASK-005 settings: what the user asked us to watch for. Both are string sets;
+  // `schoolNames` replaced a single `schoolName` scalar in TASK-053, which
+  // `toPublicJson` still reads back as a one-element list for a row that has not
+  // been saved since. The legacy attribute is deliberately NOT in this list - it
+  // is projected UNDER the new name, so no response body ever carries it.
+  "schoolNames",
   "searchDomains",
   // Schedule preferences (written by TASK-005's settings route and TASK-008).
   "scheduleEnabled",
@@ -69,6 +73,11 @@ export const PUBLIC_ATTRIBUTES = [
  * patch value of `REMOVE_ATTRIBUTE` compiles to a `REMOVE` clause in
  * `ddbUpdateItem` instead of a `SET`. Do not "simplify" this back into writing
  * `[]` or `new Set()`.
+ *
+ * Also how a superseded attribute is retired: a settings save SETs `schoolNames`
+ * and REMOVEs the legacy `schoolName` scalar in ONE UpdateItem, which is why
+ * `buildUpdateParams` compiles a mixed SET/REMOVE expression rather than one or
+ * the other.
  *
  * A Symbol cannot appear in a JSON request body, so no client can smuggle a
  * removal through a route that forwards a parsed payload as a patch.
@@ -317,6 +326,15 @@ function jsonSafeValue(value) {
  * inviting the user to re-authorise a grant they already hold. `connected` stays
  * a plain boolean, and is only ever `true` when a stored grant was actually seen.
  *
+ * THE ONE LEGACY READ IN THIS MODULE (TASK-053): a row written before
+ * `schoolName` became the `schoolNames` string set still carries the old scalar.
+ * It is projected here as a one-element `schoolNames` list, so both `/settings`
+ * and `/auth/me` - which share this function - see the new shape and nothing
+ * downstream has to know the old one existed. `schoolNames` WINS when both are
+ * somehow present, and the legacy key is never emitted under its own name. The
+ * fallback stays until it can be shown no row still has the scalar; rows migrate
+ * one at a time as their owners save (see `buildConnectionPatch`).
+ *
  * @param {object|null} connection A row from `getConnection`, or null.
  * @param {object} [fallback] Values to fall back on when there is no row yet
  *   (the session's email, typically - a user who has signed in but whose row has
@@ -334,6 +352,11 @@ export function toPublicJson(connection, fallback = {}, { lookupFailed = false }
   for (const attribute of PUBLIC_ATTRIBUTES) {
     const value = source[attribute] !== undefined ? source[attribute] : fallback[attribute];
     out[attribute] = value === undefined || value === null || value === "" ? null : jsonSafeValue(value);
+  }
+
+  if (out.schoolNames === null) {
+    const legacy = source.schoolName !== undefined ? source.schoolName : fallback.schoolName;
+    if (typeof legacy === "string" && legacy.trim() !== "") out.schoolNames = [legacy.trim()];
   }
 
   const known = lookupFailed !== true;

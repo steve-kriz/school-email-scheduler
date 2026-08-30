@@ -70,7 +70,7 @@ describe('Calendar Extraction E2E Flow Tests', () => {
               body: 'The Year 4 class will visit the Central Zoo on March 14',
               receivedAt: '2026-01-15T10:00:00Z',
             },
-            schoolName: 'Test School',
+            schoolNames: ['Test School'],
             searchDomains: ['example.com'],
           },
           {
@@ -131,7 +131,7 @@ describe('Calendar Extraction E2E Flow Tests', () => {
               body: 'This week only!',
               receivedAt: '2026-01-15T10:00:00Z',
             },
-            schoolName: 'Test School',
+            schoolNames: ['Test School'],
             searchDomains: ['example.com'],
           },
           {
@@ -164,7 +164,7 @@ describe('Calendar Extraction E2E Flow Tests', () => {
               body: 'Content',
               receivedAt: '2026-01-15T10:00:00Z',
             },
-            schoolName: 'Test School',
+            schoolNames: ['Test School'],
             searchDomains: ['school.edu'],
           },
           {
@@ -197,7 +197,7 @@ describe('Calendar Extraction E2E Flow Tests', () => {
               body: '',
               receivedAt: '2026-01-15T10:00:00Z',
             },
-            schoolName: 'Test School',
+            schoolNames: ['Test School'],
             searchDomains: ['example.com'],
           },
           {
@@ -271,7 +271,7 @@ describe('Calendar Extraction E2E Flow Tests', () => {
                 receivedAt: '2026-01-15T10:00:00Z',
               },
             ],
-            schoolName: 'Test School',
+            schoolNames: ['Test School'],
             searchDomains: ['example.com'],
           },
           {
@@ -314,7 +314,7 @@ describe('Calendar Extraction E2E Flow Tests', () => {
               body: 'Content',
               receivedAt: '2026-01-15T10:00:00Z',
             },
-            schoolName: 'Test School',
+            schoolNames: ['Test School'],
             searchDomains: ['example.com'],
           },
           {
@@ -379,7 +379,7 @@ describe('Calendar Extraction E2E Flow Tests', () => {
               body: 'Content',
               receivedAt: '2026-01-15T10:00:00Z',
             },
-            schoolName: 'Test School',
+            schoolNames: ['Test School'],
             searchDomains: ['example.com'],
           },
           {
@@ -618,7 +618,7 @@ describe('Calendar Extraction E2E Flow Tests', () => {
             body: 'Content',
             receivedAt: '2026-01-15T10:00:00Z',
           },
-          schoolName: 'School',
+          schoolNames: ['School'],
           searchDomains: ['example.com'],
         });
 
@@ -638,13 +638,13 @@ describe('Calendar Extraction E2E Flow Tests', () => {
             body: 'There will be an assembly',
             receivedAt: '2026-01-15T10:00:00Z',
           },
-          schoolName: 'Test School',
+          schoolNames: ['Test School'],
           searchDomains: ['example.com'],
         });
 
         const userContent = request.messages[0].content;
         assert.ok(userContent.includes('2026-01-15'), 'Should include receivedAt');
-        assert.ok(userContent.includes('Test School'), 'Should include schoolName');
+        assert.ok(userContent.includes('Test School'), 'Should include the school name');
         assert.ok(userContent.includes('example.com'), 'Should include searchDomains');
         assert.ok(userContent.includes('school@example.com'), 'Should include sender address');
         assert.ok(userContent.includes('Assembly'), 'Should include subject');
@@ -690,7 +690,7 @@ describe('Calendar Extraction E2E Flow Tests', () => {
               body: 'Content',
               receivedAt: '2026-01-15T10:00:00Z',
             },
-            schoolName: 'Test School',
+            schoolNames: ['Test School'],
             searchDomains: ['example.com'],
           },
           {
@@ -832,7 +832,7 @@ describe('Calendar Extraction E2E Flow Tests', () => {
 
         // First scan
         const result1 = await extractFromMessage(
-          { message, schoolName: 'School', searchDomains: ['example.com'] },
+          { message, schoolNames: ['School'], searchDomains: ['example.com'] },
           { createMessage: mockCreateMessage, errorTypes: null, sleep: async () => {}, env: { CALENDAR_LOG_LEVEL: 'none' } }
         );
 
@@ -853,7 +853,7 @@ describe('Calendar Extraction E2E Flow Tests', () => {
 
         // Second scan (identical)
         const result2 = await extractFromMessage(
-          { message, schoolName: 'School', searchDomains: ['example.com'] },
+          { message, schoolNames: ['School'], searchDomains: ['example.com'] },
           { createMessage: mockCreateMessage, errorTypes: null, sleep: async () => {}, env: { CALENDAR_LOG_LEVEL: 'none' } }
         );
 
@@ -1020,14 +1020,14 @@ describe('Calendar Extraction E2E Flow Tests', () => {
 
         // Extract first message
         const result1 = await extractFromMessage(
-          { message: message1, schoolName: 'School', searchDomains: ['example.com'] },
+          { message: message1, schoolNames: ['School'], searchDomains: ['example.com'] },
           { createMessage: mockCreateMessage, errorTypes: null, sleep: async () => {}, env: { CALENDAR_LOG_LEVEL: 'verbose' } }
         );
         responseUsages.push(result1.usage);
 
         // Extract second message
         const result2 = await extractFromMessage(
-          { message: message2, schoolName: 'School', searchDomains: ['example.com'] },
+          { message: message2, schoolNames: ['School'], searchDomains: ['example.com'] },
           { createMessage: mockCreateMessage, errorTypes: null, sleep: async () => {}, env: { CALENDAR_LOG_LEVEL: 'verbose' } }
         );
         responseUsages.push(result2.usage);

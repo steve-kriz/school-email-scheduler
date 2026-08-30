@@ -5,7 +5,7 @@ import {
   countCodePoints,
   normalizeDomain,
   isValidDomain,
-  validateSchoolName,
+  validateSchoolNames,
   validateSearchDomains,
   validateSchedule,
   validateSettingsPayload,
@@ -15,6 +15,7 @@ import {
   toSettingsJson,
   SettingsValidationError,
   MAX_SCHOOL_NAME_LENGTH,
+  MAX_SCHOOL_NAMES,
   MAX_SEARCH_DOMAINS,
   MAX_DOMAIN_LENGTH,
   MAX_DOMAIN_LABEL_LENGTH,
@@ -207,92 +208,185 @@ describe('Settings Module - Unit Tests', () => {
     });
   });
 
-  describe('validateSchoolName', () => {
-    it('should accept valid school names', () => {
-      assert.equal(validateSchoolName('Test School'), 'Test School');
-      assert.equal(validateSchoolName('St Mary\'s Primary'), 'St Mary\'s Primary');
+  // TASK-053 renamed the single `schoolName` string to a `schoolNames` list.
+  // Every assertion below is the list-shaped equivalent of the string-shaped one
+  // it replaced - the OLD single-string behaviour is gone on purpose.
+  describe('validateSchoolNames', () => {
+    it('should accept an array of valid school names', () => {
+      assert.deepEqual(validateSchoolNames(['Test School']), ['Test School']);
+      assert.deepEqual(
+        validateSchoolNames(['Test School', 'St Mary\'s Primary']),
+        ['Test School', 'St Mary\'s Primary']
+      );
     });
 
-    it('should reject missing schoolName', () => {
+    it('should accept a legacy single string as a one-element list', () => {
+      assert.deepEqual(validateSchoolNames('Test School'), ['Test School']);
+    });
+
+    it('should NOT comma-split a legacy single string', () => {
+      assert.deepEqual(
+        validateSchoolNames("St Mary's Primary, Manly"),
+        ["St Mary's Primary, Manly"]
+      );
+    });
+
+    it('should preserve input order', () => {
+      assert.deepEqual(
+        validateSchoolNames(['Zeta College', 'Alpha School']),
+        ['Zeta College', 'Alpha School']
+      );
+    });
+
+    it('should de-duplicate exactly on the trimmed string, without case folding', () => {
+      assert.deepEqual(
+        validateSchoolNames(['Alpha School', '  Alpha School  ']),
+        ['Alpha School']
+      );
+      assert.deepEqual(
+        validateSchoolNames(['Alpha School', 'ALPHA SCHOOL']),
+        ['Alpha School', 'ALPHA SCHOOL']
+      );
+    });
+
+    it('should reject missing schoolNames', () => {
       try {
-        validateSchoolName(undefined);
+        validateSchoolNames(undefined);
         assert.fail('Should have thrown');
       } catch (err) {
         assert.ok(err instanceof SettingsValidationError);
-        assert.equal(err.field, 'schoolName');
+        assert.equal(err.field, 'schoolNames');
       }
     });
 
-    it('should reject non-string input', () => {
+    it('should reject a non-array, non-string input', () => {
       try {
-        validateSchoolName(123);
+        validateSchoolNames(123);
         assert.fail('Should have thrown');
       } catch (err) {
         assert.ok(err instanceof SettingsValidationError);
-        assert.equal(err.field, 'schoolName');
+        assert.equal(err.field, 'schoolNames');
       }
     });
 
-    it('should reject empty string', () => {
+    it('should reject an empty array', () => {
       try {
-        validateSchoolName('');
+        validateSchoolNames([]);
         assert.fail('Should have thrown');
       } catch (err) {
         assert.ok(err instanceof SettingsValidationError);
-        assert.equal(err.field, 'schoolName');
+        assert.equal(err.field, 'schoolNames');
       }
     });
 
-    it('should reject whitespace-only string', () => {
+    it('should reject an empty string', () => {
       try {
-        validateSchoolName('   ');
+        validateSchoolNames('');
         assert.fail('Should have thrown');
       } catch (err) {
         assert.ok(err instanceof SettingsValidationError);
-        assert.equal(err.field, 'schoolName');
+        assert.equal(err.field, 'schoolNames');
       }
     });
 
-    it('should trim leading/trailing whitespace', () => {
-      assert.equal(validateSchoolName('  Test School  '), 'Test School');
+    it('should reject a non-string entry', () => {
+      try {
+        validateSchoolNames(['Test School', 42]);
+        assert.fail('Should have thrown');
+      } catch (err) {
+        assert.ok(err instanceof SettingsValidationError);
+        assert.equal(err.field, 'schoolNames');
+      }
+    });
+
+    it('should reject a whitespace-only entry', () => {
+      try {
+        validateSchoolNames(['   ']);
+        assert.fail('Should have thrown');
+      } catch (err) {
+        assert.ok(err instanceof SettingsValidationError);
+        assert.equal(err.field, 'schoolNames');
+      }
+    });
+
+    it('should accept MAX_SCHOOL_NAMES entries and reject one more', () => {
+      const ten = Array.from({ length: MAX_SCHOOL_NAMES }, (_, i) => `School ${i}`);
+      assert.deepEqual(validateSchoolNames(ten), ten);
+      try {
+        validateSchoolNames([...ten, 'School 10']);
+        assert.fail('Should have thrown');
+      } catch (err) {
+        assert.ok(err instanceof SettingsValidationError);
+        assert.equal(err.field, 'schoolNames');
+        assert.ok(err.message.includes(String(MAX_SCHOOL_NAMES)));
+      }
+    });
+
+    it('should count the cap BEFORE de-duplication', () => {
+      // Eleven submitted entries that collapse to ten is still "too many".
+      const eleven = Array.from({ length: 10 }, (_, i) => `School ${i}`);
+      eleven.push('School 0');
+      assert.equal(eleven.length, 11);
+      assert.throws(() => validateSchoolNames(eleven), SettingsValidationError);
+    });
+
+    it('should trim leading/trailing whitespace on each entry', () => {
+      assert.deepEqual(validateSchoolNames(['  Test School  ']), ['Test School']);
     });
 
     it('should allow names up to 120 code points', () => {
       const name = 'A'.repeat(120);
-      assert.equal(validateSchoolName(name), name);
+      assert.deepEqual(validateSchoolNames([name]), [name]);
     });
 
     it('should reject names exceeding 120 code points', () => {
       const name = 'A'.repeat(121);
       try {
-        validateSchoolName(name);
+        validateSchoolNames([name]);
         assert.fail('Should have thrown');
       } catch (err) {
         assert.ok(err instanceof SettingsValidationError);
-        assert.equal(err.field, 'schoolName');
+        assert.equal(err.field, 'schoolNames');
         assert.ok(err.message.includes('120'));
       }
     });
 
     it('should preserve apostrophes', () => {
       const name = "St Mary's Primary School";
-      assert.equal(validateSchoolName(name), name);
+      assert.deepEqual(validateSchoolNames([name]), [name]);
     });
 
     it('should preserve accented characters', () => {
       const name = 'École Publique';
-      assert.equal(validateSchoolName(name), name);
+      assert.deepEqual(validateSchoolNames([name]), [name]);
     });
 
     it('should preserve special characters like & and -', () => {
       const name = 'P&C Association - St Mark\'s';
-      assert.equal(validateSchoolName(name), name);
+      assert.deepEqual(validateSchoolNames([name]), [name]);
     });
 
     it('should count code points not UTF-16 units for length limit', () => {
       // Emoji is 1 code point but multiple UTF-16 units
       const nameWithEmoji = 'School ' + '👍'.repeat(113);
-      assert.equal(validateSchoolName(nameWithEmoji), nameWithEmoji);
+      assert.ok(nameWithEmoji.length > 120, 'fixture must be over 120 UTF-16 units');
+      assert.ok(countCodePoints(nameWithEmoji) <= 120, 'fixture must be within 120 code points');
+      assert.deepEqual(validateSchoolNames([nameWithEmoji]), [nameWithEmoji]);
+    });
+
+    it('should reject a name over 120 CODE POINTS built from 4-byte emoji', () => {
+      // 113 x U+1F44D is 226 UTF-16 units but only 113 code points; adding
+      // enough to cross 120 code points is what must be refused.
+      const tooLong = '👍'.repeat(121);
+      assert.equal(countCodePoints(tooLong), 121);
+      try {
+        validateSchoolNames([tooLong]);
+        assert.fail('Should have thrown');
+      } catch (err) {
+        assert.ok(err instanceof SettingsValidationError);
+        assert.equal(err.field, 'schoolNames');
+        assert.ok(err.message.includes('120'));
+      }
     });
   });
 
@@ -567,11 +661,11 @@ describe('Settings Module - Unit Tests', () => {
   describe('parseJsonBody', () => {
     it('should parse valid JSON body', () => {
       const event = {
-        body: '{"schoolName":"Test","searchDomains":["example.com"]}',
+        body: '{"schoolNames":["Test"],"searchDomains":["example.com"]}',
         isBase64Encoded: false,
       };
       const result = parseJsonBody(event);
-      assert.deepEqual(result, { schoolName: 'Test', searchDomains: ['example.com'] });
+      assert.deepEqual(result, { schoolNames: ['Test'], searchDomains: ['example.com'] });
     });
 
     it('should return empty object for missing body', () => {
@@ -640,10 +734,10 @@ describe('Settings Module - Unit Tests', () => {
   describe('requireValidSettings', () => {
     it('should validate and return settings', () => {
       const result = requireValidSettings({
-        schoolName: 'Test School',
+        schoolNames: ['Test School'],
         searchDomains: ['example.edu.au'],
       });
-      assert.equal(result.schoolName, 'Test School');
+      assert.deepEqual(result.schoolNames, ['Test School']);
       assert.deepEqual(result.searchDomains, ['example.edu.au']);
     });
 
@@ -679,7 +773,7 @@ describe('Settings Module - Unit Tests', () => {
 
     it('should include optional schedule fields if present', () => {
       const result = requireValidSettings({
-        schoolName: 'Test School',
+        schoolNames: ['Test School'],
         searchDomains: ['example.edu.au'],
         scheduleEnabled: true,
         scheduleFrequency: 'daily',
@@ -690,7 +784,7 @@ describe('Settings Module - Unit Tests', () => {
 
     it('should not include optional fields that are not present', () => {
       const result = requireValidSettings({
-        schoolName: 'Test School',
+        schoolNames: ['Test School'],
         searchDomains: ['example.edu.au'],
       });
       assert.equal(result.scheduleEnabled, undefined);
@@ -701,7 +795,7 @@ describe('Settings Module - Unit Tests', () => {
   describe('validateSettingsPayload', () => {
     it('should return valid: true for valid payload', () => {
       const result = validateSettingsPayload({
-        schoolName: 'Test School',
+        schoolNames: ['Test School'],
         searchDomains: ['example.edu.au'],
       });
       assert.equal(result.valid, true);
@@ -710,7 +804,7 @@ describe('Settings Module - Unit Tests', () => {
 
     it('should return valid: false for invalid payload', () => {
       const result = validateSettingsPayload({
-        schoolName: 'Test School',
+        schoolNames: ['Test School'],
         searchDomains: [], // Invalid
       });
       assert.equal(result.valid, false);
@@ -718,15 +812,26 @@ describe('Settings Module - Unit Tests', () => {
     });
 
     it('should not throw on invalid payload', () => {
-      const result = validateSettingsPayload({ schoolName: '   ' });
+      const result = validateSettingsPayload({ schoolNames: ['   '] });
       assert.equal(result.valid, false);
     });
   });
 
   describe('buildConnectionPatch', () => {
-    it('should build patch with schoolName', () => {
-      const patch = buildConnectionPatch({ schoolName: 'Test School' });
-      assert.equal(patch.schoolName, 'Test School');
+    it('should build patch with schoolNames as a Set', () => {
+      const patch = buildConnectionPatch({ schoolNames: ['Test School'] });
+      assert.ok(patch.schoolNames instanceof Set);
+      assert.deepEqual(Array.from(patch.schoolNames), ['Test School']);
+    });
+
+    it('should use REMOVE_ATTRIBUTE for an empty schoolNames list', () => {
+      const patch = buildConnectionPatch({ schoolNames: [] });
+      assert.equal(patch.schoolNames, REMOVE_ATTRIBUTE);
+    });
+
+    it('should ALWAYS also REMOVE the legacy schoolName scalar', () => {
+      assert.equal(buildConnectionPatch({ schoolNames: ['Test School'] }).schoolName, REMOVE_ATTRIBUTE);
+      assert.equal(buildConnectionPatch({ schoolNames: [] }).schoolName, REMOVE_ATTRIBUTE);
     });
 
     it('should build patch with searchDomains as Set', () => {
@@ -741,14 +846,14 @@ describe('Settings Module - Unit Tests', () => {
     });
 
     it('should not include undefined fields in patch', () => {
-      const patch = buildConnectionPatch({ schoolName: 'Test' });
-      assert.equal(patch.schoolName, 'Test');
+      const patch = buildConnectionPatch({ schoolNames: ['Test'] });
+      assert.ok(patch.schoolNames instanceof Set);
       assert.equal(patch.searchDomains, undefined);
     });
 
     it('should include schedule fields if present', () => {
       const patch = buildConnectionPatch({
-        schoolName: 'Test',
+        schoolNames: ['Test'],
         searchDomains: ['example.edu.au'],
         scheduleEnabled: true,
         scheduleFrequency: 'daily',
@@ -763,7 +868,7 @@ describe('Settings Module - Unit Tests', () => {
 
     it('should not include undefined schedule fields', () => {
       const patch = buildConnectionPatch({
-        schoolName: 'Test',
+        schoolNames: ['Test'],
         searchDomains: ['example.edu.au'],
         scheduleEnabled: true,
       });
@@ -781,13 +886,13 @@ describe('Settings Module - Unit Tests', () => {
     it('should project connection to settings JSON', () => {
       const connection = {
         email: 'test@example.com',
-        schoolName: 'Test School',
+        schoolNames: ['Test School'],
         searchDomains: new Set(['example.edu.au']),
         hasRefreshToken: true,
       };
       const result = toSettingsJson(connection);
       assert.equal(result.email, 'test@example.com');
-      assert.equal(result.schoolName, 'Test School');
+      assert.deepEqual(result.schoolNames, ['Test School']);
       assert.deepEqual(result.searchDomains, ['example.edu.au']);
       // toPublicJson sets connected based on hasRefreshToken
       assert.ok(result.connected === null || typeof result.connected === 'boolean');
@@ -822,7 +927,7 @@ describe('Settings Module - Unit Tests', () => {
     it('should never include refreshTokenEnc or secrets', () => {
       const connection = {
         email: 'test@example.com',
-        schoolName: 'Test',
+        schoolNames: ['Test'],
         refreshTokenEnc: 'secret-token',
         refreshTokenKeyId: 'secret-key',
       };
@@ -835,7 +940,7 @@ describe('Settings Module - Unit Tests', () => {
       const connection = {
         userId: 'should-not-appear',
         email: 'test@example.com',
-        schoolName: 'Test School',
+        schoolNames: ['Test School'],
         searchDomains: new Set([]),
         unknown_field: 'should-not-appear',
       };
@@ -843,13 +948,14 @@ describe('Settings Module - Unit Tests', () => {
       assert.equal(result.userId, undefined);
       assert.equal(result.unknown_field, undefined);
       assert.ok('email' in result);
-      assert.ok('schoolName' in result);
+      assert.ok('schoolNames' in result);
+      assert.ok(!('schoolName' in result));
     });
 
     it('should merge fallback with projected values', () => {
       const connection = {
         email: 'original@example.com',
-        schoolName: 'Test School',
+        schoolNames: ['Test School'],
       };
       const fallback = {
         email: 'fallback@example.com',
@@ -882,7 +988,8 @@ describe('Settings Module - Unit Tests', () => {
     it('should export expected SETTINGS_FIELDS', () => {
       assert.ok(Array.isArray(SETTINGS_FIELDS));
       assert.ok(SETTINGS_FIELDS.includes('email'));
-      assert.ok(SETTINGS_FIELDS.includes('schoolName'));
+      assert.ok(SETTINGS_FIELDS.includes('schoolNames'));
+      assert.ok(!SETTINGS_FIELDS.includes('schoolName'));
       assert.ok(SETTINGS_FIELDS.includes('searchDomains'));
     });
 
@@ -932,10 +1039,9 @@ describe('Settings Module - Unit Tests', () => {
       assert.throws(() => validateSearchDomains([normalized]), SettingsValidationError);
     });
 
-    it('should handle schoolName with combining marks', () => {
+    it('should handle a school name with combining marks', () => {
       const decomposed = 'École'; // É as e + combining acute
-      const name = validateSchoolName(decomposed);
-      assert.equal(name, decomposed);
+      assert.deepEqual(validateSchoolNames([decomposed]), [decomposed]);
     });
   });
 });
