@@ -63,7 +63,7 @@ describe('DynamoDB Calendar E2E Tests', () => {
         // attribute name: an optional bullet, then "refreshToken" followed
         // directly by ":" or "(" (not by more identifier characters, which is
         // what excludes "refreshTokenEnc" and "refreshTokenKeyId").
-        const schemaSection = connectionsContent.substring(0, connectionsContent.indexOf('resource'));
+        const schemaSection = connectionsContent.substring(0, connectionsContent.indexOf('resource "'));
         const uncommented = schemaSection
           .split('\n')
           .map(line => line.replace(/^\s*#\s?/, '').replace(/^\s*\/\/\s?/, ''))
@@ -74,7 +74,7 @@ describe('DynamoDB Calendar E2E Tests', () => {
       });
 
       it('And the schema does document refreshTokenKeyId without tripping the plaintext-token check', () => {
-        const schemaSection = connectionsContent.substring(0, connectionsContent.indexOf('resource'));
+        const schemaSection = connectionsContent.substring(0, connectionsContent.indexOf('resource "'));
         assert.ok(schemaSection.includes('refreshTokenKeyId'),
           'refreshTokenKeyId should be documented in schema');
       });
@@ -97,7 +97,7 @@ describe('DynamoDB Calendar E2E Tests', () => {
           fs.writeFileSync(tmpFile, mutated, 'utf-8');
           const content = fs.readFileSync(tmpFile, 'utf-8');
 
-          const schemaSection = content.substring(0, content.indexOf('resource'));
+          const schemaSection = content.substring(0, content.indexOf('resource "'));
           const uncommented = schemaSection
             .split('\n')
             .map(line => line.replace(/^\s*#\s?/, '').replace(/^\s*\/\/\s?/, ''))

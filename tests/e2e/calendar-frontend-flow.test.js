@@ -98,7 +98,7 @@ function makeWorld(overrides = {}) {
     me: {
       connectionStatus: 'connected',
       email: 'parent@example.test',
-      schoolName: 'Ashfield Public School',
+      schoolNames: ['Ashfield Public School'],
       lastScanStatus: 'ok',
     },
     events: [],
@@ -107,7 +107,7 @@ function makeWorld(overrides = {}) {
     settings: {
       connectionStatus: 'connected',
       email: 'parent@example.test',
-      schoolName: 'Ashfield Public School',
+      schoolNames: ['Ashfield Public School'],
       searchDomains: ['ashfield-p.schools.nsw.edu.au'],
       scheduleEnabled: false,
       scheduleFrequency: 'daily',
@@ -544,9 +544,9 @@ describe('Feature: Calendar web interface - connection state', () => {
   });
 
   describe('Scenario: A connected user without a school is prompted to set one', () => {
-    it('Given an authenticated user with no schoolName, When the page is opened, Then a school setup prompt is shown', async () => {
+    it('Given an authenticated user with no school name, When the page is opened, Then a school setup prompt is shown', async () => {
       const world = makeWorld();
-      world.me = { connectionStatus: 'connected', email: 'parent@example.test', schoolName: '' };
+      world.me = { connectionStatus: 'connected', email: 'parent@example.test', schoolNames: [] };
       const { doc, controller } = openCalendar(world);
 
       await controller.start();
@@ -575,17 +575,17 @@ describe('Feature: Calendar web interface - connection state', () => {
     });
   });
 
-  describe('Scenario: A stored hostile schoolName renders as literal text', () => {
-    it('Given a schoolName of "<img src=x onerror=alert(1)>", Then it appears as text and creates no element', async () => {
+  describe('Scenario: A stored hostile school name renders as literal text', () => {
+    it('Given a school name of "<img src=x onerror=alert(1)>", Then it appears as text and creates no element', async () => {
       const world = makeWorld();
-      world.me = { ...world.me, schoolName: XSS };
+      world.me = { ...world.me, schoolNames: [XSS] };
       const { doc, controller } = openCalendar(world);
 
       await controller.start();
 
       assert.equal(doc.getElementById('school-name').textContent, `Watching mail for ${XSS}`);
       assert.equal(doc.getElementById('identity-school-name').textContent, `Watching mail for ${XSS}`);
-      assert.deepEqual(findElements(doc, 'img'), [], 'an IMG element was created from schoolName');
+      assert.deepEqual(findElements(doc, 'img'), [], 'an IMG element was created from a school name');
     });
   });
 });
@@ -1311,7 +1311,7 @@ describe('Feature: Empty months, credentials and session expiry', () => {
       const world = makeWorld();
       const { doc, page } = openSettings(world);
       await page.start();
-      doc.getElementById('school-name-input').value = 'Ashfield Public School';
+      doc.getElementById('school-names-input').value = 'Ashfield Public School';
       doc.getElementById('search-domains-input').value = 'ashfield-p.schools.nsw.edu.au';
       await page.save();
 
@@ -1413,7 +1413,7 @@ describe('Feature: The settings page', () => {
       await page.start();
 
       assert.equal(doc.getElementById('settings-body').hidden, false);
-      assert.equal(doc.getElementById('school-name-input').value, 'Ashfield Public School');
+      assert.equal(doc.getElementById('school-names-input').value, 'Ashfield Public School');
       assert.equal(doc.getElementById('search-domains-input').value, 'ashfield-p.schools.nsw.edu.au');
       assert.equal(doc.getElementById('timezone-input').value, 'Australia/Sydney');
       assert.equal(doc.getElementById('schedule-hour-input').value, '7');
@@ -1438,7 +1438,7 @@ describe('Feature: The settings page', () => {
       const { doc, page } = openSettings(world);
       await page.start();
 
-      doc.getElementById('school-name-input').value = '  Ashfield Public School  ';
+      doc.getElementById('school-names-input').value = '  Ashfield Public School  ';
       doc.getElementById('search-domains-input').value = 'ashfield-p.schools.nsw.edu.au\nAshfield-P.SCHOOLS.nsw.edu.au';
       await doc.getElementById('settings-form').dispatch('submit');
       await drain();
@@ -1446,7 +1446,7 @@ describe('Feature: The settings page', () => {
       const put = world.calls.find((call) => call.method === 'PUT' && call.path === '/calendar/api/settings');
       assert.notEqual(put, undefined, 'no settings PUT was sent');
       assert.deepEqual(JSON.parse(put.init.body), {
-        schoolName: 'Ashfield Public School',
+        schoolNames: ['Ashfield Public School'],
         searchDomains: ['ashfield-p.schools.nsw.edu.au'],
         scheduleEnabled: false,
         scheduleFrequency: 'daily',
@@ -1479,7 +1479,7 @@ describe('Feature: The settings page', () => {
       const { doc, page } = openSettings(world);
       await page.start();
 
-      doc.getElementById('school-name-input').value = 'Ashfield Public School';
+      doc.getElementById('school-names-input').value = 'Ashfield Public School';
       doc.getElementById('search-domains-input').value = 'gmail.com';
       await doc.getElementById('settings-form').dispatch('submit');
       await drain();
@@ -1488,7 +1488,7 @@ describe('Feature: The settings page', () => {
       assert.equal(fieldError.hidden, false, 'the field error stayed hidden');
       assert.equal(textOf(fieldError), 'gmail.com is a public mail provider, so it cannot be a school domain');
       assert.match(textOf(doc.getElementById('settings-status')), /Nothing was saved/);
-      assert.equal(doc.getElementById('error-schoolName').hidden, true, 'the error landed on the wrong field too');
+      assert.equal(doc.getElementById('error-schoolNames').hidden, true, 'the error landed on the wrong field too');
       assert.equal(
         world.calls.some((call) => call.path === '/calendar/api/scan/schedule'),
         false,
@@ -1541,17 +1541,17 @@ describe('Feature: The settings page', () => {
     });
   });
 
-  describe('Scenario: A hostile schoolName renders as literal text on the settings page', () => {
-    it('Given a stored schoolName of "<img src=x onerror=alert(1)>", Then it is text in the summary and in the input', async () => {
+  describe('Scenario: A hostile school name renders as literal text on the settings page', () => {
+    it('Given a stored school name of "<img src=x onerror=alert(1)>", Then it is text in the summary and in the input', async () => {
       const world = makeWorld();
-      world.settings = { ...world.settings, schoolName: XSS };
+      world.settings = { ...world.settings, schoolNames: [XSS] };
       const { doc, page } = openSettings(world);
 
       await page.start();
 
       assert.equal(doc.getElementById('settings-school-name').textContent, XSS);
-      assert.equal(doc.getElementById('school-name-input').value, XSS);
-      assert.deepEqual(findElements(doc, 'img'), [], 'an IMG element was created from schoolName');
+      assert.equal(doc.getElementById('school-names-input').value, XSS);
+      assert.deepEqual(findElements(doc, 'img'), [], 'an IMG element was created from a school name');
       const scripts = findElements(doc, 'script');
       assert.equal(scripts.length, 1);
       assert.equal(scripts[0].getAttribute('src'), '/calendar/settings.js');

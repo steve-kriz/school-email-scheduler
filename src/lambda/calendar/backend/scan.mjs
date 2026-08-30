@@ -105,7 +105,7 @@ import {
   releaseScanLock,
 } from "./connections.mjs";
 import { fetchCandidateMessages, toDomainList, readGmailConfig, DEFAULT_SINCE_DAYS } from "./gmail.mjs";
-import { extractFromMessage } from "./anthropic.mjs";
+import { extractFromMessage, toSchoolNameList } from "./anthropic.mjs";
 import { storeEvents } from "./events.mjs";
 import { ReauthRequiredError, REAUTH_SCAN_STATUS } from "./google-token.mjs";
 import { ALARM_TOKENS, emitAlarm } from "./alarms.mjs";
@@ -405,7 +405,16 @@ export async function runScan({ userId, mode = "manual", maxMessages = null } = 
       }
       try {
         const result = await extractOne(
-          { message, schoolName: connection?.schoolName || "", searchDomains: domains },
+          {
+            message,
+            // The row here came from `getConnection`, not `toPublicJson`, so this
+            // is the RAW stored value: a JS `Set` for a migrated row, or the
+            // legacy `schoolName` scalar for one that has not been saved since
+            // TASK-053. `toSchoolNameList` normalises both; an array must not be
+            // assumed.
+            schoolNames: toSchoolNameList(connection?.schoolNames ?? connection?.schoolName),
+            searchDomains: domains,
+          },
           commonDeps
         );
         for (const event of result.events) extractions.push({ message, event });

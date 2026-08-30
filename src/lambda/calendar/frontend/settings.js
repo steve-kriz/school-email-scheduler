@@ -1,7 +1,7 @@
 /**
  * School calendar - settings page.
  *
- * The school name, the sender domains that count as school mail, the
+ * The school names, the sender domains that count as school mail, the
  * recurring-scan controls (TASK-010), and the Disconnect Gmail control
  * (TASK-013). Shares its API client, its connection cards and its text helpers
  * with app.js (same origin, plain ES module import, no bundler).
@@ -13,20 +13,21 @@
  *
  * THREE THINGS WORTH KNOWING BEFORE CHANGING THIS FILE.
  *
- * 1. `schoolName` IS RENDERED AS TEXT, always. It is stored raw - the storage
- *    layer in backend/settings.mjs names escaping-on-render as its mitigation -
- *    so a stored `<img src=x onerror=alert(1)>` has to come back out as those
- *    literal characters. It reaches the page in exactly two places: an input's
- *    `value` (character data by definition) and a `textContent` assignment. No
- *    markup is ever assembled from it, here or anywhere else.
+ * 1. EVERY SCHOOL NAME IS RENDERED AS TEXT, always. They are stored raw - the
+ *    storage layer in backend/settings.mjs names escaping-on-render as its
+ *    mitigation - so a stored `<img src=x onerror=alert(1)>` has to come back out
+ *    as those literal characters. A name reaches the page in exactly two places:
+ *    a textarea's `value` (character data by definition) and a `textContent`
+ *    assignment. No markup is ever assembled from one, here or anywhere else.
  *
  * 2. VALIDATION IS THE SERVER'S JOB AND THIS PAGE DOES NOT SECOND-GUESS IT.
  *    The form sends what the user typed and renders whatever `400 { error,
  *    field }` comes back next to the field that was named. Re-implementing the
  *    rules here would give two sources of truth that drift, and would let a page
  *    that is out of date silently refuse a value the server would have accepted.
- *    The one thing done locally is splitting the domains textarea into a list,
- *    which is a shape change, not a rule.
+ *    The one thing done locally is splitting each textarea into a list, which is
+ *    a shape change, not a rule - and the two textareas split DIFFERENTLY: see
+ *    `parseSchoolNameList`.
  *
  * 3. NO MARKUP ASSIGNMENT, ANYWHERE. Every string that reaches the DOM in this
  *    file goes through `textContent` or an input's `value`, including the
@@ -41,6 +42,7 @@ import {
   createApiClient,
   el,
   renderConnectionCards,
+  schoolNameList,
   textOr,
 } from "./app.js";
 
@@ -66,9 +68,14 @@ export const DEFAULT_SCHEDULE_HOUR = 7;
  * Both naming conventions are covered because the two endpoints use different
  * ones: `PUT /calendar/api/settings` names `scheduleFrequency`/`scheduleHour`,
  * while `PUT /calendar/api/scan/schedule` names `frequency`/`hour`/`dayOfWeek`.
+ *
+ * The superseded `schoolName` (TASK-053) is deliberately NOT kept as an alias for
+ * `schoolNames`: there is no element with that id any more, so aliasing it would
+ * point an error at nothing. Failing closed sends it to the form-level line,
+ * where the user at least sees why the save was refused.
  */
 export const FIELD_ERROR_IDS = Object.freeze({
-  schoolName: "error-schoolName",
+  schoolNames: "error-schoolNames",
   searchDomains: "error-searchDomains",
   scheduleEnabled: "error-scheduleEnabled",
   scheduleFrequency: "error-scheduleFrequency",
@@ -123,20 +130,58 @@ export function formatDomainList(domains) {
 }
 
 /**
+ * Split the school-names textarea into a list.
+ *
+ * NEWLINES ONLY, which is the whole reason this is not `parseDomainList`. That
+ * one splits on `/[\s,;]+/`, which is right for domains and destroys a school
+ * name: "St Mary's Primary, Manly" would arrive at the server as five separate
+ * schools, none of which the user typed. A name may contain spaces, commas and
+ * semicolons, so the only separator that cannot appear inside one is the line
+ * break - hence one name per line, as the field hint says.
+ *
+ * Case is preserved, unlike a domain: this is display text the user chose, and it
+ * is what the extraction prompt shows the model. De-duplication is therefore
+ * exact rather than case-insensitive.
+ *
+ * @param {unknown} text
+ * @returns {string[]}
+ */
+export function parseSchoolNameList(text) {
+  const seen = new Set();
+  const names = [];
+  for (const line of String(text ?? "").split(/\r?\n/)) {
+    const entry = line.trim();
+    if (entry === "" || seen.has(entry)) continue;
+    seen.add(entry);
+    names.push(entry);
+  }
+  return names;
+}
+
+/** Render a stored school-name list back into the textarea, one per line. */
+export function formatSchoolNameList(names) {
+  return (Array.isArray(names) ? names : []).map((entry) => String(entry)).join("\n");
+}
+
+/**
  * Build the `PUT /calendar/api/settings` body from the form's raw values.
  *
- * `schoolName` and `searchDomains` are always sent - the server requires both,
+ * `schoolNames` and `searchDomains` are always sent - the server requires both,
  * and an omitted value there would be reported as "required" rather than as the
- * blank the user actually left. The schedule fields are only sent when they
- * carry something: `scheduleHour` of `""` would be read as an unusable number
- * and rejected, when what the user meant was "I did not set one".
+ * blank the user actually left. An EMPTY list is still sent for the same reason:
+ * dropping the key would read to the server as "leave what is stored alone", so
+ * clearing the box would silently do nothing.
+ *
+ * The schedule fields are only sent when they carry something: `scheduleHour` of
+ * `""` would be read as an unusable number and rejected, when what the user meant
+ * was "I did not set one".
  *
  * @param {object} values
  * @returns {object}
  */
 export function buildSettingsPayload(values = {}) {
   const payload = {
-    schoolName: typeof values.schoolName === "string" ? values.schoolName.trim() : "",
+    schoolNames: parseSchoolNameList(values.schoolNamesText),
     searchDomains: parseDomainList(values.domainsText),
     scheduleEnabled: values.scheduleEnabled === true,
   };
@@ -246,14 +291,15 @@ export function createSettingsPage(options = {}) {
     const node = byId("settings-summary");
     if (!node) return;
     clear(node);
-    const schoolName = typeof settings?.schoolName === "string" ? settings.schoolName.trim() : "";
-    if (schoolName === "") {
+    const schoolNames = schoolNameList(settings?.schoolNames);
+    if (schoolNames.length === 0) {
       node.appendChild(el(doc, "span", null, "No school saved yet. Add one below and we can start looking."));
       return;
     }
     node.appendChild(el(doc, "span", null, "Watching mail for "));
-    // TEXT. schoolName is stored raw; this is where that is made safe.
-    const name = el(doc, "strong", "settings-summary-name", schoolName);
+    // TEXT, and the JOINED string is one text node - the list is never assembled
+    // as markup. Each name is stored raw; this is where that is made safe.
+    const name = el(doc, "strong", "settings-summary-name", schoolNames.join(", "));
     name.setAttribute("id", "settings-school-name");
     node.appendChild(name);
   }
@@ -268,7 +314,7 @@ export function createSettingsPage(options = {}) {
       return Boolean(node && node.checked);
     };
     return {
-      schoolName: value("school-name-input"),
+      schoolNamesText: value("school-names-input"),
       domainsText: value("search-domains-input"),
       scheduleEnabled: checked("schedule-enabled-input"),
       scheduleFrequency: value("schedule-frequency-input"),
@@ -281,11 +327,11 @@ export function createSettingsPage(options = {}) {
   function fillForm(settings) {
     const set = (id, text) => {
       const node = byId(id);
-      // An input's `value` is character data - never parsed as markup - so a
-      // hostile schoolName lands in the box as the literal characters typed.
+      // A control's `value` is character data - never parsed as markup - so a
+      // hostile school name lands in the box as the literal characters typed.
       if (node) node.value = text;
     };
-    set("school-name-input", typeof settings?.schoolName === "string" ? settings.schoolName : "");
+    set("school-names-input", formatSchoolNameList(settings?.schoolNames));
     set("search-domains-input", formatDomainList(settings?.searchDomains));
     set("schedule-frequency-input", typeof settings?.scheduleFrequency === "string" ? settings.scheduleFrequency : "daily");
     set(

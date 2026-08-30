@@ -1,13 +1,13 @@
 /**
  * settings.mjs - what the user asked us to watch for, and how it is validated.
  *
- * One school display name plus one or more sender domains. These two values are
- * the whole input to the Gmail search query (TASK-006) and the extraction prompt
- * (TASK-007), which is why the validation here is not cosmetic: a domain list
- * that is wrong in the wrong direction decides how much of the user's mailbox is
- * read and how much of it is sent to a model.
+ * One or more school display names plus one or more sender domains. These two
+ * values are the whole input to the Gmail search query (TASK-006) and the
+ * extraction prompt (TASK-007), which is why the validation here is not cosmetic:
+ * a domain list that is wrong in the wrong direction decides how much of the
+ * user's mailbox is read and how much of it is sent to a model.
  *
- * STORAGE: `searchDomains` is a DynamoDB string set (see
+ * STORAGE: `schoolNames` and `searchDomains` are both DynamoDB string sets (see
  * terraform/dynamodb_calendar_connections.tf). The document client marshals a JS
  * `Set` to SS, so that is what the patch carries. DynamoDB rejects an EMPTY
  * string set outright, so "this user now has no domains" cannot be written as
@@ -16,7 +16,15 @@
  * handles that case explicitly; do not simplify it back into writing an empty
  * set, which fails the write with a ValidationException.
  *
- * NO SANITISATION, DELIBERATELY. `schoolName` and each domain are stored exactly
+ * LEGACY `schoolName` (TASK-053). The field used to be a single scalar string.
+ * A row written before that change still carries it, so `toPublicJson` reads a
+ * lone scalar back as a one-element list and `buildConnectionPatch` REMOVEs the
+ * scalar in the same UpdateItem that SETs `schoolNames` - a row migrates on its
+ * owner's next save and no row ever carries both. The PUT still ACCEPTS a legacy
+ * `schoolName` string on the way in (a browser tab loaded before the deploy), but
+ * nothing emits one on the way out.
+ *
+ * NO SANITISATION, DELIBERATELY. Each school name and each domain are stored exactly
  * as validated - raw, unescaped text. Stripping or escaping characters at the
  * storage layer corrupts legitimate values ("St Mary's Primary", "École") and
  * hides the corruption in the database, where it can never be undone. Escaping is
@@ -25,7 +33,7 @@
  *     markup in the page;
  *   - the prompt builder (TASK-007) wraps these values in a delimited block, so
  *     the text cannot become instructions to the model.
- * What IS enforced here is SHAPE: a length bound on the name, and a strict
+ * What IS enforced here is SHAPE: a length bound on each name, and a strict
  * hostname grammar on each domain, so neither field can carry an arbitrary
  * payload in the first place.
  *
@@ -57,7 +65,7 @@ export const SETTINGS_PATH = "/calendar/api/settings";
  */
 export const SETTINGS_FIELDS = [
   "email",
-  "schoolName",
+  "schoolNames",
   "searchDomains",
   "scheduleEnabled",
   "scheduleFrequency",
@@ -67,8 +75,16 @@ export const SETTINGS_FIELDS = [
   "lastScanStatus",
 ];
 
-/** Display name bound, counted in code points (see `countCodePoints`). */
+/** Display name bound, per name, counted in code points (see `countCodePoints`). */
 export const MAX_SCHOOL_NAME_LENGTH = 120;
+
+/**
+ * How many school names one user may list. Ten matches `MAX_SEARCH_DOMAINS`, and
+ * the bound is not cosmetic: every name is copied into the prompt for EVERY
+ * message of a scan, so the cap is what keeps the per-message token cost of this
+ * field bounded.
+ */
+export const MAX_SCHOOL_NAMES = 10;
 
 /**
  * How many domains one user may watch. Ten is generous for a real school (the
@@ -487,32 +503,70 @@ export function isValidDomain(value) {
 }
 
 /**
- * Validate the school display name.
+ * Validate and normalise the school display names.
  *
- * Trimmed, then bounded. Trimming is not sanitisation - it removes only leading
- * and trailing whitespace, which no user meant to type - and the value is stored
- * exactly as returned here, apostrophes and accents intact.
+ * Mirrors `validateSearchDomains` - count first, normalise each entry, then
+ * de-duplicate with input order preserved - with three deliberate differences,
+ * because these are display text rather than hostnames:
  *
- * @param {unknown} raw
- * @returns {string} The trimmed name.
+ *  - NO LOWER-CASING. A domain is lower-cased because DNS is case-insensitive
+ *    and the label grammar below is lowercase-only; capitalisation in "St Mary's
+ *    Primary" is the user's own and is what the model is shown.
+ *  - DE-DUPLICATION IS EXACT, on the trimmed string, for the same reason: "St
+ *    Marys" and "ST MARYS" are two spellings the user may have meant to give,
+ *    and folding them is a decision this layer has no basis to make.
+ *  - A BARE STRING IS ONE NAME, never comma-split. A school name may legitimately
+ *    contain a comma ("St Mary's Primary, Manly"), and splitting it would store
+ *    two names neither of which the user typed. The single-string form is the
+ *    LEGACY request shape (a `schoolName` scalar from a browser tab loaded before
+ *    TASK-053 deployed) and is accepted so an in-flight save is not answered with
+ *    a 400 that reads to the user like data loss.
+ *
+ * Trimming is not sanitisation - it removes only leading and trailing
+ * whitespace, which no user meant to type - and each value is stored exactly as
+ * returned here, apostrophes, ampersands, hyphens and accents intact.
+ *
+ * @param {unknown} raw An array of names, or a single name.
+ * @returns {string[]} Trimmed, de-duplicated, order preserved.
  * @throws {SettingsValidationError}
  */
-export function validateSchoolName(raw) {
-  if (typeof raw !== "string") {
-    throw new SettingsValidationError("schoolName", "School name is required");
+export function validateSchoolNames(raw) {
+  const entries = typeof raw === "string" ? [raw] : raw;
+
+  if (!Array.isArray(entries) || entries.length === 0) {
+    throw new SettingsValidationError("schoolNames", "At least one school name is required");
   }
-  const trimmed = raw.trim();
-  if (trimmed.length === 0) {
-    // Covers both "missing" and "spaces only": to the user they are one mistake.
-    throw new SettingsValidationError("schoolName", "School name is required");
+  // Counted on what was SUBMITTED, before de-duplication, so eleven entries with
+  // a duplicate among them is reported as "too many" rather than silently
+  // collapsing to a number that happens to fit.
+  if (entries.length > MAX_SCHOOL_NAMES) {
+    throw new SettingsValidationError("schoolNames", `Enter at most ${MAX_SCHOOL_NAMES} school names`);
   }
-  if (countCodePoints(trimmed) > MAX_SCHOOL_NAME_LENGTH) {
-    throw new SettingsValidationError(
-      "schoolName",
-      `School name must be ${MAX_SCHOOL_NAME_LENGTH} characters or fewer`
-    );
+
+  const seen = new Set();
+  const names = [];
+
+  for (const entry of entries) {
+    if (typeof entry !== "string") {
+      throw new SettingsValidationError("schoolNames", "Each school name must be text");
+    }
+    const trimmed = entry.trim();
+    if (trimmed.length === 0) {
+      // Covers both "missing" and "spaces only": to the user they are one mistake.
+      throw new SettingsValidationError("schoolNames", "School name is required");
+    }
+    if (countCodePoints(trimmed) > MAX_SCHOOL_NAME_LENGTH) {
+      throw new SettingsValidationError(
+        "schoolNames",
+        `"${echo(trimmed)}" is longer than ${MAX_SCHOOL_NAME_LENGTH} characters`
+      );
+    }
+    if (seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    names.push(trimmed);
   }
-  return trimmed;
+
+  return names;
 }
 
 /**
@@ -658,8 +712,14 @@ export function validateSettingsPayload(payload) {
 /**
  * Validate a whole settings payload, or throw a 400-shaped error.
  *
+ * BOTH REQUEST SHAPES ARE ACCEPTED for the school (TASK-053): `schoolNames` wins
+ * when it is present, and a legacy `schoolName` scalar is read as a one-element
+ * list when it is not, so a browser tab loaded before the deploy still saves. The
+ * RESULT is always `schoolNames`, so everything downstream of here - the patch,
+ * the response, the log line - has one shape to handle.
+ *
  * @param {unknown} payload
- * @returns {{ schoolName: string, searchDomains: string[] } & Record<string, unknown>}
+ * @returns {{ schoolNames: string[], searchDomains: string[] } & Record<string, unknown>}
  * @throws {SettingsValidationError}
  */
 export function requireValidSettings(payload) {
@@ -668,7 +728,7 @@ export function requireValidSettings(payload) {
   }
 
   return {
-    schoolName: validateSchoolName(payload.schoolName),
+    schoolNames: validateSchoolNames(payload.schoolNames !== undefined ? payload.schoolNames : payload.schoolName),
     searchDomains: validateSearchDomains(payload.searchDomains),
     ...validateSchedule(payload),
   };
@@ -711,13 +771,20 @@ export function parseJsonBody(event) {
 /**
  * Turn validated settings into a DynamoDB patch.
  *
- * `searchDomains` becomes a JS `Set`, which the document client marshals to a
- * string set (SS). An EMPTY list becomes `REMOVE_ATTRIBUTE` instead: DynamoDB
- * refuses to store an empty string set and fails the whole write with a
- * ValidationException, so the only way to represent "no domains" is to delete the
- * attribute. The PUT route never reaches this branch (it requires at least one
- * domain), but any other caller that clears the list must not blow up the write -
- * hence the explicit branch here rather than at the route.
+ * `schoolNames` and `searchDomains` each become a JS `Set`, which the document
+ * client marshals to a string set (SS). An EMPTY list becomes `REMOVE_ATTRIBUTE`
+ * instead: DynamoDB refuses to store an empty string set and fails the whole
+ * write with a ValidationException, so the only way to represent "no domains" is
+ * to delete the attribute. The PUT route never reaches those branches (it
+ * requires at least one of each), but any other caller that clears a list must
+ * not blow up the write - hence the explicit branches here rather than at the
+ * route.
+ *
+ * THE LEGACY SCALAR IS CLEARED IN THE SAME PATCH (TASK-053). Writing
+ * `schoolNames` always also REMOVEs `schoolName`, so a row can never carry both
+ * and `toPublicJson`'s read fallback stops applying to it the moment its owner
+ * saves. `buildUpdateParams` compiles the mixed SET + REMOVE into one
+ * UpdateExpression, so this costs no extra write and needs no migration job.
  *
  * @param {object} settings Output of `requireValidSettings`, or any subset of it.
  * @returns {Record<string, unknown>} Patch for `updateConnection`.
@@ -725,9 +792,11 @@ export function parseJsonBody(event) {
 export function buildConnectionPatch(settings = {}) {
   const patch = {};
 
-  if (settings.schoolName !== undefined) {
+  if (settings.schoolNames !== undefined) {
     // Stored raw. See the module docblock: escaping happens on render.
-    patch.schoolName = settings.schoolName;
+    const names = Array.isArray(settings.schoolNames) ? settings.schoolNames : [];
+    patch.schoolNames = names.length > 0 ? new Set(names) : REMOVE_ATTRIBUTE;
+    patch.schoolName = REMOVE_ATTRIBUTE;
   }
 
   if (settings.searchDomains !== undefined) {
@@ -751,9 +820,9 @@ export function buildConnectionPatch(settings = {}) {
  * The body therefore carries the SETTINGS_FIELDS plus `connected` /
  * `connectionStatus`, and no token material of any kind.
  *
- * `searchDomains` is reported as `[]` rather than null when unset, because every
- * consumer treats it as a list and a null would just move that check into the
- * frontend.
+ * `schoolNames` and `searchDomains` are reported as `[]` rather than null when
+ * unset, because every consumer treats them as lists and a null would just move
+ * that check into the frontend.
  *
  * @param {object|null} connection Row from `getConnection`/`updateConnection`.
  * @param {object} [fallback] Values to use when the row has none (the session's
@@ -765,6 +834,7 @@ export function toSettingsJson(connection, fallback = {}, options = {}) {
   const projection = toPublicJson(connection, fallback, options);
   return {
     ...projection,
+    schoolNames: Array.isArray(projection.schoolNames) ? projection.schoolNames : [],
     searchDomains: Array.isArray(projection.searchDomains) ? projection.searchDomains : [],
   };
 }

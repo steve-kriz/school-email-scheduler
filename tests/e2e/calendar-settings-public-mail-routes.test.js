@@ -77,7 +77,7 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
   /** PUT a single domain and return the parsed response. */
   async function putDomain(domain) {
     const response = await handler(
-      makeEvent({ schoolName: 'St Marys Primary', searchDomains: [domain] }, makeSessionCookie()),
+      makeEvent({ schoolNames: ['St Marys Primary'], searchDomains: [domain] }, makeSessionCookie()),
       {},
       { env: defaultEnv }
     );
@@ -148,7 +148,7 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
     const captured = [];
     const response = await handler(
       makeEvent(
-        { schoolName: 'St Marys Primary', searchDomains: ['mail.stmarys.edu.au'] },
+        { schoolNames: ['St Marys Primary'], searchDomains: ['mail.stmarys.edu.au'] },
         makeSessionCookie()
       ),
       {},
@@ -160,7 +160,7 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
             Attributes: {
               userId: `google:${testGoogleSub}`,
               email: testEmail,
-              schoolName: 'St Marys Primary',
+              schoolNames: ['St Marys Primary'],
               searchDomains: new Set(['mail.stmarys.edu.au']),
             },
           };
@@ -178,7 +178,7 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
     const captured = [];
     const response = await handler(
       makeEvent(
-        { schoolName: 'St Bedes College', searchDomains: ['stbedes.vic.edu.au'] },
+        { schoolNames: ['St Bedes College'], searchDomains: ['stbedes.vic.edu.au'] },
         makeSessionCookie()
       ),
       {},
@@ -190,7 +190,7 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
             Attributes: {
               userId: `google:${testGoogleSub}`,
               email: testEmail,
-              schoolName: 'St Bedes College',
+              schoolNames: ['St Bedes College'],
               searchDomains: new Set(['stbedes.vic.edu.au']),
             },
           };
@@ -208,7 +208,7 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
     const captured = [];
     const response = await handler(
       makeEvent(
-        { schoolName: 'Sunshine State School', searchDomains: ['example.qld.edu.au'] },
+        { schoolNames: ['Sunshine State School'], searchDomains: ['example.qld.edu.au'] },
         makeSessionCookie()
       ),
       {},
@@ -220,7 +220,7 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
             Attributes: {
               userId: `google:${testGoogleSub}`,
               email: testEmail,
-              schoolName: 'Sunshine State School',
+              schoolNames: ['Sunshine State School'],
               searchDomains: new Set(['example.qld.edu.au']),
             },
           };
@@ -270,7 +270,7 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
     const response = await handler(
       makeEvent(
         {
-          schoolName: 'School Districts',
+          schoolNames: ['School Districts'],
           searchDomains: ['livewire.edu.au', 'mailroom.vic.edu.au', 'live.qld.edu.au'],
         },
         makeSessionCookie()
@@ -284,7 +284,7 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
             Attributes: {
               userId: `google:${testGoogleSub}`,
               email: testEmail,
-              schoolName: 'School Districts',
+              schoolNames: ['School Districts'],
               searchDomains: new Set(['livewire.edu.au', 'mailroom.vic.edu.au', 'live.qld.edu.au']),
             },
           };

@@ -1135,13 +1135,13 @@ describe('Connections Functions', () => {
         userId: 'google#123',
         email: 'test@example.com',
         refreshTokenEnc: 'sensitive-ciphertext',
-        schoolName: 'Test School',
+        schoolNames: new Set(['Test School']),
       };
 
       const stripped = stripSecrets(item);
       assert.equal(stripped.userId, 'google#123');
       assert.equal(stripped.email, 'test@example.com');
-      assert.equal(stripped.schoolName, 'Test School');
+      assert.deepEqual([...stripped.schoolNames], ['Test School']);
       assert.ok(!('refreshTokenEnc' in stripped));
     });
 
@@ -1207,7 +1207,7 @@ describe('Connections Functions', () => {
       const connection = {
         userId: 'google#123',
         email: 'test@example.com',
-        schoolName: 'My School',
+        schoolNames: new Set(['My School']),
         hasRefreshToken: true,
         refreshTokenEnc: 'should-not-appear',
         secretField: 'should-not-appear',
@@ -1215,7 +1215,8 @@ describe('Connections Functions', () => {
 
       const json = toPublicJson(connection);
       assert.equal(json.email, 'test@example.com');
-      assert.equal(json.schoolName, 'My School');
+      assert.deepEqual(json.schoolNames, ['My School']);
+      assert.ok(!('schoolName' in json));
       assert.equal(json.connected, true);
       assert.equal(json.connectionStatus, 'connected');
       assert.ok(!('userId' in json));
@@ -1248,24 +1249,24 @@ describe('Connections Functions', () => {
     });
 
     it('should use fallback values when connection is null', () => {
-      const json = toPublicJson(null, { email: 'fallback@example.com', schoolName: 'Fallback School' });
+      const json = toPublicJson(null, { email: 'fallback@example.com', schoolNames: ['Fallback School'] });
       assert.equal(json.email, 'fallback@example.com');
-      assert.equal(json.schoolName, 'Fallback School');
+      assert.deepEqual(json.schoolNames, ['Fallback School']);
     });
 
     it('should prefer connection values over fallback', () => {
       const json = toPublicJson(
-        { email: 'primary@example.com', schoolName: 'Primary' },
-        { email: 'fallback@example.com', schoolName: 'Fallback' }
+        { email: 'primary@example.com', schoolNames: new Set(['Primary']) },
+        { email: 'fallback@example.com', schoolNames: ['Fallback'] }
       );
       assert.equal(json.email, 'primary@example.com');
-      assert.equal(json.schoolName, 'Primary');
+      assert.deepEqual(json.schoolNames, ['Primary']);
     });
 
     it('should normalize null/empty to null', () => {
-      const json = toPublicJson({ email: '', schoolName: null });
+      const json = toPublicJson({ email: '', schoolNames: null });
       assert.equal(json.email, null);
-      assert.equal(json.schoolName, null);
+      assert.equal(json.schoolNames, null);
     });
 
     it('should never include refreshTokenEnc in output', () => {
@@ -1285,7 +1286,9 @@ describe('Connections Functions', () => {
     it('should define public attributes', () => {
       assert.ok(Array.isArray(PUBLIC_ATTRIBUTES));
       assert.ok(PUBLIC_ATTRIBUTES.includes('email'));
-      assert.ok(PUBLIC_ATTRIBUTES.includes('schoolName'));
+      assert.ok(PUBLIC_ATTRIBUTES.includes('schoolNames'));
+      // TASK-053: the legacy scalar is projected UNDER the new name, never its own.
+      assert.ok(!PUBLIC_ATTRIBUTES.includes('schoolName'));
     });
 
     it('should define secret attributes', () => {

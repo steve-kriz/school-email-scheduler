@@ -57,7 +57,7 @@ function render() {
     const requestPath = String(url).split('?')[0];
     const body =
       requestPath === '/calendar/api/auth/me'
-        ? { connectionStatus: 'connected', email: 'parent@example.test', schoolName: 'Ashfield Public School' }
+        ? { connectionStatus: 'connected', email: 'parent@example.test', schoolNames: ['Ashfield Public School'] }
         : requestPath === '/calendar/api/events'
           ? { events: structuredClone(EVENTS), truncated: false }
           : { events: [] };

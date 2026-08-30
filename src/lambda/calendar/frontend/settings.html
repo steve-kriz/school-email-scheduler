@@ -24,9 +24,13 @@
           <h2>Your school</h2>
 
           <div class="field">
-            <label class="field-label" for="school-name-input">School name</label>
-            <input id="school-name-input" class="field-input" type="text" autocomplete="off" />
-            <p id="error-schoolName" class="field-error" role="alert" hidden></p>
+            <label class="field-label" for="school-names-input">School names</label>
+            <textarea id="school-names-input" class="field-input" rows="3"></textarea>
+            <p class="field-hint">
+              One school name per line. Add every school whose mail you want us to
+              read, and any other name it uses.
+            </p>
+            <p id="error-schoolNames" class="field-error" role="alert" hidden></p>
           </div>
 
           <div class="field">

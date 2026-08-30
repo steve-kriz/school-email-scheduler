@@ -777,7 +777,7 @@ describe('TASK-010 unit: connectionView', () => {
   });
 
   it('asks for a school when one is not stored', () => {
-    const view = app.connectionView({ connectionStatus: 'connected', schoolName: '   ' });
+    const view = app.connectionView({ connectionStatus: 'connected', schoolNames: ['   '] });
     assert.equal(view.signedIn, true);
     assert.equal(view.needsSchool, true);
     assert.equal(view.needsConnect, false);
@@ -786,7 +786,7 @@ describe('TASK-010 unit: connectionView', () => {
   it('asks to reconnect when the last scan reported reauth_required', () => {
     const view = app.connectionView({
       connectionStatus: 'connected',
-      schoolName: 'Ashfield Public School',
+      schoolNames: ['Ashfield Public School'],
       lastScanStatus: 'reauth_required',
     });
     assert.equal(view.needsReauth, true);
@@ -794,14 +794,14 @@ describe('TASK-010 unit: connectionView', () => {
   });
 
   it('does not read "unknown" as "not connected"', () => {
-    assert.equal(app.connectionView({ connectionStatus: 'unknown', schoolName: 'X' }).needsConnect, false);
-    assert.equal(app.connectionView({ connectionStatus: 'not_connected', schoolName: 'X' }).needsConnect, true);
+    assert.equal(app.connectionView({ connectionStatus: 'unknown', schoolNames: ['X'] }).needsConnect, false);
+    assert.equal(app.connectionView({ connectionStatus: 'not_connected', schoolNames: ['X'] }).needsConnect, true);
   });
 
   it('keeps the three flags independent, so no message is swallowed by another', () => {
     const view = app.connectionView({
       connectionStatus: 'not_connected',
-      schoolName: '',
+      schoolNames: [],
       lastScanStatus: 'reauth_required',
     });
     assert.deepEqual(view, { signedIn: true, needsConnect: true, needsSchool: true, needsReauth: true });
@@ -1010,7 +1010,7 @@ describe('TASK-010 unit: renderConnectionCards', () => {
 
   it('prompts for a school and links to settings', () => {
     const { doc, container } = host();
-    app.renderConnectionCards(doc, container, { connectionStatus: 'connected', email: 'p@example.test', schoolName: '' });
+    app.renderConnectionCards(doc, container, { connectionStatus: 'connected', email: 'p@example.test', schoolNames: [] });
     const prompt = doc.getElementById('school-setup');
     assert.notEqual(prompt, null);
     assert.match(textOf(prompt), /Tell us your school/);
@@ -1021,7 +1021,7 @@ describe('TASK-010 unit: renderConnectionCards', () => {
     const { doc, container } = host();
     app.renderConnectionCards(doc, container, {
       connectionStatus: 'connected',
-      schoolName: 'Ashfield Public School',
+      schoolNames: ['Ashfield Public School'],
       lastScanStatus: 'reauth_required',
     });
     const banner = doc.getElementById('reauth-banner');
@@ -1031,13 +1031,13 @@ describe('TASK-010 unit: renderConnectionCards', () => {
     assert.equal(doc.getElementById('reconnect-gmail').getAttribute('href'), '/calendar/api/auth/google/start');
   });
 
-  it('renders a hostile schoolName as literal text and creates no element from it', () => {
+  it('renders a hostile school name as literal text and creates no element from it', () => {
     const payload = '<img src=x onerror=alert(1)>';
     const { doc, container } = host();
     app.renderConnectionCards(doc, container, {
       connectionStatus: 'connected',
       email: 'parent@example.test',
-      schoolName: payload,
+      schoolNames: [payload],
     });
     const name = doc.getElementById('identity-school-name');
     assert.notEqual(name, null);
@@ -1050,7 +1050,7 @@ describe('TASK-010 unit: renderConnectionCards', () => {
     const { doc, container } = host();
     app.renderConnectionCards(doc, container, null);
     assert.notEqual(doc.getElementById('connect-card'), null);
-    app.renderConnectionCards(doc, container, { connectionStatus: 'connected', schoolName: 'Ashfield' });
+    app.renderConnectionCards(doc, container, { connectionStatus: 'connected', schoolNames: ['Ashfield'] });
     assert.equal(doc.getElementById('connect-card'), null, 'the connect card outlived the sign-in');
   });
 
@@ -1101,9 +1101,9 @@ describe('TASK-010 unit: settings.js helpers', () => {
     ]);
   });
 
-  it('always sends schoolName and searchDomains, and omits the schedule fields left blank', () => {
+  it('always sends schoolNames and searchDomains, and omits the schedule fields left blank', () => {
     const payload = settings.buildSettingsPayload({
-      schoolName: '  Ashfield Public School  ',
+      schoolNamesText: '  Ashfield Public School  ',
       domainsText: 'ashfield.nsw.edu.au',
       scheduleEnabled: false,
       scheduleFrequency: '',
@@ -1111,7 +1111,7 @@ describe('TASK-010 unit: settings.js helpers', () => {
       timezone: '',
     });
     assert.deepEqual(payload, {
-      schoolName: 'Ashfield Public School',
+      schoolNames: ['Ashfield Public School'],
       searchDomains: ['ashfield.nsw.edu.au'],
       scheduleEnabled: false,
     });
@@ -1119,7 +1119,7 @@ describe('TASK-010 unit: settings.js helpers', () => {
     assert.equal('timezone' in payload, false);
 
     const full = settings.buildSettingsPayload({
-      schoolName: 'X',
+      schoolNamesText: 'X',
       domainsText: 'x.edu.au',
       scheduleEnabled: true,
       scheduleFrequency: 'weekly',
