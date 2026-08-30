@@ -75,7 +75,9 @@ resource "aws_iam_policy" "calendar_scheduler_manage" {
       {
         # Manage only THIS deployment's per-user scan schedules - the
         # "default" group, names starting with SCAN_SCHEDULE_PREFIX - not
-        # account-wide schedule management.
+        # account-wide schedule management. The account id comes from
+        # data.aws_caller_identity.current since TASK-051 removed
+        # var.account_id; same value, same source as local.calendar_function_arn.
         Sid    = "ManageScanSchedules"
         Effect = "Allow"
         Action = [
@@ -85,7 +87,7 @@ resource "aws_iam_policy" "calendar_scheduler_manage" {
           "scheduler:DeleteSchedule",
           "scheduler:ListSchedules"
         ]
-        Resource = "arn:aws:scheduler:${var.region}:${var.account_id}:schedule/default/${local.name_prefix}-calendar-scan-*"
+        Resource = "arn:aws:scheduler:${var.region}:${data.aws_caller_identity.current.account_id}:schedule/default/${local.name_prefix}-calendar-scan-*"
       },
       {
         # CreateSchedule/UpdateSchedule attach calendar_scheduler_role to the

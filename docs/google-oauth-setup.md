@@ -88,9 +88,9 @@ placeholder. Real values live only in AWS Secrets Manager.
 | App name | `School Email Scheduler` |
 | User support email | A monitored mailbox, not a personal address — it is shown to every user on the consent screen |
 | App logo | Optional, but required for a polished verified consent screen. Uploading a logo triggers a separate brand review. |
-| Application home page | `<prod au function URL>calendar` — see Section 3; the origin is the `calendar_function_url` Terraform output, not a receptionhq.com host |
-| Application privacy policy | `<prod au function URL>calendar/privacy` |
-| Application terms of service | `<prod au function URL>calendar/terms` |
+| Application home page | `<function URL>calendar` — see Section 3; the origin is the `calendar_function_url` Terraform output of the deployed environment (since TASK-051 that is `dev`/`au`, the only one this repo deploys), not a receptionhq.com host |
+| Application privacy policy | `<function URL>calendar/privacy` |
+| Application terms of service | `<function URL>calendar/terms` |
 | Authorised domain | `receptionhq.com` |
 | Publisher domain | `receptionhq.com` — must be verified in Google Search Console by the same account, or verification cannot start |
 | Developer contact email | A monitored mailbox; Google sends verification and CASA correspondence here |
@@ -195,16 +195,20 @@ and the URI to register is that value plus `calendar/api/auth/google/callback`
 (the output already ends with `/`), i.e.
 `https://<url-id>.lambda-url.<region>.on.aws/calendar/api/auth/google/callback`.
 
+> **Only `dev`/`au` is deployable from this repo.** TASK-051 cut the stack down
+> to a single environment: `terraform/config/dev/au.tfvars` is the only tfvars
+> file and `terraform_init_dev_au.sh` the only init script. The former `prod`
+> `au`/`uk`/`us` tenants have no config in the working tree — their account ids,
+> regions and basestack state keys survive only in git history, and each would
+> have to be hand-reconstructed before that tenant could be planned again.
+
 | Environment | Tenant | `region` | Redirect URI to register |
 | --- | --- | --- | --- |
 | `dev` | `au` | `ap-southeast-2` | `<terraform output calendar_function_url>calendar/api/auth/google/callback` |
-| `prod` | `au` | `ap-southeast-2` | `<terraform output calendar_function_url>calendar/api/auth/google/callback` |
-| `prod` | `uk` | per that tenant's tfvars | `<terraform output calendar_function_url>calendar/api/auth/google/callback` |
-| `prod` | `us` | per that tenant's tfvars | `<terraform output calendar_function_url>calendar/api/auth/google/callback` |
 | local | — | — | `http://localhost:3000/calendar/api/auth/google/callback` |
 
-Each row is a **different** function URL id, so all four are distinct strings —
-run the output command once per deployment and paste the result.
+Each deployment is a **different** function URL id, so every row is a distinct
+string — run the output command once per deployment and paste the result.
 
 Rules that bite in practice:
 
@@ -216,8 +220,8 @@ Rules that bite in practice:
   anything that forces its replacement) mints a new one — and sign-in stays
   broken until the Console is updated again. `PUBLIC_BASE_URL` needs no change,
   because it is derived per request.
-- **All five URIs go on the one client.** Adding a tenant later means editing
-  this client, not creating another — see Section 1.
+- **Every URI goes on the one client.** Adding an environment or tenant later
+  means editing this client, not creating another — see Section 1.
 - **`http` is permitted only for `localhost`.** Google rejects a plain-`http`
   redirect URI for any other host, and rejects `http://127.0.0.1` interchangeably
   with `localhost` only for the loopback address forms it whitelists — register
@@ -270,9 +274,10 @@ per environment/tenant pair, in that account and region:
 | Environment | Tenant | Secret id | Region |
 | --- | --- | --- | --- |
 | `dev` | `au` | `dev-au/app-config/school_calendar_services` | `ap-southeast-2` |
-| `prod` | `au` | `prod-au/app-config/school_calendar_services` | `ap-southeast-2` |
-| `prod` | `uk` | `prod-uk/app-config/school_calendar_services` | `eu-west-2` |
-| `prod` | `us` | `prod-us/app-config/school_calendar_services` | `us-west-1` |
+
+`dev`/`au` is the only row because it is the only environment this repo can
+deploy — see the note in Section 3. The secret id pattern still holds for any
+future pair: it is `local.secret_name`, `${environment}-${tenant}/app-config/school_calendar_services`.
 
 ### Who creates the secret
 
@@ -533,9 +538,11 @@ output is safe to paste into a ticket or CI log.
 npm run check:oauth-config -- --env dev --tenant au
 ```
 
-The region defaults to the tenant's region from the table in Section 4; override
-with `--region <aws-region>` if needed. AWS credentials come from the ambient
-profile, which needs `secretsmanager:GetSecretValue` on that secret.
+The region defaults to the tenant's region from the table in Section 4 —
+`dev`/`au` is the only pair with a known region since TASK-051, so any other
+pair needs `--region <aws-region>` supplied explicitly. AWS credentials come
+from the ambient profile, which needs `secretsmanager:GetSecretValue` on that
+secret.
 
 Checks performed, one printed line each:
 

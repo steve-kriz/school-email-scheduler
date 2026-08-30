@@ -50,11 +50,18 @@ describe('Google OAuth Configuration Preflight Unit Tests', () => {
       );
     });
 
-    it('should define tenant regions mapping', () => {
-      assert.ok(TENANT_REGIONS['dev-au'], 'Should map dev-au region');
-      assert.ok(TENANT_REGIONS['prod-au'], 'Should map prod-au region');
-      assert.ok(TENANT_REGIONS['prod-uk'], 'Should map prod-uk region');
-      assert.ok(TENANT_REGIONS['prod-us'], 'Should map prod-us region');
+    // TASK-051 reduced TENANT_REGIONS to the one pair that still has a tfvars
+    // file. The map is only a default for the AWS lookup, so dropping the prod
+    // entries does not break those pairs - it just means they need --region
+    // (or AWS_REGION) supplied explicitly, which regionFor()'s fallback covers.
+    it('should define tenant regions mapping with only the deployable dev-au pair', () => {
+      assert.equal(TENANT_REGIONS['dev-au'], 'ap-southeast-2', 'Should map dev-au region');
+      assert.deepEqual(Object.keys(TENANT_REGIONS), ['dev-au'],
+        `TENANT_REGIONS should list only dev-au after TASK-051, got: ${Object.keys(TENANT_REGIONS).join(', ')}`);
+      for (const removed of ['prod-au', 'prod-uk', 'prod-us']) {
+        assert.equal(TENANT_REGIONS[removed], undefined,
+          `${removed} should no longer be listed; its tfvars file was deleted by TASK-051`);
+      }
     });
 
     it('should define usage text', () => {
@@ -87,19 +94,18 @@ describe('Google OAuth Configuration Preflight Unit Tests', () => {
       assert.equal(region, 'ap-southeast-2');
     });
 
-    it('should return prod-au region', () => {
-      const region = regionFor('prod', 'au');
-      assert.equal(region, 'ap-southeast-2');
-    });
-
-    it('should return prod-uk region', () => {
-      const region = regionFor('prod', 'uk');
-      assert.equal(region, 'eu-west-2');
-    });
-
-    it('should return prod-us region', () => {
-      const region = regionFor('prod', 'us');
-      assert.equal(region, 'us-west-1');
+    // The prod pairs no longer have a mapped region - TASK-051 removed their
+    // tfvars, which was the map's source of truth. They now take the same
+    // fallback path as any unknown pair, so an operator must pass --region.
+    ['au', 'uk', 'us'].forEach(tenant => {
+      it(`should fall back rather than return a pinned region for prod-${tenant}`, () => {
+        const region = regionFor('prod', tenant);
+        const expected = process.env.AWS_REGION
+          || process.env.AWS_DEFAULT_REGION
+          || 'ap-southeast-2';
+        assert.equal(region, expected,
+          `prod-${tenant} should take the ambient/default fallback now that its TENANT_REGIONS entry is gone`);
+      });
     });
 
     it('should fall back to default region for unknown tenant', () => {
@@ -442,34 +448,23 @@ describe('Google OAuth Configuration Preflight Unit Tests', () => {
       assert.equal(secretId, 'dev-au/app-config/school_calendar_services');
     });
 
-    it('should handle prod-au environment correctly', () => {
-      const env = 'prod';
-      const tenant = 'au';
-      const region = regionFor(env, tenant);
-      const secretId = secretIdFor(env, tenant);
+    // The secret-id derivation is pure string building and is unchanged for
+    // any pair, deployable or not - that is deliberate, so a hand-recovered
+    // prod tenant still resolves to the same secret. Only the region default
+    // was removed with the tfvars, so these now assert the id but no longer a
+    // pinned region.
+    ['au', 'uk', 'us'].forEach(tenant => {
+      it(`should still derive the prod-${tenant} secret id, but with no pinned region`, () => {
+        const secretId = secretIdFor('prod', tenant);
+        assert.equal(secretId, `prod-${tenant}/app-config/school_calendar_services`);
 
-      assert.equal(region, 'ap-southeast-2');
-      assert.equal(secretId, 'prod-au/app-config/school_calendar_services');
-    });
-
-    it('should handle prod-uk environment correctly', () => {
-      const env = 'prod';
-      const tenant = 'uk';
-      const region = regionFor(env, tenant);
-      const secretId = secretIdFor(env, tenant);
-
-      assert.equal(region, 'eu-west-2');
-      assert.equal(secretId, 'prod-uk/app-config/school_calendar_services');
-    });
-
-    it('should handle prod-us environment correctly', () => {
-      const env = 'prod';
-      const tenant = 'us';
-      const region = regionFor(env, tenant);
-      const secretId = secretIdFor(env, tenant);
-
-      assert.equal(region, 'us-west-1');
-      assert.equal(secretId, 'prod-us/app-config/school_calendar_services');
+        const region = regionFor('prod', tenant);
+        const fallback = process.env.AWS_REGION
+          || process.env.AWS_DEFAULT_REGION
+          || 'ap-southeast-2';
+        assert.equal(region, fallback,
+          `prod-${tenant} should no longer have its own TENANT_REGIONS entry`);
+      });
     });
   });
 

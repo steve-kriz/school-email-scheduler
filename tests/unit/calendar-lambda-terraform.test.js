@@ -13,6 +13,18 @@ const PROJECT_ROOT = path.join(__dirname, '..', '..');
 const TERRAFORM_DIR = path.join(PROJECT_ROOT, 'terraform');
 const CONFIG_DIR = path.join(TERRAFORM_DIR, 'config');
 
+/**
+ * Drop `#` / `//` comment lines from HCL text.
+ *
+ * Needed because TASK-051 removed var.account_id but left comments that NAME
+ * it, explaining where the account id now comes from. An assertion that
+ * var.account_id is gone must look at code only - over the raw file it would
+ * match the explanatory prose and fail for the wrong reason.
+ */
+function stripHclComments(content) {
+  return content.split('\n').filter(line => !/^\s*(#|\/\/)/.test(line)).join('\n');
+}
+
 // --- IAM policy parsing helpers ---
 // The calendar policy is an inline `policy = jsonencode({ ... })` block in HCL,
 // not JSON on disk (its resources are unresolved Terraform references), so it
@@ -649,11 +661,42 @@ describe('Calendar Lambda Terraform Unit Tests', () => {
       });
 
       it('When calendar_function_arn local is set, Then it is built from known parts, not from aws_lambda_function', () => {
+        // TASK-051 removed var.account_id; the account id now comes from
+        // data.aws_caller_identity.current, the same source kms_calendar.tf
+        // already used for the key policy's account root. Everything else in
+        // the ARN shape is unchanged.
         const tfContent = fs.readFileSync(path.join(TERRAFORM_DIR, 'lambda_calendar.tf'), 'utf-8');
-        assert.ok(tfContent.includes('calendar_function_arn = "arn:aws:lambda:${var.region}:${var.account_id}:function:${local.name_prefix}-school-calendar"'),
-          'calendar_function_arn not built from locals');
+        assert.ok(tfContent.includes('calendar_function_arn = "arn:aws:lambda:${var.region}:${data.aws_caller_identity.current.account_id}:function:${local.name_prefix}-school-calendar"'),
+          'calendar_function_arn not built from locals + caller identity');
+        // Comments are stripped first: TASK-051 left an explanatory comment
+        // right above this local that NAMES var.account_id, so a raw
+        // includes() would match the prose and fail for the wrong reason.
+        assert.ok(!stripHclComments(tfContent).includes('var.account_id'),
+          'lambda_calendar.tf still references var.account_id, which no longer exists');
         assert.ok(!tfContent.match(/calendar_function_arn\s*=\s*aws_lambda_function\.calendar\.arn/),
           'calendar_function_arn should not reference aws_lambda_function (would create cycle)');
+      });
+
+      it('And neither constructed ARN hardcodes a 12-digit AWS account number', () => {
+        // The point of switching to the caller identity is that no account
+        // number is baked into the source. A literal would defeat that.
+        ['lambda_calendar.tf', 'scheduler_calendar.tf'].forEach(file => {
+          const code = stripHclComments(fs.readFileSync(path.join(TERRAFORM_DIR, file), 'utf-8'));
+          const arnLines = code.split('\n').filter(l => l.includes('arn:aws:'));
+          arnLines.forEach(line => {
+            assert.ok(!/:\d{12}:/.test(line),
+              `${file} hardcodes a 12-digit account id in an ARN: ${line.trim()}`);
+          });
+        });
+      });
+
+      it('And the scheduler ManageScanSchedules scope uses the caller identity too', () => {
+        const schedulerTf = fs.readFileSync(path.join(TERRAFORM_DIR, 'scheduler_calendar.tf'), 'utf-8');
+        assert.ok(schedulerTf.includes(
+          'Resource = "arn:aws:scheduler:${var.region}:${data.aws_caller_identity.current.account_id}:schedule/default/${local.name_prefix}-calendar-scan-*"'),
+        'the ManageScanSchedules resource scope is not built from data.aws_caller_identity.current');
+        assert.ok(!stripHclComments(schedulerTf).includes('var.account_id'),
+          'scheduler_calendar.tf still references var.account_id, which no longer exists');
       });
     });
 

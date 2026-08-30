@@ -19,6 +19,29 @@ const RUNBOOK_PATH = path.join(DOCS_DIR, 'google-oauth-setup.md');
 // deliberately false claim) run entirely in memory: nothing here ever writes to
 // docs/google-oauth-setup.md.
 
+/**
+ * Every environment/tenant pair the repo can actually deploy, discovered from
+ * terraform/config/<env>/<tenant>.tfvars on disk. TASK-051 cut this from four
+ * pairs to one (dev/au); deriving it rather than hardcoding a list keeps the
+ * "a tenant cannot be added without the runbook gaining a row" property while
+ * tracking the removal automatically.
+ */
+function discoverTfvarsDeployments() {
+  const found = [];
+  for (const envEntry of fs.readdirSync(TERRAFORM_CONFIG_DIR, { withFileTypes: true })) {
+    if (!envEntry.isDirectory()) continue;
+    for (const file of fs.readdirSync(path.join(TERRAFORM_CONFIG_DIR, envEntry.name))) {
+      if (!file.endsWith('.tfvars')) continue;
+      found.push({
+        env: envEntry.name,
+        tenant: file.replace(/\.tfvars$/, ''),
+        file: `${envEntry.name}/${file}`
+      });
+    }
+  }
+  return found.sort((a, b) => a.file.localeCompare(b.file));
+}
+
 /** The real runbook, read from disk. Only the wrappers below call this. */
 function runbookText() {
   return fs.readFileSync(RUNBOOK_PATH, 'utf-8');
@@ -582,13 +605,17 @@ describe('Google OAuth Configuration Preflight E2E Tests', () => {
         );
 
         // One table row per deployment that exists in the tfvars, so a new
-        // tenant cannot be added without the runbook gaining a row.
-        const tfvarsConfigs = [
-          { env: 'dev', tenant: 'au', file: 'dev/au.tfvars' },
-          { env: 'prod', tenant: 'au', file: 'prod/au.tfvars' },
-          { env: 'prod', tenant: 'uk', file: 'prod/uk.tfvars' },
-          { env: 'prod', tenant: 'us', file: 'prod/us.tfvars' }
-        ];
+        // tenant cannot be added without the runbook gaining a row. TASK-051
+        // reduced the tfvars to a single file, so the table is derived from
+        // whatever is actually on disk rather than from a hardcoded four-row
+        // list - that keeps the "a tenant cannot be added without a row"
+        // property while tracking the removal.
+        const tfvarsConfigs = discoverTfvarsDeployments();
+        assert.deepEqual(
+          tfvarsConfigs.map(c => c.file),
+          ['dev/au.tfvars'],
+          `expected dev/au.tfvars to be the only tfvars file after TASK-051, found: ${tfvarsConfigs.map(c => c.file).join(', ')}`
+        );
 
         for (const config of tfvarsConfigs) {
           const tfvarsPath = path.join(TERRAFORM_CONFIG_DIR, config.file);
@@ -612,21 +639,47 @@ describe('Google OAuth Configuration Preflight E2E Tests', () => {
       });
 
       it('FAILURE PATH: the runbook no longer advertises the removed calendar.<hosted_zone> ALB hostname', () => {
+        // hosted_zone can no longer be read out of the tfvars to build the
+        // stale URI - TASK-051 deleted the variable and every tfvars key that
+        // set it. The known historical zone values are pinned here instead, so
+        // the assertion still names a concrete string rather than degrading
+        // into "no tfvars, nothing to check".
         const runbookPath = path.join(DOCS_DIR, 'google-oauth-setup.md');
         const runbookContent = fs.readFileSync(runbookPath, 'utf-8');
 
-        const tfvarsConfigs = ['dev/au.tfvars', 'prod/au.tfvars', 'prod/uk.tfvars', 'prod/us.tfvars'];
-        for (const file of tfvarsConfigs) {
-          const tfvarsContent = fs.readFileSync(path.join(TERRAFORM_CONFIG_DIR, file), 'utf-8');
-          const match = tfvarsContent.match(/hosted_zone\s*=\s*"([^"]+)"/);
-          assert.ok(match, `hosted_zone not found in ${file}`);
-
-          const staleUri = `https://calendar.${match[1]}/calendar/api/auth/google/callback`;
+        const HISTORIC_HOSTED_ZONES = [
+          'dev.receptionhq.com',
+          'receptionhq.com',
+          'uk.receptionhq.com',
+          'us.receptionhq.com'
+        ];
+        for (const zone of HISTORIC_HOSTED_ZONES) {
+          const staleUri = `https://calendar.${zone}/calendar/api/auth/google/callback`;
           assert.ok(
             !runbookContent.includes(staleUri),
             `Runbook still lists ${staleUri}; that Route53 record and ALB listener rule were removed by TASK-049, so registering it would guarantee redirect_uri_mismatch`
           );
         }
+
+        // And the source of those hostnames is genuinely gone, so no future
+        // edit can reintroduce one from a tfvars key.
+        const devAu = fs.readFileSync(path.join(TERRAFORM_CONFIG_DIR, 'dev', 'au.tfvars'), 'utf-8');
+        assert.ok(!/^\s*hosted_zone(_id)?\s*=/m.test(devAu),
+          'dev/au.tfvars still assigns hosted_zone/hosted_zone_id, whose variable was removed by TASK-051');
+      });
+
+      it('FAILURE PATH: the runbook does not tell an operator to run a deleted prod init script', () => {
+        const runbookContent = fs.readFileSync(path.join(DOCS_DIR, 'google-oauth-setup.md'), 'utf-8');
+        for (const tenant of ['au', 'uk', 'us']) {
+          assert.ok(
+            !runbookContent.includes(`terraform_init_prod_${tenant}.sh`),
+            `Runbook still instructs the operator to run terraform_init_prod_${tenant}.sh, which TASK-051 deleted`
+          );
+        }
+        assert.ok(
+          !/\|\s*`?prod`?\s*\|\s*`?(au|uk|us)`?\s*\|/.test(runbookContent),
+          'Runbook still has a table row presenting a prod tenant as currently deployable'
+        );
       });
     });
 

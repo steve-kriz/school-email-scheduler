@@ -86,11 +86,22 @@ describe('Terraform Binary Resolution (TASK-017, Pass 3)', () => {
           cwd: TERRAFORM_DIR,
           encoding: 'utf-8',
           stdio: ['pipe', 'pipe', 'pipe'],
-          timeout: 30000
+          // Several e2e suites run a full-config `terraform validate` in this
+          // one shared directory concurrently, and each has to load the 800MB+
+          // AWS provider schema. Under that contention a run measured well past
+          // the old 30s ceiling and was killed (status null, empty stderr) -
+          // reported as "terraform validate failed" with no diagnostics, which
+          // looks exactly like a broken config and is not one. The ceiling is
+          // generous so a kill means a genuine hang, not a busy machine.
+          timeout: 300000
         });
       } catch (error) {
         const stderr = (error.stderr || '').toString().trim();
-        assert.fail(`terraform validate failed: ${stderr}`);
+        const stdout = (error.stdout || '').toString().trim();
+        assert.fail(
+          `terraform validate failed (status ${error.status}, signal ${error.signal}): ` +
+          `${stderr || stdout || error.message}`
+        );
         return;
       }
 

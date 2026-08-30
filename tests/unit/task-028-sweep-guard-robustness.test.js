@@ -248,29 +248,42 @@ describe('Robustness: The sweep guard and floor discrimination', () => {
       assert.throws(() => eqZero(1), 'Should fail when error_count === 1');
     });
 
-    it('terraform-resolver.test.js line 103 has error_count assertion', () => {
+    // These two used to pin literal line numbers (103 and 181) and window ten
+    // lines around each. That made them break on any edit above the window -
+    // TASK-051 raised the two `terraform validate` timeouts in that file and
+    // shifted every following line, turning a comment change into a red test
+    // that said nothing about the property being guarded. The property is "the
+    // file asserts on parsed.error_count, twice, once per validate run", so
+    // that is what is asserted now, by finding the assertions rather than by
+    // counting lines to them.
+    it('terraform-resolver.test.js asserts on parsed.error_count for its first validate run', () => {
       const testFile = path.join(PROJECT_ROOT, 'tests', 'e2e', 'terraform-resolver.test.js');
       const content = fs.readFileSync(testFile, 'utf-8');
-      const lines = content.split('\n');
 
-      // Line 103 (index 102) should be part of the assertion
-      const window = lines.slice(100, 110).join('\n');
       assert.ok(
-        /error_count/.test(window),
-        'Line 103 region should contain error_count assertion'
+        /assert\.equal\(\s*\n?\s*parsed\.error_count,\s*\n?\s*0\b/.test(content),
+        'terraform-resolver.test.js should assert.equal(parsed.error_count, 0)'
       );
     });
 
-    it('terraform-resolver.test.js line 181 has error_count assertion', () => {
+    it('terraform-resolver.test.js has an error_count assertion for BOTH of its validate runs', () => {
       const testFile = path.join(PROJECT_ROOT, 'tests', 'e2e', 'terraform-resolver.test.js');
       const content = fs.readFileSync(testFile, 'utf-8');
-      const lines = content.split('\n');
 
-      // Line 181 (index 180) should be part of the assertion
-      const window = lines.slice(178, 188).join('\n');
-      assert.ok(
-        /error_count/.test(window),
-        'Line 181 region should contain error_count assertion'
+      const assertions = content.match(/assert\.equal\(\s*\n?\s*parsed\.error_count,/g) || [];
+      assert.equal(
+        assertions.length,
+        2,
+        `terraform-resolver.test.js should carry exactly two parsed.error_count assertions ` +
+        `(one per terraform validate run), found ${assertions.length}`
+      );
+
+      const validateRuns = content.match(/validate -json|'validate', '-json'/g) || [];
+      assert.equal(
+        validateRuns.length,
+        assertions.length,
+        `every terraform validate run should be followed by an error_count assertion: ` +
+        `${validateRuns.length} run(s) vs ${assertions.length} assertion(s)`
       );
     });
 

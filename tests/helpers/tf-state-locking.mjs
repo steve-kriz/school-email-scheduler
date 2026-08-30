@@ -263,25 +263,55 @@ export function constraintAllows(constraint, version) {
 // terraform_init_*.sh parsing
 // ---------------------------------------------------------------------------
 
-/** The four init scripts this ticket touches, in a stable order. */
+/**
+ * Every init script in the repo. TASK-050 wrote this list with four entries
+ * (dev/au plus prod au/uk/us); TASK-051 cut the stack down to a single
+ * deployable environment and deleted terraform_init_prod_{au,uk,us}.sh, so
+ * dev/au is the only script left. The TASK-050 locking assertions that iterate
+ * this list are still live - they now just have one subject.
+ */
 export const INIT_SCRIPTS = [
-  { file: 'terraform_init_dev_au.sh', envShort: 'dev_au', workspace: 'dev-au', profile: 'ohq-dev' },
-  { file: 'terraform_init_prod_au.sh', envShort: 'prod_au', workspace: 'prod-au', profile: 'ohq-prod' },
-  { file: 'terraform_init_prod_uk.sh', envShort: 'prod_uk', workspace: 'prod-uk', profile: 'ohq-prod' },
-  { file: 'terraform_init_prod_us.sh', envShort: 'prod_us', workspace: 'prod-us', profile: 'ohq-prod' }
+  { file: 'terraform_init_dev_au.sh', envShort: 'dev_au', workspace: 'dev-au', profile: 'ohq-dev' }
 ];
 
-/** The four tfvars files this ticket touches, in a stable order. */
+/**
+ * Init scripts that must NOT exist. TASK-051 deleted the three prod ones; this
+ * list is what stops "the iteration got shorter" from being indistinguishable
+ * from "the assertions were quietly dropped".
+ */
+export const REMOVED_INIT_SCRIPTS = [
+  'terraform_init_prod_au.sh',
+  'terraform_init_prod_uk.sh',
+  'terraform_init_prod_us.sh'
+];
+
+/**
+ * Every tfvars file in the repo. Was four before TASK-051 deleted
+ * terraform/config/prod/ entirely; dev/au is now the only one.
+ */
 export const TFVARS_FILES = [
-  'config/dev/au.tfvars',
+  'config/dev/au.tfvars'
+];
+
+/** tfvars files TASK-051 deleted, asserted absent rather than just unvisited. */
+export const REMOVED_TFVARS_FILES = [
   'config/prod/au.tfvars',
   'config/prod/uk.tfvars',
   'config/prod/us.tfvars'
 ];
 
-/** Both terraform_remote_state config map variable names. */
+/**
+ * terraform_remote_state config map variable names still declared. TASK-051
+ * deleted data.terraform_remote_state.legacystack and its
+ * terraform_remote_state_legacystack_config variable (nothing ever read an
+ * output from it); basestack is load-bearing and survives.
+ */
 export const REMOTE_STATE_MAPS = [
-  'terraform_remote_state_basestack_config',
+  'terraform_remote_state_basestack_config'
+];
+
+/** The remote state removed by TASK-051, asserted absent. */
+export const REMOVED_REMOTE_STATE_MAPS = [
   'terraform_remote_state_legacystack_config'
 ];
 

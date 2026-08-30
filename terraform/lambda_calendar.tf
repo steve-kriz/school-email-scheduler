@@ -210,7 +210,11 @@ locals {
   # function ARN from known parts rather than referencing
   # aws_lambda_function.calendar.arn to avoid a self-referential cycle in the
   # function's own environment block.
-  calendar_function_arn = "arn:aws:lambda:${var.region}:${var.account_id}:function:${local.name_prefix}-school-calendar"
+  #
+  # The account id comes from data.aws_caller_identity.current (the account the
+  # credentials in use belong to) since TASK-051 removed var.account_id; this is
+  # the same source kms_calendar.tf uses for the key policy's account root.
+  calendar_function_arn = "arn:aws:lambda:${var.region}:${data.aws_caller_identity.current.account_id}:function:${local.name_prefix}-school-calendar"
 
   # Public origin of the calendar app - the value of PUBLIC_BASE_URL, from which
   # the Google OAuth redirect_uri is built server-side.
