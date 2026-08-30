@@ -40,6 +40,23 @@
             </div>
           </div>
 
+          <!--
+            Filter the month grid and the attention panel down to one processing
+            job. It ships with NO <option> children: every option is a job NAME,
+            i.e. user data, so app.js builds them with createElement/textContent
+            and never from a markup string.
+
+            The wrapper <div> carries `hidden`, not the <select>, so the label
+            never floats alone, and the row ships hidden so a page whose script
+            never loads shows no dead control - the same rule #attention-more
+            below follows. app.js reveals it only when there are two or more
+            jobs to choose between.
+          -->
+          <div id="job-filter-row" class="calendar-filter" hidden>
+            <label class="calendar-filter__label" for="job-filter">Show events from</label>
+            <select id="job-filter" class="calendar-filter__select"></select>
+          </div>
+
           <p id="scan-message" class="scan-message" role="status" aria-live="polite" hidden></p>
 
           <div id="calendar-weekdays" class="calendar-weekdays" aria-hidden="true"></div>
