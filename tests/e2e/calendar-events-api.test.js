@@ -755,9 +755,13 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       for (const banned of ['sourceMessageId', 'gmail-message-handle', 'refreshTokenEnc', 'ENCRYPTED-REFRESH-TOKEN', 'accessToken', 'ya29.', 'attentionKey', 'ttl']) {
         assert.ok(!serialised.includes(banned), `the response body must not contain "${banned}"`);
       }
+      // TASK-056 added `processingJobId` to the public projection (AC 31): the
+      // calendar/attention filter reads it straight off this response. The
+      // banned-token list above still governs what must NEVER appear.
       assert.deepEqual(Object.keys(body.events[0]).sort(), [
         'actionRequired', 'allDay', 'category', 'confidence', 'description', 'dueBy', 'endsAt', 'eventId',
-        'location', 'needsAttention', 'sourceFrom', 'sourceReceivedAt', 'sourceSubject', 'startsAt', 'status', 'title',
+        'location', 'needsAttention', 'processingJobId', 'sourceFrom', 'sourceReceivedAt', 'sourceSubject',
+        'startsAt', 'status', 'title',
       ]);
       // Provenance the UI is allowed to show.
       assert.equal(body.events[0].sourceSubject, 'Photo day next Friday');
