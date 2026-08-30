@@ -33,15 +33,20 @@ describe('Terraform Scaffold Unit Tests', () => {
         's3 backend not declared');
       assert.ok(providerContent.includes('encrypt'),
         'encrypt setting not found in s3 backend');
-      assert.ok(providerContent.includes('encrypt        = true'),
+      assert.match(providerContent, /encrypt\s*=\s*true/,
         'encrypt should be set to true');
     });
 
-    it('should declare s3 backend with dynamodb_table = "tfstate-table"', () => {
-      assert.ok(providerContent.includes('dynamodb_table'),
-        'dynamodb_table setting not found in s3 backend');
-      assert.ok(providerContent.includes('dynamodb_table = "tfstate-table"'),
-        'dynamodb_table should be "tfstate-table"');
+    it('should lock state via S3 lockfile, not a DynamoDB table', () => {
+      assert.match(providerContent, /use_lockfile\s*=\s*true/,
+        'use_lockfile = true not found in s3 backend');
+      assert.ok(!providerContent.includes('dynamodb_table'),
+        'dynamodb_table should no longer be referenced in provider.tf');
+    });
+
+    it('should require Terraform 1.10+ so use_lockfile is supported', () => {
+      assert.match(providerContent, /required_version\s*=\s*">=\s*1\.10"/,
+        'required_version >= 1.10 not declared in the terraform block');
     });
 
     it('should declare regional provider constrained by allowed_account_ids', () => {
