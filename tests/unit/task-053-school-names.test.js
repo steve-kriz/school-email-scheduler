@@ -375,113 +375,133 @@ describe('TASK-053 unit: buildUserContent emits one <school_name> per name', () 
  * Frontend helpers
  * ========================================================================= */
 
-describe('TASK-053 unit: parseSchoolNameList / formatSchoolNameList', () => {
-  it('splits on NEWLINES ONLY - a name with commas, semicolons and spaces stays ONE entry', () => {
-    assert.deepEqual(
-      settingsPage.parseSchoolNameList("St Mary's Primary, Manly; North Campus"),
-      ["St Mary's Primary, Manly; North Campus"]
-    );
+// TASK-057 REPLACED THE TWO TEXTAREAS WITH A LIST EDITOR, so
+// `parseSchoolNameList`/`formatSchoolNameList` (and the domain pair beside them)
+// no longer exist - a school name is now one input on one job row. The
+// assertions below are the SAME properties restated against the shape that
+// replaced them, kept rather than deleted: a name with commas and semicolons is
+// still one entry, the round trip is still lossless, and a malformed body is
+// still tolerated instead of throwing.
+describe('TASK-053 unit (TASK-057 shape): a school name is one field, never split', () => {
+  it("a name with commas, semicolons and spaces stays ONE value", () => {
+    const name = "St Mary's Primary, Manly; North Campus";
+    const rows = settingsPage.toEditableJobs([{ id: 'job-1', name: 'Manly', schoolName: name, domain: 'm.edu.au' }]);
+    assert.equal(rows[0].schoolName, name);
+    assert.equal(settingsPage.buildJobsPayload(rows)[0].schoolName, name);
   });
 
-  it('turns multiple lines into multiple names and handles CRLF', () => {
-    assert.deepEqual(
-      settingsPage.parseSchoolNameList('Alpha School\r\nBeta School\nGamma School'),
-      ['Alpha School', 'Beta School', 'Gamma School']
-    );
+  it('round-trips a stored list back out unchanged, order preserved', () => {
+    const stored = [
+      { id: 'job-1', name: 'Alpha', schoolName: 'Alpha School', domain: 'alpha.edu.au', searchTerms: ['canteen'] },
+      { id: 'job-2', name: 'Beta', schoolName: 'École Publique', domain: 'beta.edu.au', searchTerms: [] },
+    ];
+    assert.deepEqual(settingsPage.buildJobsPayload(settingsPage.toEditableJobs(stored)), stored);
   });
 
-  it('drops blank lines, trims, dedupes exactly and preserves case', () => {
-    assert.deepEqual(
-      settingsPage.parseSchoolNameList('\n  Alpha School  \n\n\nALPHA SCHOOL\nAlpha School\n   \n'),
-      ['Alpha School', 'ALPHA SCHOOL']
-    );
+  it('trims and drops blank search terms on the way out, and preserves case everywhere', () => {
+    const out = settingsPage.buildJobsPayload([
+      { id: '', name: '  ALPHA School  ', schoolName: ' Alpha School ', domain: ' Alpha.edu.au ', searchTerms: ['  x  ', '   '] },
+    ]);
+    assert.deepEqual(out, [
+      { name: 'ALPHA School', schoolName: 'Alpha School', domain: 'Alpha.edu.au', searchTerms: ['x'] },
+    ]);
   });
 
-  it('returns [] for nothing at all', () => {
-    assert.deepEqual(settingsPage.parseSchoolNameList(''), []);
-    assert.deepEqual(settingsPage.parseSchoolNameList('   \n  '), []);
-    assert.deepEqual(settingsPage.parseSchoolNameList(null), []);
-    assert.deepEqual(settingsPage.parseSchoolNameList(undefined), []);
-  });
-
-  it('round-trips through formatSchoolNameList', () => {
-    const names = ['Alpha School', "St Mary's Primary, Manly", 'École Publique'];
-    assert.equal(settingsPage.formatSchoolNameList(names), names.join('\n'));
-    assert.deepEqual(settingsPage.parseSchoolNameList(settingsPage.formatSchoolNameList(names)), names);
-  });
-
-  it('formats a non-array as an empty box rather than throwing', () => {
-    assert.equal(settingsPage.formatSchoolNameList(null), '');
-    assert.equal(settingsPage.formatSchoolNameList(undefined), '');
-    assert.equal(settingsPage.formatSchoolNameList('Alpha'), '');
+  it('returns [] for nothing at all rather than throwing', () => {
+    assert.deepEqual(settingsPage.toEditableJobs(''), []);
+    assert.deepEqual(settingsPage.toEditableJobs(null), []);
+    assert.deepEqual(settingsPage.toEditableJobs(undefined), []);
+    assert.deepEqual(settingsPage.buildJobsPayload(null), []);
+    assert.deepEqual(settingsPage.buildJobsPayload('Alpha'), []);
   });
 });
 
-describe('TASK-053 unit: buildSettingsPayload and FIELD_ERROR_IDS', () => {
-  it('always sends schoolNames and never schoolName', () => {
-    const payload = settingsPage.buildSettingsPayload({
-      schoolNamesText: '  Alpha School  \n\nBeta School',
-      domainsText: 'alpha.edu.au',
-      scheduleEnabled: false,
-    });
-    assert.deepEqual(payload.schoolNames, ['Alpha School', 'Beta School']);
-    assert.ok(!('schoolName' in payload));
-  });
+describe('TASK-053 unit (TASK-057 shape): buildSettingsPayload and FIELD_ERROR_IDS', () => {
+  const jobs = [
+    { name: '  Alpha  ', schoolName: '  Alpha School  ', domain: 'alpha.edu.au', searchTerms: [] },
+    { name: 'Beta', schoolName: 'Beta School', domain: 'beta.edu.au', searchTerms: [] },
+  ];
 
-  it('still sends an EMPTY schoolNames list, so clearing the box is not a silent no-op', () => {
-    const payload = settingsPage.buildSettingsPayload({
-      schoolNamesText: '   ',
-      domainsText: 'alpha.edu.au',
-      scheduleEnabled: false,
-    });
-    assert.deepEqual(payload.schoolNames, []);
-    assert.ok('schoolNames' in payload);
-  });
-
-  it('maps schoolNames to error-schoolNames and has no schoolName key (fails closed)', () => {
-    assert.equal(settingsPage.FIELD_ERROR_IDS.schoolNames, 'error-schoolNames');
-    assert.ok(
-      !Object.prototype.hasOwnProperty.call(settingsPage.FIELD_ERROR_IDS, 'schoolName'),
-      'a stale singular field name must fall back to the form-level error, not alias a dead id'
+  it('always sends processingJobs and never schoolName/schoolNames/searchDomains', () => {
+    const payload = settingsPage.buildSettingsPayload({ processingJobs: jobs, scheduleEnabled: false });
+    assert.deepEqual(
+      payload.processingJobs.map((entry) => entry.schoolName),
+      ['Alpha School', 'Beta School']
     );
+    assert.ok(!('schoolName' in payload));
+    assert.ok(!('schoolNames' in payload));
+    assert.ok(!('searchDomains' in payload));
+  });
+
+  it('still sends an EMPTY processingJobs list, so clearing the list is not a silent no-op', () => {
+    const payload = settingsPage.buildSettingsPayload({ processingJobs: [], scheduleEnabled: false });
+    assert.deepEqual(payload.processingJobs, []);
+    assert.ok('processingJobs' in payload);
+  });
+
+  it('maps processingJobs to error-processingJobs and keeps no superseded key (fails closed)', () => {
+    assert.equal(settingsPage.FIELD_ERROR_IDS.processingJobs, 'error-processingJobs');
+    for (const dead of ['schoolName', 'schoolNames', 'searchDomains']) {
+      assert.ok(
+        !Object.prototype.hasOwnProperty.call(settingsPage.FIELD_ERROR_IDS, dead),
+        `a stale field name (${dead}) must fall back to the form-level error, not alias a dead id`
+      );
+      assert.equal(settingsPage.fieldErrorId(dead), settingsPage.FORM_ERROR_ID);
+    }
   });
 
   it('and the shipped settings.html carries the matching ids', () => {
     const html = fs.readFileSync(path.join(FRONTEND_DIR, 'settings.html'), 'utf8');
-    assert.ok(html.includes('id="school-names-input"'), 'the textarea id is missing');
-    assert.ok(html.includes('id="error-schoolNames"'), 'the field error target is missing');
+    assert.ok(html.includes('id="processing-jobs"'), 'the job list container id is missing');
+    assert.ok(html.includes('id="error-processingJobs"'), 'the list-level field error target is missing');
     assert.ok(!html.includes('id="school-name-input"'), 'the superseded input id survived');
+    assert.ok(!html.includes('id="school-names-input"'), 'the superseded textarea id survived');
+    assert.ok(!html.includes('id="search-domains-input"'), 'the superseded textarea id survived');
     assert.ok(!html.includes('id="error-schoolName"'), 'the superseded error id survived');
+    assert.ok(!html.includes('id="error-searchDomains"'), 'the superseded error id survived');
   });
 });
 
-describe('TASK-053 unit: schoolNameList and connectionView', () => {
-  it('normalises only arrays, trimming and dropping blanks', () => {
-    assert.deepEqual(app.schoolNameList(['  Alpha  ', '', '   ', 'Beta']), ['Alpha', 'Beta']);
-    assert.deepEqual(app.schoolNameList(['Alpha', 7, null]), ['Alpha']);
-    assert.deepEqual(app.schoolNameList(null), []);
-    assert.deepEqual(app.schoolNameList('Alpha'), []);
-    assert.deepEqual(app.schoolNameList(undefined), []);
-    assert.deepEqual(app.schoolNameList({ 0: 'Alpha' }), []);
+describe('TASK-053 unit (TASK-057 shape): processingJobEntries and connectionView', () => {
+  const named = (name) => ({ id: 'job-1', name, schoolName: 'S', domain: 'd.edu.au', searchTerms: [] });
+
+  it('normalises only arrays, dropping anything with no usable name', () => {
+    assert.deepEqual(
+      app.processingJobEntries([named('  Alpha  '), named(''), named('   '), named('Beta')]).map((j) => j.name.trim()),
+      ['Alpha', 'Beta']
+    );
+    assert.deepEqual(app.processingJobEntries([named('Alpha'), 7, null]).map((j) => j.name), ['Alpha']);
+    assert.deepEqual(app.processingJobEntries(null), []);
+    assert.deepEqual(app.processingJobEntries('Alpha'), []);
+    assert.deepEqual(app.processingJobEntries(undefined), []);
+    assert.deepEqual(app.processingJobEntries({ 0: named('Alpha') }), []);
   });
 
-  it('needsSchool is true when schoolNames is absent, non-array, or empty', () => {
+  it('needsSchool is true when processingJobs is absent, non-array, or empty', () => {
     const base = { connectionStatus: 'connected', email: 'p@example.test' };
     assert.equal(app.connectionView({ ...base }).needsSchool, true, 'absent');
-    assert.equal(app.connectionView({ ...base, schoolNames: null }).needsSchool, true, 'null');
-    assert.equal(app.connectionView({ ...base, schoolNames: 'Alpha' }).needsSchool, true, 'non-array');
-    assert.equal(app.connectionView({ ...base, schoolNames: [] }).needsSchool, true, 'empty');
-    assert.equal(app.connectionView({ ...base, schoolNames: ['   '] }).needsSchool, true, 'blank entry');
+    assert.equal(app.connectionView({ ...base, processingJobs: null }).needsSchool, true, 'null');
+    assert.equal(app.connectionView({ ...base, processingJobs: 'Alpha' }).needsSchool, true, 'non-array');
+    assert.equal(app.connectionView({ ...base, processingJobs: [] }).needsSchool, true, 'empty');
+    assert.equal(app.connectionView({ ...base, processingJobs: [named('   ')] }).needsSchool, true, 'blank name');
   });
 
-  it('needsSchool is false as soon as one real name is stored', () => {
+  it('needsSchool is false as soon as one real job is stored', () => {
     const view = app.connectionView({
       connectionStatus: 'connected',
       email: 'p@example.test',
-      schoolNames: ['Alpha School', 'Beta School'],
+      processingJobs: [named('Alpha School'), named('Beta School')],
     });
     assert.equal(view.needsSchool, false);
     assert.equal(view.signedIn, true);
+  });
+
+  it('the superseded schoolNames helper is gone rather than left exported-but-dead', () => {
+    assert.equal(app.schoolNameList, undefined);
+    assert.equal(settingsPage.parseSchoolNameList, undefined);
+    assert.equal(settingsPage.formatSchoolNameList, undefined);
+    assert.equal(settingsPage.parseDomainList, undefined);
+    assert.equal(settingsPage.formatDomainList, undefined);
   });
 });
 
@@ -489,7 +509,7 @@ describe('TASK-053 unit: schoolNameList and connectionView', () => {
  * renderSummary - text, never markup
  * ========================================================================= */
 
-describe('TASK-053 unit: the settings summary joins names as TEXT', () => {
+describe('TASK-053 unit (TASK-057 shape): the settings summary joins job names as TEXT', () => {
   /** The same minimal fake document the other frontend unit tests build on. */
   function makeDoc() {
     const byId = new Map();
@@ -550,15 +570,15 @@ describe('TASK-053 unit: the settings summary joins names as TEXT', () => {
    * Drive the real `renderSummary` through `createSettingsPage`, with a fetch
    * that never leaves the process.
    */
-  async function renderWith(schoolNames) {
+  async function renderWith(names) {
     const doc = makeDoc();
     doc.register('settings-summary');
     doc.register('settings-body');
     doc.register('settings-status');
     doc.register('connection-state');
     doc.register('settings-form', 'form');
-    doc.register('school-names-input', 'textarea');
-    doc.register('search-domains-input', 'textarea');
+    doc.register('processing-jobs', 'div');
+    doc.register('processing-jobs-empty', 'p');
     doc.register('timezone-input', 'input');
     doc.register('schedule-hour-input', 'input');
     doc.register('schedule-frequency-input', 'input');
@@ -567,8 +587,13 @@ describe('TASK-053 unit: the settings summary joins names as TEXT', () => {
     const body = {
       connectionStatus: 'connected',
       email: 'p@example.test',
-      schoolNames,
-      searchDomains: ['alpha.edu.au'],
+      processingJobs: names.map((name, index) => ({
+        id: `job-${index + 1}`,
+        name,
+        schoolName: name,
+        domain: 'alpha.edu.au',
+        searchTerms: [],
+      })),
       scheduleEnabled: false,
     };
     const page = settingsPage.createSettingsPage({
@@ -592,10 +617,14 @@ describe('TASK-053 unit: the settings summary joins names as TEXT', () => {
     assert.match(doc.getElementById('settings-summary').textContent, /^Watching mail for /);
   });
 
-  it('keeps the existing "no school saved" copy for zero names', async () => {
+  it('keeps a "nothing saved yet" sentence for zero jobs', async () => {
     const doc = await renderWith([]);
-    assert.match(doc.getElementById('settings-summary').textContent, /No school saved yet/);
+    assert.match(
+      doc.getElementById('settings-summary').textContent,
+      /No processing job saved yet\. Add one below and we can start looking\./
+    );
     assert.equal(doc.getElementById('settings-school-name'), null);
+    assert.equal(doc.getElementById('processing-jobs-empty').hidden, false, 'the empty hint stayed hidden');
   });
 
   it('renders a hostile name as literal text and creates no element from it', async () => {
@@ -606,7 +635,9 @@ describe('TASK-053 unit: the settings summary joins names as TEXT', () => {
       `${hostile}, Beta School`
     );
     assert.deepEqual(doc.created.filter((node) => node.tagName === 'IMG'), []);
-    assert.equal(doc.getElementById('school-names-input').value, `${hostile}\nBeta School`);
+    // And into the row's own name input, as character data.
+    assert.equal(doc.getElementById('job-0-name').value, hostile);
+    assert.equal(doc.getElementById('job-0-head').textContent, hostile);
   });
 
   it('and no frontend source file reaches the DOM through a markup sink', () => {

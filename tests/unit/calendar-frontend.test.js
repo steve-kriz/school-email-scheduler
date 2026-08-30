@@ -776,17 +776,27 @@ describe('TASK-010 unit: connectionView', () => {
     }
   });
 
-  it('asks for a school when one is not stored', () => {
-    const view = app.connectionView({ connectionStatus: 'connected', schoolNames: ['   '] });
+  // TASK-055/TASK-057 replaced `schoolNames` with `processingJobs`; the gate is
+  // the same gate, read off the new key.
+  const namedJob = (name = 'Ashfield Public School') => ({
+    id: 'job-1',
+    name,
+    schoolName: name,
+    domain: 'ashfield.nsw.edu.au',
+    searchTerms: [],
+  });
+
+  it('asks for a school when no job is stored', () => {
+    const view = app.connectionView({ connectionStatus: 'connected', processingJobs: [namedJob('   ')] });
     assert.equal(view.signedIn, true);
-    assert.equal(view.needsSchool, true);
+    assert.equal(view.needsSchool, true, 'a job with a blank name is not a configured job');
     assert.equal(view.needsConnect, false);
   });
 
   it('asks to reconnect when the last scan reported reauth_required', () => {
     const view = app.connectionView({
       connectionStatus: 'connected',
-      schoolNames: ['Ashfield Public School'],
+      processingJobs: [namedJob()],
       lastScanStatus: 'reauth_required',
     });
     assert.equal(view.needsReauth, true);
@@ -794,14 +804,17 @@ describe('TASK-010 unit: connectionView', () => {
   });
 
   it('does not read "unknown" as "not connected"', () => {
-    assert.equal(app.connectionView({ connectionStatus: 'unknown', schoolNames: ['X'] }).needsConnect, false);
-    assert.equal(app.connectionView({ connectionStatus: 'not_connected', schoolNames: ['X'] }).needsConnect, true);
+    assert.equal(app.connectionView({ connectionStatus: 'unknown', processingJobs: [namedJob('X')] }).needsConnect, false);
+    assert.equal(
+      app.connectionView({ connectionStatus: 'not_connected', processingJobs: [namedJob('X')] }).needsConnect,
+      true
+    );
   });
 
   it('keeps the three flags independent, so no message is swallowed by another', () => {
     const view = app.connectionView({
       connectionStatus: 'not_connected',
-      schoolNames: [],
+      processingJobs: [],
       lastScanStatus: 'reauth_required',
     });
     assert.deepEqual(view, { signedIn: true, needsConnect: true, needsSchool: true, needsReauth: true });
@@ -1010,7 +1023,7 @@ describe('TASK-010 unit: renderConnectionCards', () => {
 
   it('prompts for a school and links to settings', () => {
     const { doc, container } = host();
-    app.renderConnectionCards(doc, container, { connectionStatus: 'connected', email: 'p@example.test', schoolNames: [] });
+    app.renderConnectionCards(doc, container, { connectionStatus: 'connected', email: 'p@example.test', processingJobs: [] });
     const prompt = doc.getElementById('school-setup');
     assert.notEqual(prompt, null);
     assert.match(textOf(prompt), /Tell us your school/);
@@ -1021,7 +1034,7 @@ describe('TASK-010 unit: renderConnectionCards', () => {
     const { doc, container } = host();
     app.renderConnectionCards(doc, container, {
       connectionStatus: 'connected',
-      schoolNames: ['Ashfield Public School'],
+      processingJobs: [{ id: 'job-1', name: 'Ashfield Public School' }],
       lastScanStatus: 'reauth_required',
     });
     const banner = doc.getElementById('reauth-banner');
@@ -1031,13 +1044,13 @@ describe('TASK-010 unit: renderConnectionCards', () => {
     assert.equal(doc.getElementById('reconnect-gmail').getAttribute('href'), '/calendar/api/auth/google/start');
   });
 
-  it('renders a hostile school name as literal text and creates no element from it', () => {
+  it('renders a hostile job name as literal text and creates no element from it', () => {
     const payload = '<img src=x onerror=alert(1)>';
     const { doc, container } = host();
     app.renderConnectionCards(doc, container, {
       connectionStatus: 'connected',
       email: 'parent@example.test',
-      schoolNames: [payload],
+      processingJobs: [{ id: 'job-1', name: payload }],
     });
     const name = doc.getElementById('identity-school-name');
     assert.notEqual(name, null);
@@ -1050,7 +1063,10 @@ describe('TASK-010 unit: renderConnectionCards', () => {
     const { doc, container } = host();
     app.renderConnectionCards(doc, container, null);
     assert.notEqual(doc.getElementById('connect-card'), null);
-    app.renderConnectionCards(doc, container, { connectionStatus: 'connected', schoolNames: ['Ashfield'] });
+    app.renderConnectionCards(doc, container, {
+      connectionStatus: 'connected',
+      processingJobs: [{ id: 'job-1', name: 'Ashfield' }],
+    });
     assert.equal(doc.getElementById('connect-card'), null, 'the connect card outlived the sign-in');
   });
 
@@ -1083,44 +1099,88 @@ describe('TASK-010 unit: settings.js helpers', () => {
     }
   });
 
-  it('splits the domains box on anything a person might type', () => {
-    assert.deepEqual(settings.parseDomainList('a.edu.au\nb.edu.au'), ['a.edu.au', 'b.edu.au']);
-    assert.deepEqual(settings.parseDomainList('a.edu.au, b.edu.au ; c.edu.au'), ['a.edu.au', 'b.edu.au', 'c.edu.au']);
-    assert.deepEqual(settings.parseDomainList('School.NSW.edu.au'), ['school.nsw.edu.au'], 'lower-cased');
-    assert.deepEqual(settings.parseDomainList('a.edu.au\na.edu.au'), ['a.edu.au'], 'duplicates collapse');
-    assert.deepEqual(settings.parseDomainList('   '), []);
-    assert.deepEqual(settings.parseDomainList(null), []);
-  });
-
-  it('round-trips a stored list back into the textarea', () => {
-    assert.equal(settings.formatDomainList(['a.edu.au', 'b.edu.au']), 'a.edu.au\nb.edu.au');
-    assert.equal(settings.formatDomainList(null), '');
-    assert.deepEqual(settings.parseDomainList(settings.formatDomainList(['a.edu.au', 'b.edu.au'])), [
-      'a.edu.au',
-      'b.edu.au',
+  // TASK-057 replaced the two split-on-punctuation textareas with one editable
+  // row per job, so `parseDomainList`/`formatDomainList` are gone. Their
+  // equivalents in the new shape are the row normaliser and the row-to-payload
+  // builder: one field is one value, trimmed on the way out and never split.
+  it('normalises a stored list into editable rows without splitting a single field', () => {
+    const rows = settings.toEditableJobs([
+      { id: 'job-1', name: 'Ashfield', schoolName: 'Ashfield PS', domain: 'a.edu.au, b.edu.au', searchTerms: ['x'] },
     ]);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].domain, 'a.edu.au, b.edu.au', 'one field is one value - it is never comma-split');
+    assert.deepEqual(rows[0].searchTerms, ['x']);
+    // Values reach an input's `value` untrimmed: trimming what the user is
+    // about to edit would move their caret. The trim happens on the way out.
+    assert.equal(settings.toEditableJobs([{ name: '  Ashfield  ' }])[0].name, '  Ashfield  ');
   });
 
-  it('always sends schoolNames and searchDomains, and omits the schedule fields left blank', () => {
+  it('tolerates the shapes a first run and a malformed body can produce', () => {
+    assert.deepEqual(settings.toEditableJobs(null), []);
+    assert.deepEqual(settings.toEditableJobs('Ashfield'), []);
+    assert.deepEqual(settings.toEditableJobs(undefined), []);
+    const blank = { id: '', name: '', schoolName: '', domain: '', searchTerms: [] };
+    assert.deepEqual(settings.toEditableJobs([null, 7]), [blank, blank]);
+    assert.deepEqual(settings.emptyProcessingJob(), blank);
+  });
+
+  it('trims on the way out, drops blank terms, and never invents an id', () => {
+    assert.deepEqual(
+      settings.buildJobsPayload([
+        {
+          id: '  job-1  ',
+          name: ' Ashfield ',
+          schoolName: ' Ashfield PS ',
+          domain: ' a.edu.au ',
+          searchTerms: [' x ', '  ', 7],
+        },
+        { id: '', key: 'row-2', name: 'Beta', schoolName: 'Beta PS', domain: 'b.edu.au', searchTerms: [] },
+      ]),
+      [
+        { id: 'job-1', name: 'Ashfield', schoolName: 'Ashfield PS', domain: 'a.edu.au', searchTerms: ['x'] },
+        // No `id` key at all for a row added this session, and the client-side
+        // `key` is never sent.
+        { name: 'Beta', schoolName: 'Beta PS', domain: 'b.edu.au', searchTerms: [] },
+      ]
+    );
+    assert.deepEqual(settings.buildJobsPayload(null), []);
+  });
+
+  it('always sends processingJobs, and omits the schedule fields left blank', () => {
     const payload = settings.buildSettingsPayload({
-      schoolNamesText: '  Ashfield Public School  ',
-      domainsText: 'ashfield.nsw.edu.au',
+      processingJobs: [
+        { id: 'job-1', name: '  Ashfield  ', schoolName: '  Ashfield Public School  ', domain: 'ashfield.nsw.edu.au' },
+      ],
       scheduleEnabled: false,
       scheduleFrequency: '',
       scheduleHour: '',
       timezone: '',
     });
     assert.deepEqual(payload, {
-      schoolNames: ['Ashfield Public School'],
-      searchDomains: ['ashfield.nsw.edu.au'],
+      processingJobs: [
+        {
+          id: 'job-1',
+          name: 'Ashfield',
+          schoolName: 'Ashfield Public School',
+          domain: 'ashfield.nsw.edu.au',
+          searchTerms: [],
+        },
+      ],
       scheduleEnabled: false,
     });
+    assert.equal('schoolNames' in payload, false);
+    assert.equal('searchDomains' in payload, false);
     assert.equal('scheduleHour' in payload, false);
     assert.equal('timezone' in payload, false);
 
+    // The empty list is still SENT: an absent key would read to the server as
+    // "leave what is stored alone", so clearing the list would be a silent no-op.
+    const cleared = settings.buildSettingsPayload({ processingJobs: [], scheduleEnabled: false });
+    assert.deepEqual(cleared.processingJobs, []);
+    assert.ok('processingJobs' in cleared);
+
     const full = settings.buildSettingsPayload({
-      schoolNamesText: 'X',
-      domainsText: 'x.edu.au',
+      processingJobs: [{ name: 'X', schoolName: 'X School', domain: 'x.edu.au' }],
       scheduleEnabled: true,
       scheduleFrequency: 'weekly',
       scheduleHour: '7',

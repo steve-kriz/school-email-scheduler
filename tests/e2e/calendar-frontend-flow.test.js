@@ -53,6 +53,24 @@ const { loadDocument, findElements, textOf } = await import('../helpers/fake-dom
 
 const XSS = '<img src=x onerror=alert(1)>';
 
+/**
+ * The stored shape both pages read since TASK-055/TASK-057 replaced
+ * `schoolNames`/`searchDomains` with a list of named processing jobs. Every
+ * scenario below that used to set a `schoolNames` array now sets one of these,
+ * so the coverage moved with the contract rather than being dropped.
+ *
+ * @param {object} [overrides]
+ * @returns {{ id: string, name: string, schoolName: string, domain: string, searchTerms: string[] }}
+ */
+const job = (overrides = {}) => ({
+  id: 'job-1',
+  name: 'Ashfield Public School',
+  schoolName: 'Ashfield Public School',
+  domain: 'ashfield-p.schools.nsw.edu.au',
+  searchTerms: [],
+  ...overrides,
+});
+
 /** Noon-ish on 15 September 2026 UTC+10; September 2026 in every real zone. */
 const NOW = Date.parse('2026-09-15T02:00:00.000Z');
 const VIEW_YEAR = new Date(NOW).getFullYear();
@@ -98,7 +116,7 @@ function makeWorld(overrides = {}) {
     me: {
       connectionStatus: 'connected',
       email: 'parent@example.test',
-      schoolNames: ['Ashfield Public School'],
+      processingJobs: [job()],
       lastScanStatus: 'ok',
     },
     events: [],
@@ -107,8 +125,7 @@ function makeWorld(overrides = {}) {
     settings: {
       connectionStatus: 'connected',
       email: 'parent@example.test',
-      schoolNames: ['Ashfield Public School'],
-      searchDomains: ['ashfield-p.schools.nsw.edu.au'],
+      processingJobs: [job()],
       scheduleEnabled: false,
       scheduleFrequency: 'daily',
       scheduleHour: 7,
@@ -546,7 +563,7 @@ describe('Feature: Calendar web interface - connection state', () => {
   describe('Scenario: A connected user without a school is prompted to set one', () => {
     it('Given an authenticated user with no school name, When the page is opened, Then a school setup prompt is shown', async () => {
       const world = makeWorld();
-      world.me = { connectionStatus: 'connected', email: 'parent@example.test', schoolNames: [] };
+      world.me = { connectionStatus: 'connected', email: 'parent@example.test', processingJobs: [] };
       const { doc, controller } = openCalendar(world);
 
       await controller.start();
@@ -576,9 +593,9 @@ describe('Feature: Calendar web interface - connection state', () => {
   });
 
   describe('Scenario: A stored hostile school name renders as literal text', () => {
-    it('Given a school name of "<img src=x onerror=alert(1)>", Then it appears as text and creates no element', async () => {
+    it('Given a job name of "<img src=x onerror=alert(1)>", Then it appears as text and creates no element', async () => {
       const world = makeWorld();
-      world.me = { ...world.me, schoolNames: [XSS] };
+      world.me = { ...world.me, processingJobs: [job({ name: XSS })] };
       const { doc, controller } = openCalendar(world);
 
       await controller.start();
@@ -1311,8 +1328,9 @@ describe('Feature: Empty months, credentials and session expiry', () => {
       const world = makeWorld();
       const { doc, page } = openSettings(world);
       await page.start();
-      doc.getElementById('school-names-input').value = 'Ashfield Public School';
-      doc.getElementById('search-domains-input').value = 'ashfield-p.schools.nsw.edu.au';
+      doc.getElementById('job-0-name').value = 'Ashfield Public School';
+      doc.getElementById('job-0-schoolName').value = 'Ashfield Public School';
+      doc.getElementById('job-0-domain').value = 'ashfield-p.schools.nsw.edu.au';
       await page.save();
 
       assert.ok(world.calls.length >= 3, `only ${world.calls.length} requests were made`);
@@ -1413,8 +1431,12 @@ describe('Feature: The settings page', () => {
       await page.start();
 
       assert.equal(doc.getElementById('settings-body').hidden, false);
-      assert.equal(doc.getElementById('school-names-input').value, 'Ashfield Public School');
-      assert.equal(doc.getElementById('search-domains-input').value, 'ashfield-p.schools.nsw.edu.au');
+      // One editable block per stored processing job, in the order it arrived.
+      assert.equal(doc.getElementById('processing-jobs').querySelectorAll('.job').length, 1);
+      assert.equal(doc.getElementById('job-0-name').value, 'Ashfield Public School');
+      assert.equal(doc.getElementById('job-0-schoolName').value, 'Ashfield Public School');
+      assert.equal(doc.getElementById('job-0-domain').value, 'ashfield-p.schools.nsw.edu.au');
+      assert.equal(doc.getElementById('processing-jobs-empty').hidden, true);
       assert.equal(doc.getElementById('timezone-input').value, 'Australia/Sydney');
       assert.equal(doc.getElementById('schedule-hour-input').value, '7');
       assert.equal(doc.getElementById('schedule-enabled-input').checked, false);
@@ -1432,27 +1454,39 @@ describe('Feature: The settings page', () => {
     });
   });
 
-  describe('Scenario: The settings page saves school name and domains', () => {
+  describe('Scenario: The settings page saves its processing jobs', () => {
     it('When the form is submitted, Then PUT /calendar/api/settings carries what was typed', async () => {
       const world = makeWorld();
       const { doc, page } = openSettings(world);
       await page.start();
 
-      doc.getElementById('school-names-input').value = '  Ashfield Public School  ';
-      doc.getElementById('search-domains-input').value = 'ashfield-p.schools.nsw.edu.au\nAshfield-P.SCHOOLS.nsw.edu.au';
+      doc.getElementById('job-0-name').value = '  Ashfield  ';
+      doc.getElementById('job-0-schoolName').value = '  Ashfield Public School  ';
+      doc.getElementById('job-0-domain').value = '  ashfield-p.schools.nsw.edu.au  ';
       await doc.getElementById('settings-form').dispatch('submit');
       await drain();
 
       const put = world.calls.find((call) => call.method === 'PUT' && call.path === '/calendar/api/settings');
       assert.notEqual(put, undefined, 'no settings PUT was sent');
       assert.deepEqual(JSON.parse(put.init.body), {
-        schoolNames: ['Ashfield Public School'],
-        searchDomains: ['ashfield-p.schools.nsw.edu.au'],
+        // The stored id is round-tripped so a rename cannot orphan the events
+        // TASK-056 attributed to this job.
+        processingJobs: [
+          {
+            id: 'job-1',
+            name: 'Ashfield',
+            schoolName: 'Ashfield Public School',
+            domain: 'ashfield-p.schools.nsw.edu.au',
+            searchTerms: [],
+          },
+        ],
         scheduleEnabled: false,
         scheduleFrequency: 'daily',
         scheduleHour: '7',
         timezone: 'Australia/Sydney',
       });
+      assert.equal('schoolNames' in JSON.parse(put.init.body), false);
+      assert.equal('searchDomains' in JSON.parse(put.init.body), false);
       assert.equal(put.init.credentials, 'same-origin');
       assert.equal(textOf(doc.getElementById('settings-status')), 'Saved.');
     });
@@ -1468,27 +1502,30 @@ describe('Feature: The settings page', () => {
   });
 
   describe('Scenario: Saving invalid settings shows a field error', () => {
-    it('Given the settings page, When the user saves searchDomains "gmail.com", Then a field-level error is shown', async () => {
+    it('Given the settings page, When the user saves a domain of "gmail.com", Then a field-level error is shown', async () => {
       const world = makeWorld({
         settingsPutStatus: 400,
         settingsPutBody: {
           error: 'gmail.com is a public mail provider, so it cannot be a school domain',
-          field: 'searchDomains',
+          field: 'processingJobs[0].domain',
         },
       });
       const { doc, page } = openSettings(world);
       await page.start();
 
-      doc.getElementById('school-names-input').value = 'Ashfield Public School';
-      doc.getElementById('search-domains-input').value = 'gmail.com';
+      doc.getElementById('job-0-name').value = 'Ashfield';
+      doc.getElementById('job-0-schoolName').value = 'Ashfield Public School';
+      doc.getElementById('job-0-domain').value = 'gmail.com';
       await doc.getElementById('settings-form').dispatch('submit');
       await drain();
 
-      const fieldError = doc.getElementById('error-searchDomains');
+      const fieldError = doc.getElementById('error-job-0-domain');
       assert.equal(fieldError.hidden, false, 'the field error stayed hidden');
       assert.equal(textOf(fieldError), 'gmail.com is a public mail provider, so it cannot be a school domain');
       assert.match(textOf(doc.getElementById('settings-status')), /Nothing was saved/);
-      assert.equal(doc.getElementById('error-schoolNames').hidden, true, 'the error landed on the wrong field too');
+      assert.equal(doc.getElementById('error-job-0-name').hidden, true, 'the error landed on the wrong field too');
+      assert.equal(doc.getElementById('error-processingJobs').hidden, true, 'a per-row error hit the list-level slot');
+      assert.equal(doc.getElementById('error-form').hidden, true, 'a resolvable field fell back to the form line');
       assert.equal(
         world.calls.some((call) => call.path === '/calendar/api/scan/schedule'),
         false,
@@ -1525,33 +1562,36 @@ describe('Feature: The settings page', () => {
     it('And a field error is cleared before the next save, so it cannot linger', async () => {
       const world = makeWorld({
         settingsPutStatus: 400,
-        settingsPutBody: { error: 'gmail.com is a public mail provider', field: 'searchDomains' },
+        settingsPutBody: { error: 'gmail.com is a public mail provider', field: 'processingJobs[0].domain' },
       });
       const { doc, page } = openSettings(world);
       await page.start();
       await page.save();
-      assert.equal(doc.getElementById('error-searchDomains').hidden, false);
+      assert.equal(doc.getElementById('error-job-0-domain').hidden, false);
 
       world.settingsPutStatus = 200;
       world.settingsPutBody = null;
       await page.save();
 
-      assert.equal(doc.getElementById('error-searchDomains').hidden, true, 'a stale field error survived a good save');
-      assert.equal(textOf(doc.getElementById('error-searchDomains')), '');
+      // The per-row slots are BUILT by the renderer, so they are not in the
+      // static FIELD_ERROR_IDS table `clearErrors` used to iterate on its own.
+      assert.equal(doc.getElementById('error-job-0-domain').hidden, true, 'a stale field error survived a good save');
+      assert.equal(textOf(doc.getElementById('error-job-0-domain')), '');
     });
   });
 
   describe('Scenario: A hostile school name renders as literal text on the settings page', () => {
-    it('Given a stored school name of "<img src=x onerror=alert(1)>", Then it is text in the summary and in the input', async () => {
+    it('Given a stored job name of "<img src=x onerror=alert(1)>", Then it is text in the summary and in the input', async () => {
       const world = makeWorld();
-      world.settings = { ...world.settings, schoolNames: [XSS] };
+      world.settings = { ...world.settings, processingJobs: [job({ name: XSS })] };
       const { doc, page } = openSettings(world);
 
       await page.start();
 
       assert.equal(doc.getElementById('settings-school-name').textContent, XSS);
-      assert.equal(doc.getElementById('school-names-input').value, XSS);
-      assert.deepEqual(findElements(doc, 'img'), [], 'an IMG element was created from a school name');
+      assert.equal(doc.getElementById('job-0-name').value, XSS);
+      assert.equal(doc.getElementById('job-0-head').textContent, XSS);
+      assert.deepEqual(findElements(doc, 'img'), [], 'an IMG element was created from a job name');
       const scripts = findElements(doc, 'script');
       assert.equal(scripts.length, 1);
       assert.equal(scripts[0].getAttribute('src'), '/calendar/settings.js');
@@ -1560,13 +1600,13 @@ describe('Feature: The settings page', () => {
     it('And a field error echoing what the user typed is text too', async () => {
       const world = makeWorld({
         settingsPutStatus: 400,
-        settingsPutBody: { error: `"${XSS}" is not a valid domain`, field: 'searchDomains' },
+        settingsPutBody: { error: `"${XSS}" is not a valid domain`, field: 'processingJobs[0].domain' },
       });
       const { doc, page } = openSettings(world);
       await page.start();
       await page.save();
 
-      assert.equal(doc.getElementById('error-searchDomains').textContent, `"${XSS}" is not a valid domain`);
+      assert.equal(doc.getElementById('error-job-0-domain').textContent, `"${XSS}" is not a valid domain`);
       assert.deepEqual(findElements(doc, 'img'), []);
     });
   });
