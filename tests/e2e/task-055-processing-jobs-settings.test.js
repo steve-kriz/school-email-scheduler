@@ -105,7 +105,7 @@ function job(overrides = {}) {
   return {
     name: "St Mary's",
     schoolName: "St Mary's Primary",
-    domain: 'stmarys.edu.au',
+    domains: ['stmarys.edu.au'],
     searchTerms: [],
     ...overrides,
   };
@@ -168,7 +168,8 @@ describe('Feature: A user configures independent named processing jobs', () => {
       const [entry] = body.processingJobs;
       assert.equal(entry.name, "St Mary's");
       assert.equal(entry.schoolName, "St Mary's Primary");
-      assert.equal(entry.domain, 'stmarys.edu.au');
+      assert.deepEqual(entry.domains, ['stmarys.edu.au']);
+      assert.ok(!('domain' in entry), 'the singular key leaked (TASK-059)');
       assert.deepEqual(entry.searchTerms, ['canteen roster', 'swimming carnival']);
       assert.match(entry.id, UUID_RE, 'the server did not mint a canonical UUID');
     });
@@ -201,8 +202,8 @@ describe('Feature: A user configures independent named processing jobs', () => {
     it('Then the response is 200 and the names are ["Zeta", "Alpha"]', async () => {
       const { response, body } = await putSettings({
         processingJobs: [
-          job({ name: 'Zeta', schoolName: 'Zeta College', domain: 'zeta.edu.au' }),
-          job({ name: 'Alpha', schoolName: 'Alpha School', domain: 'alpha.edu.au' }),
+          job({ name: 'Zeta', schoolName: 'Zeta College', domains: ['zeta.edu.au'] }),
+          job({ name: 'Alpha', schoolName: 'Alpha School', domains: ['alpha.edu.au'] }),
         ],
       });
       assert.equal(response.statusCode, 200);
@@ -226,8 +227,8 @@ describe('Feature: A user configures independent named processing jobs', () => {
 
   describe('Scenario: An absent searchTerms key normalizes to an empty list', () => {
     it('Then the response is 200 and processingJobs[0].searchTerms is []', async () => {
-      const { name, schoolName, domain } = job();
-      const { response, body } = await putSettings({ processingJobs: [{ name, schoolName, domain }] });
+      const { name, schoolName, domains } = job();
+      const { response, body } = await putSettings({ processingJobs: [{ name, schoolName, domains }] });
       assert.equal(response.statusCode, 200);
       assert.deepEqual(body.processingJobs[0].searchTerms, []);
     });
@@ -240,17 +241,17 @@ describe('Feature: A user configures independent named processing jobs', () => {
       });
       assert.equal(response.statusCode, 200);
       assert.equal(body.processingJobs.length, 2);
-      assert.deepEqual(body.processingJobs.map((entry) => entry.domain), ['stmarys.edu.au', 'stmarys.edu.au']);
+      assert.deepEqual(body.processingJobs.map((entry) => entry.domains), [['stmarys.edu.au'], ['stmarys.edu.au']]);
     });
   });
 
   describe('Scenario: A domain is normalized the same way it always was', () => {
-    it('Then processingJobs[0].domain is "stmarys.edu.au"', async () => {
+    it('Then processingJobs[0].domains is ["stmarys.edu.au"]', async () => {
       const { response, body } = await putSettings({
-        processingJobs: [job({ domain: 'https://StMarys.EDU.au/news' })],
+        processingJobs: [job({ domains: ['https://StMarys.EDU.au/news'] })],
       });
       assert.equal(response.statusCode, 200);
-      assert.equal(body.processingJobs[0].domain, 'stmarys.edu.au');
+      assert.deepEqual(body.processingJobs[0].domains, ['stmarys.edu.au']);
     });
   });
 
@@ -266,7 +267,7 @@ describe('Feature: A user configures independent named processing jobs', () => {
   describe('Scenario: Twenty jobs are accepted', () => {
     it('Then the response is 200 and processingJobs has 20 entries', async () => {
       const jobs = Array.from({ length: 20 }, (_, i) =>
-        job({ name: `Job ${i}`, schoolName: `School ${i}`, domain: `school${i}.edu.au` })
+        job({ name: `Job ${i}`, schoolName: `School ${i}`, domains: [`school${i}.edu.au`] })
       );
       const { response, body } = await putSettings({ processingJobs: jobs });
       assert.equal(response.statusCode, 200);
@@ -400,9 +401,9 @@ describe('Feature: Invalid processing jobs are refused and nothing is written', 
 
   describe('Scenario: A missing required field is refused and names the offending job', () => {
     it('Then 400 with field "processingJobs[1].schoolName" and nothing written', async () => {
-      const { name, domain } = job();
+      const { name, domains } = job();
       await refusedWith(
-        { processingJobs: [job({ name: 'First' }), { name: `Second ${name}`, domain }] },
+        { processingJobs: [job({ name: 'First' }), { name: `Second ${name}`, domains }] },
         'processingJobs[1].schoolName'
       );
     });
@@ -417,11 +418,15 @@ describe('Feature: Invalid processing jobs are refused and nothing is written', 
       ['schoolName', 'absent', { schoolName: undefined }],
       ['schoolName', '"  "', { schoolName: '  ' }],
       ['schoolName', '["A","B"]', { schoolName: ['A', 'B'] }],
-      ['domain', 'absent', { domain: undefined }],
-      ['domain', '""', { domain: '' }],
-      ['domain', '"stmarys"', { domain: 'stmarys' }],
-      ['domain', '"-bad-.edu.au"', { domain: '-bad-.edu.au' }],
-      ['domain', '["a.edu.au"]', { domain: ['a.edu.au'] }],
+      // TASK-059: `domains` is a LIST and is OPTIONAL, so "absent" moved to the
+      // accepted outline below; what is still refused is a bad CONTAINER or a
+      // bad ENTRY.
+      ['domains', 'a bare string', { domains: 'stmarys.edu.au' }],
+      ['domains', 'a number', { domains: 42 }],
+      ['domains', 'holding ""', { domains: [''] }],
+      ['domains', 'holding "stmarys"', { domains: ['stmarys'] }],
+      ['domains', 'holding "-bad-.edu.au"', { domains: ['-bad-.edu.au'] }],
+      ['domains', 'holding a nested ["a.edu.au"]', { domains: [['a.edu.au']] }],
     ];
     for (const [field, label, overrides] of examples) {
       it(`Given ${field} is ${label}, Then 400 with field "processingJobs[0].${field}"`, async () => {
@@ -430,11 +435,25 @@ describe('Feature: Invalid processing jobs are refused and nothing is written', 
     }
   });
 
+  describe('Scenario Outline: domains is OPTIONAL, so absent/null/[] all save (TASK-059)', () => {
+    for (const [label, value] of [['absent', undefined], ['null', null], ['[]', []]]) {
+      it(`Given domains is ${label}, Then 200 and processingJobs[0].domains is []`, async () => {
+        const payload = job();
+        delete payload.domains;
+        if (value !== undefined) payload.domains = value;
+
+        const { response, body } = await putSettings({ processingJobs: [payload] });
+        assert.equal(response.statusCode, 200, JSON.stringify(body));
+        assert.deepEqual(body.processingJobs[0].domains, []);
+      });
+    }
+  });
+
   describe('Scenario: A public mail provider domain is still refused, per job', () => {
-    it('Then 400 with field "processingJobs[0].domain" saying it is a public email provider', async () => {
+    it('Then 400 with field "processingJobs[0].domains" saying it is a public email provider', async () => {
       const body = await refusedWith(
-        { processingJobs: [job({ domain: 'gmail.com' })] },
-        'processingJobs[0].domain'
+        { processingJobs: [job({ domains: ['stmarys.edu.au', 'gmail.com'] })] },
+        'processingJobs[0].domains'
       );
       assert.ok(body.error.includes('is a public email provider'), body.error);
       assert.ok(body.error.includes('gmail.com'), body.error);
@@ -578,7 +597,7 @@ describe('Feature: Invalid processing jobs are refused and nothing is written', 
       );
       assert.equal(response.statusCode, 200);
       assert.deepEqual(Object.keys(spy.calls[0].updates.processingJobs[0]).sort(), [
-        'domain',
+        'domains',
         'id',
         'name',
         'schoolName',
@@ -625,7 +644,7 @@ describe('Feature: Existing rows migrate on read into one default processing job
           id: 'default',
           name: 'Default',
           schoolName: "St Mary's Primary",
-          domain: 'stmarys.edu.au',
+          domains: ['stmarys.edu.au'],
           searchTerms: [],
         },
       ]);
@@ -654,13 +673,13 @@ describe('Feature: Existing rows migrate on read into one default processing job
       });
       assert.equal(body.processingJobs.length, 1);
       assert.equal(body.processingJobs[0].schoolName, 'Alpha School');
-      assert.equal(body.processingJobs[0].domain, 'alpha.edu.au');
+      assert.deepEqual(body.processingJobs[0].domains, ['alpha.edu.au']);
       assert.deepEqual(body.processingJobs[0].searchTerms, ['Beta School', 'Gamma School', 'beta.edu.au']);
     });
   });
 
   describe('Scenario: The synthesized job is identical on every read of the same row', () => {
-    it('Then both responses agree on schoolName, domain and searchTerms', async () => {
+    it('Then both responses agree on schoolName, domains and searchTerms', async () => {
       // A DynamoDB string set is UNORDERED: these are the same row observed with
       // two different storage orders.
       const first = await getSettings({
@@ -675,25 +694,26 @@ describe('Feature: Existing rows migrate on read into one default processing job
       });
 
       assert.equal(first.body.processingJobs[0].schoolName, second.body.processingJobs[0].schoolName);
-      assert.equal(first.body.processingJobs[0].domain, second.body.processingJobs[0].domain);
+      assert.deepEqual(first.body.processingJobs[0].domains, second.body.processingJobs[0].domains);
       assert.deepEqual(first.body.processingJobs[0].searchTerms, second.body.processingJobs[0].searchTerms);
       assert.equal(first.body.processingJobs[0].schoolName, 'Alpha School');
     });
   });
 
-  describe('Scenario: A legacy row with only school names synthesizes an empty domain', () => {
-    it('Then schoolName is "Alpha School" and domain is ""', async () => {
+  describe('Scenario: A legacy row with only school names synthesizes an EMPTY domains list', () => {
+    it('Then schoolName is "Alpha School" and domains is []', async () => {
       const { body } = await getSettings({ ...baseRow, schoolNames: new Set(['Alpha School']) });
       assert.equal(body.processingJobs[0].schoolName, 'Alpha School');
-      assert.equal(body.processingJobs[0].domain, '');
+      assert.deepEqual(body.processingJobs[0].domains, []);
+      assert.ok(!('domain' in body.processingJobs[0]));
     });
   });
 
   describe('Scenario: A legacy row with only domains synthesizes an empty school name', () => {
-    it('Then schoolName is "" and domain is "alpha.edu.au"', async () => {
+    it('Then schoolName is "" and domains is ["alpha.edu.au"]', async () => {
       const { body } = await getSettings({ ...baseRow, searchDomains: new Set(['alpha.edu.au']) });
       assert.equal(body.processingJobs[0].schoolName, '');
-      assert.equal(body.processingJobs[0].domain, 'alpha.edu.au');
+      assert.deepEqual(body.processingJobs[0].domains, ['alpha.edu.au']);
     });
   });
 
@@ -705,7 +725,7 @@ describe('Feature: Existing rows migrate on read into one default processing job
         searchDomains: new Set(['alpha.edu.au']),
       });
       assert.equal(body.processingJobs[0].schoolName, 'Alpha School');
-      assert.equal(body.processingJobs[0].domain, 'alpha.edu.au');
+      assert.deepEqual(body.processingJobs[0].domains, ['alpha.edu.au']);
       assert.ok(!('schoolName' in body));
     });
   });
@@ -713,7 +733,7 @@ describe('Feature: Existing rows migrate on read into one default processing job
   describe('Scenario: Real stored jobs always win over legacy attributes', () => {
     it('Then the body is the stored list and no "Default" job is synthesized', async () => {
       const stored = [
-        { id: CLIENT_UUID, name: 'Real', schoolName: 'Real School', domain: 'real.edu.au', searchTerms: ['canteen'] },
+        { id: CLIENT_UUID, name: 'Real', schoolName: 'Real School', domains: ['real.edu.au'], searchTerms: ['canteen'] },
       ];
       const { body } = await getSettings({
         ...baseRow,
@@ -778,7 +798,7 @@ describe('Feature: Existing rows migrate on read into one default processing job
       const read = await getSettings(legacyRow);
       const [synthesized] = read.body.processingJobs;
       assert.equal(synthesized.id, 'default');
-      assert.equal(synthesized.domain, '', 'the fixture must be the incomplete synthesized job');
+      assert.deepEqual(synthesized.domains, [], 'the fixture must be the incomplete synthesized job');
 
       // When they PUT it back with id "default" and a filled-in domain.
       const spy = makeUpdateItemSpy({
@@ -787,7 +807,7 @@ describe('Feature: Existing rows migrate on read into one default processing job
         schoolName: 'Alpha School',
       });
       const { response, body } = await putSettings(
-        { processingJobs: [{ ...synthesized, domain: 'alpha.edu.au' }] },
+        { processingJobs: [{ ...synthesized, domains: ['alpha.edu.au'] }] },
         { spy }
       );
 
@@ -848,7 +868,7 @@ describe('Feature: The scan pipeline degrades safely on the new settings shape',
         userId: connectionUserId(testGoogleSub),
         email: testEmail,
         hasRefreshToken: true,
-        processingJobs: [{ id: 'job-1', name: 'Empty', schoolName: '', domain: '', searchTerms: [] }],
+        processingJobs: [{ id: 'job-1', name: 'Empty', schoolName: '', domains: [], searchTerms: [] }],
       });
 
       const result = await runScan({ userId: connectionUserId(testGoogleSub) }, deps);
@@ -900,7 +920,7 @@ describe('Feature: Personal data never reaches a log line', () => {
             job({
               name: "St Mary's",
               schoolName: "St Mary's Primary",
-              domain: 'stmarys.edu.au',
+              domains: ['stmarys.edu.au'],
               searchTerms: ['canteen roster'],
             }),
           ],

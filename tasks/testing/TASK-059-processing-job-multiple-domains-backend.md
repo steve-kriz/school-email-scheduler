@@ -1,10 +1,9 @@
 ---
 id: TASK-059
 title: Let a processing job watch multiple domains (backend validation and Gmail query)
-status: in-progress
-agent: orchestrator-session-1
+status: testing
 created: 2026-08-31T00:00:00Z
-updated: 2026-08-31T10:00:00Z
+updated: 2026-08-31T10:15:00Z
 question: RESOLVED by the orchestrator - yes, handle it in connections.mjs too, not deferred. synthesizeLegacyProcessingJob (connections.mjs:379-402) is renamed to emit domains (a one-element list derived the same way it derives its current domain, still folding remaining legacy entries into searchTerms) instead of the singular domain. Additionally, toPublicJson's per-job projection must read a STORED job map that still only carries the pre-TASK-059 singular domain key as domains: [domain] (dropped if blank) when domains itself is absent - the same read-compatibility shim scan.mjs's toProcessingJobs needs (this ticket's AC 29), applied on the settings/auth-me read path so an existing TASK-055/057 user's configured domain keeps showing up in the settings UI and in /auth/me immediately after this ships, without requiring them to re-save first. See the added Acceptance Criteria under "connections.mjs" below.
 ---
 

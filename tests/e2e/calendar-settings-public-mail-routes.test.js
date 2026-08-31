@@ -79,16 +79,16 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
   /**
    * TASK-055 moved the request contract to `processingJobs`: one domain now lives
    * on one job, so a refused domain is reported under the INDEXED field name
-   * `processingJobs[<index>].domain` rather than the collection name.
+   * `processingJobs[<index>].domains` rather than the collection name (TASK-059 pluralised the key).
    */
-  const DOMAIN_FIELD = 'processingJobs[0].domain';
+  const DOMAIN_FIELD = 'processingJobs[0].domains';
 
   /** One valid processing job carrying the domain under test. */
   function jobWith(domain, overrides = {}) {
     return {
       name: 'Newsletters',
       schoolName: 'St Marys Primary',
-      domain,
+      domains: [domain],
       searchTerms: [],
       ...overrides,
     };
@@ -195,7 +195,7 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
 
     assert.equal(response.statusCode, 200);
     assert.deepEqual(
-      body.processingJobs.map((job) => job.domain),
+      body.processingJobs.flatMap((job) => job.domains),
       ['mail.stmarys.edu.au']
     );
     assert.equal(captured.length, 1);
@@ -208,7 +208,7 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
 
     assert.equal(response.statusCode, 200);
     assert.deepEqual(
-      body.processingJobs.map((job) => job.domain),
+      body.processingJobs.flatMap((job) => job.domains),
       ['stbedes.vic.edu.au']
     );
     assert.equal(captured.length, 1);
@@ -221,7 +221,7 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
 
     assert.equal(response.statusCode, 200);
     assert.deepEqual(
-      body.processingJobs.map((job) => job.domain),
+      body.processingJobs.flatMap((job) => job.domains),
       ['example.qld.edu.au']
     );
     assert.equal(captured.length, 1);
@@ -268,7 +268,7 @@ describe('Settings routes - public mail blocklist (TASK-032)', () => {
     ]);
 
     assert.equal(response.statusCode, 200, 'should accept school domains with brand-like words');
-    const domains = body.processingJobs.map((job) => job.domain);
+    const domains = body.processingJobs.flatMap((job) => job.domains);
     assert.equal(domains.length, 3);
     assert.ok(domains.includes('livewire.edu.au'));
     assert.ok(domains.includes('mailroom.vic.edu.au'));

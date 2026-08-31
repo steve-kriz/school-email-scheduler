@@ -81,7 +81,7 @@ function makeJob(id, over = {}) {
     id,
     name: `${id} display name`,
     schoolName: `${id} School`,
-    domain: `${id}.edu.au`,
+    domains: [`${id}.edu.au`],
     searchTerms: [],
     ...over,
   };
@@ -185,7 +185,7 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
   describe('AC 1: a job-aware query builder takes one job plus since/sinceDays/now', () => {
     it('Given a full job and a since date, When buildJobQuery is called, Then it returns one Gmail search string', () => {
       const query = buildJobQuery({
-        job: makeJob('job-a', { schoolName: "St Mary's Primary", domain: 'stmarys.edu.au', searchTerms: ['Year 4'] }),
+        job: makeJob('job-a', { schoolName: "St Mary's Primary", domains: ['stmarys.edu.au'], searchTerms: ['Year 4'] }),
         since: SINCE,
         now: () => new Date('2026-08-17T00:00:00.000Z'),
       });
@@ -196,7 +196,7 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
 
     it('Given no since, When buildJobQuery is called with sinceDays and now, Then the floor is now minus sinceDays', () => {
       const query = buildJobQuery({
-        job: makeJob('job-a', { schoolName: '', domain: 'stmarys.edu.au', searchTerms: [] }),
+        job: makeJob('job-a', { schoolName: '', domains: ['stmarys.edu.au'], searchTerms: [] }),
         since: null,
         sinceDays: 90,
         now: () => new Date('2026-08-17T00:00:00.000Z'),
@@ -209,7 +209,7 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
   describe('AC 2: clause order is domain, school name, then each search term; blanks dropped, duplicates emitted once', () => {
     it('Given all three fields, When the clauses are built, Then they appear in the contractual order', () => {
       const clauses = buildJobClauses({
-        domain: 'STMARYS.edu.au',
+        domains: ['STMARYS.edu.au'],
         schoolName: "St Mary's Primary",
         searchTerms: ['Year 4', 'Canteen'],
       });
@@ -218,12 +218,12 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
     });
 
     it('Given the domain arrives as "@School.EDU", When clauses are built, Then normalizeDomain is the one definition used', () => {
-      assert.deepEqual(buildJobClauses({ domain: '@School.EDU', schoolName: '', searchTerms: [] }), ['from:@school.edu']);
+      assert.deepEqual(buildJobClauses({ domains: ['@School.EDU'], schoolName: '', searchTerms: [] }), ['from:@school.edu']);
     });
 
     it('Given blank and whitespace entries, When clauses are built, Then they are dropped', () => {
       const clauses = buildJobClauses({
-        domain: '   ',
+        domains: ['   '],
         schoolName: '   ',
         searchTerms: ['', '   ', 'Canteen'],
       });
@@ -233,7 +233,7 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
 
     it('Given a search term equal to the school name in a different case, When clauses are built, Then the duplicate is emitted once', () => {
       const clauses = buildJobClauses({
-        domain: 'stmarys.edu.au',
+        domains: ['stmarys.edu.au'],
         schoolName: 'St Mary',
         searchTerms: ['st mary', 'ST MARY', 'Canteen'],
       });
@@ -245,7 +245,7 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
   describe('AC 3: clauses are OR-joined inside ONE pair of parentheses with after: outside', () => {
     it('Given a three-clause job, When the query is built, Then there is exactly one group and after: sits outside it', () => {
       const query = buildJobQuery({
-        job: makeJob('job-a', { schoolName: "St Mary's Primary", domain: 'stmarys.edu.au', searchTerms: ['Year 4'] }),
+        job: makeJob('job-a', { schoolName: "St Mary's Primary", domains: ['stmarys.edu.au'], searchTerms: ['Year 4'] }),
         since: SINCE,
       });
 
@@ -257,7 +257,7 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
 
     it('Given a since date, When the query is built, Then the after: value is formatGmailDate output (YYYY/MM/DD, UTC)', () => {
       const query = buildJobQuery({
-        job: makeJob('job-a', { schoolName: '', domain: 'd.edu', searchTerms: [] }),
+        job: makeJob('job-a', { schoolName: '', domains: ['d.edu'], searchTerms: [] }),
         since: new Date('2026-05-19T23:59:59.000Z'),
       });
 
@@ -270,7 +270,7 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
       const domain = 'stmarys.edu.au';
       const legacy = buildQuery({ searchDomains: [domain], since: SINCE });
       const perJob = buildJobQuery({
-        job: makeJob('job-a', { schoolName: '', domain, searchTerms: [] }),
+        job: makeJob('job-a', { schoolName: '', domains: [domain], searchTerms: [] }),
         since: SINCE,
       });
 
@@ -280,7 +280,7 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
 
     it('Given a school name that neutralises to nothing, When the query is built, Then it is still the bare domain form', () => {
       const perJob = buildJobQuery({
-        job: makeJob('job-a', { schoolName: '""""', domain: 'stmarys.edu.au', searchTerms: ['  '] }),
+        job: makeJob('job-a', { schoolName: '""""', domains: ['stmarys.edu.au'], searchTerms: ['  '] }),
         since: SINCE,
       });
 
@@ -307,12 +307,12 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
 
     it('Given a value that is nothing but quotes, When the phrase is built, Then it is dropped as if blank', () => {
       assert.equal(toQueryPhrase('""'), '');
-      assert.deepEqual(buildJobClauses({ domain: '', schoolName: '""', searchTerms: ['“”'] }), []);
+      assert.deepEqual(buildJobClauses({ domains: [''], schoolName: '""', searchTerms: ['“”'] }), []);
     });
 
     it('Given a quote-bearing term inside a real job, When the query is built, Then it still has one OR group and one after: clause', () => {
       const query = buildJobQuery({
-        job: makeJob('job-a', { schoolName: '', domain: '', searchTerms: ['Year "4" OR from:@evil.example'] }),
+        job: makeJob('job-a', { schoolName: '', domains: [''], searchTerms: ['Year "4" OR from:@evil.example'] }),
         since: SINCE,
       });
 
@@ -325,7 +325,7 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
   describe('AC 6 / AC 41: a job with zero usable clauses never produces a query', () => {
     it('Given a job with all three fields blank, When buildJobQuery is called, Then it throws code "no_job_query"', () => {
       assert.throws(
-        () => buildJobQuery({ job: { id: 'job-a', name: 'x', schoolName: '  ', domain: '', searchTerms: [] }, since: SINCE }),
+        () => buildJobQuery({ job: { id: 'job-a', name: 'x', schoolName: '  ', domains: [''], searchTerms: [] }, since: SINCE }),
         (err) => err.code === 'no_job_query',
         'must refuse with a distinguishable code, mirroring no_search_domains'
       );
@@ -338,7 +338,7 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
 
     it('Given the usability probe, When it is asked about usable and unusable jobs, Then it answers without building a query', () => {
       assert.equal(hasJobQueryClauses(makeJob('job-a')), true);
-      assert.equal(hasJobQueryClauses({ id: 'x', schoolName: '', domain: '', searchTerms: [] }), false);
+      assert.equal(hasJobQueryClauses({ id: 'x', schoolName: '', domains: [''], searchTerms: [] }), false);
       assert.equal(hasJobQueryClauses(undefined), false);
     });
   });
@@ -346,7 +346,7 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
   describe('AC 35: a job with searchTerms: [] queries on domain and school name only', () => {
     it('Given no search terms, When the query is built, Then it holds exactly the two other clauses', () => {
       const query = buildJobQuery({
-        job: makeJob('job-a', { schoolName: 'Riverside High', domain: 'riverside.edu.au', searchTerms: [] }),
+        job: makeJob('job-a', { schoolName: 'Riverside High', domains: ['riverside.edu.au'], searchTerms: [] }),
         since: SINCE,
       });
 
@@ -418,7 +418,7 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
         {
           userId: USER,
           since: SINCE,
-          job: makeJob('job-a', { schoolName: "St Mary's Primary", domain: 'stmarys.edu.au', searchTerms: ['Year 4'] }),
+          job: makeJob('job-a', { schoolName: "St Mary's Primary", domains: ['stmarys.edu.au'], searchTerms: ['Year 4'] }),
         },
         gmailDeps(gmailStub({ ids: ['m1', 'm2'], capture }))
       );
@@ -482,7 +482,7 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
       let httpCalls = 0;
       await assert.rejects(
         fetchCandidateMessages(
-          { userId: USER, since: SINCE, job: { id: 'job-a', schoolName: '', domain: '', searchTerms: [] } },
+          { userId: USER, since: SINCE, job: { id: 'job-a', schoolName: '', domains: [''], searchTerms: [] } },
           gmailDeps(async () => {
             httpCalls += 1;
             return { ok: true, status: 200, text: async () => '{}' };
@@ -500,7 +500,7 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
       const job = makeJob('job-a', {
         name: 'ZZZ-JOB-NAME',
         schoolName: 'ZZZ-SCHOOL-NAME',
-        domain: 'stmarys.edu.au',
+        domains: ['stmarys.edu.au'],
         searchTerms: ['ZZZ-SEARCH-TERM'],
       });
 
@@ -536,8 +536,8 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
     it('Given a stored processingJobs array, When it is read, Then every field is normalised in settings order', () => {
       const jobs = toProcessingJobs({
         processingJobs: [
-          { id: 'job-a', name: ' St Mary\'s ', schoolName: ' St Mary\'s Primary ', domain: ' stmarys.edu.au ', searchTerms: [' Year 4 ', ''] },
-          { id: 'job-b', name: 'Riverside', schoolName: 'Riverside High', domain: 'riverside.edu.au', searchTerms: [] },
+          { id: 'job-a', name: ' St Mary\'s ', schoolName: ' St Mary\'s Primary ', domains: [' stmarys.edu.au '], searchTerms: [' Year 4 ', ''] },
+          { id: 'job-b', name: 'Riverside', schoolName: 'Riverside High', domains: ['riverside.edu.au'], searchTerms: [] },
         ],
       });
 
@@ -546,7 +546,7 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
         id: 'job-a',
         name: "St Mary's",
         schoolName: "St Mary's Primary",
-        domain: 'stmarys.edu.au',
+        domains: ['stmarys.edu.au'],
         searchTerms: ['Year 4'],
       });
       assert.equal(jobs[1].id, 'job-b');
@@ -554,23 +554,23 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
 
     it('Given a low-level DynamoDB list shape, When it is read, Then it is tolerated rather than throwing mid-scan', () => {
       const jobs = toProcessingJobs({
-        processingJobs: { L: [{ M: { id: { S: 'job-a' }, name: { S: 'A' }, schoolName: { S: 'A School' }, domain: { S: 'a.edu' }, searchTerms: { L: [{ S: 'Term' }] } } }] },
+        processingJobs: { L: [{ M: { id: { S: 'job-a' }, name: { S: 'A' }, schoolName: { S: 'A School' }, domains: { L: [{ S: 'a.edu' }] }, searchTerms: { L: [{ S: 'Term' }] } } }] },
       });
 
-      assert.deepEqual(jobs, [{ id: 'job-a', name: 'A', schoolName: 'A School', domain: 'a.edu', searchTerms: ['Term'] }]);
+      assert.deepEqual(jobs, [{ id: 'job-a', name: 'A', schoolName: 'A School', domains: ['a.edu'], searchTerms: ['Term'] }]);
     });
 
     it('Given a legacy row with no processingJobs, When it is read, Then one job is synthesised per searchDomains entry so it still scans', () => {
       const jobs = toProcessingJobs({ searchDomains: new Set(['legacy.edu']), schoolNames: ['Legacy School'] });
 
       assert.equal(jobs.length, 1);
-      assert.equal(jobs[0].domain, 'legacy.edu');
+      assert.deepEqual(jobs[0].domains, ['legacy.edu']);
       assert.equal(jobs[0].schoolName, 'Legacy School');
       assert.equal(jobs[0].id, 'legacy#legacy.edu', 'stable, and not derived from the array index');
     });
 
     it('Given a job with a blank id, When it is read, Then the blank id is kept rather than being invented', () => {
-      const jobs = toProcessingJobs({ processingJobs: [{ id: '', name: 'n', schoolName: 's', domain: 'd.edu', searchTerms: [] }] });
+      const jobs = toProcessingJobs({ processingJobs: [{ id: '', name: 'n', schoolName: 's', domains: ['d.edu'], searchTerms: [] }] });
       assert.equal(jobs[0].id, '', 'an index-derived id would move when the user reorders their jobs');
     });
   });
@@ -579,8 +579,8 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
     it('Given every job is unusable, When a scan runs, Then not_configured is returned with no lock, no Gmail and no Anthropic call', async () => {
       const { result, calls } = await runScanWith({
         jobs: [
-          { id: 'job-a', name: 'A', schoolName: '', domain: '', searchTerms: [] },
-          { id: 'job-b', name: 'B', schoolName: '   ', domain: '  ', searchTerms: ['  '] },
+          { id: 'job-a', name: 'A', schoolName: '', domains: [''], searchTerms: [] },
+          { id: 'job-b', name: 'B', schoolName: '   ', domains: ['  '], searchTerms: ['  '] },
         ],
         onFetch: async () => {
           throw new Error('Gmail must not be called');
@@ -609,7 +609,7 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
 
     it('Given one usable and one unusable job, When a scan runs, Then the usable one still runs and the other reports not_configured', async () => {
       const { result, calls } = await runScanWith({
-        jobs: [{ id: 'job-a', name: 'A', schoolName: '', domain: '', searchTerms: [] }, makeJob('job-b')],
+        jobs: [{ id: 'job-a', name: 'A', schoolName: '', domains: [''], searchTerms: [] }, makeJob('job-b')],
       });
 
       assert.equal(calls.fetches.length, 1);
@@ -685,9 +685,9 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
         mode: 'manual',
         jobs: [
           makeJob('job-a'),
-          { id: 'job-b', name: 'B', schoolName: '', domain: '', searchTerms: [] },
+          { id: 'job-b', name: 'B', schoolName: '', domains: [''], searchTerms: [] },
           makeJob('job-c'),
-          { id: 'job-d', name: 'D', schoolName: '', domain: '', searchTerms: [] },
+          { id: 'job-d', name: 'D', schoolName: '', domains: [''], searchTerms: [] },
           makeJob('job-e'),
         ],
       });
@@ -1017,7 +1017,7 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
       const { result } = await runScanWith({
         jobs: [
           makeJob('job-a'),
-          { id: 'job-b', name: 'B', schoolName: '', domain: '', searchTerms: [] },
+          { id: 'job-b', name: 'B', schoolName: '', domains: [''], searchTerms: [] },
           makeJob('job-c'),
         ],
         onFetch: async ({ job }) => {
@@ -1062,7 +1062,7 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
 
     it('AC 39: Given two jobs both write the same underlying event, When the run finishes, Then eventsCreated sums both writes by design', async () => {
       const { result } = await runScanWith({
-        jobs: [makeJob('job-a', { domain: 'shared.edu.au' }), makeJob('job-b', { domain: 'shared.edu.au' })],
+        jobs: [makeJob('job-a', { domains: ['shared.edu.au'] }), makeJob('job-b', { domains: ['shared.edu.au'] })],
         onFetch: async () => emptyFetch({ messages: [makeMessage('m9')], newestReceivedAt: '2026-06-01T00:00:00.000Z' }),
         onExtract: async () => ({ events: [{ title: 'Book Fair', startsAt: '2026-06-10T00:00:00.000Z' }] }),
         onStore: async () => ({ written: 1, skipped: [] }),
@@ -1400,8 +1400,8 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
     it('Given a scan over two jobs, When each message is extracted, Then each call receives only its own job\'s context and no searchTerms', async () => {
       const { calls } = await runScanWith({
         jobs: [
-          makeJob('job-a', { schoolName: "St Mary's Primary", domain: 'stmarys.edu.au', searchTerms: ['Tuckshop'] }),
-          makeJob('job-b', { schoolName: 'Riverside High', domain: 'riverside.edu.au', searchTerms: [] }),
+          makeJob('job-a', { schoolName: "St Mary's Primary", domains: ['stmarys.edu.au'], searchTerms: ['Tuckshop'] }),
+          makeJob('job-b', { schoolName: 'Riverside High', domains: ['riverside.edu.au'], searchTerms: [] }),
         ],
         onFetch: async ({ job }) => emptyFetch({ messages: [makeMessage(`m-${job.id}`)], newestReceivedAt: '2026-06-01T00:00:00.000Z' }),
         onExtract: async () => ({ events: [] }),

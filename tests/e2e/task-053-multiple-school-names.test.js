@@ -141,7 +141,7 @@ function job(overrides = {}) {
   return {
     name: 'Newsletters',
     schoolName: 'Ashfield Public School',
-    domain: 'ashfield.nsw.edu.au',
+    domains: ['ashfield.nsw.edu.au'],
     searchTerms: [],
     ...overrides,
   };
@@ -155,7 +155,7 @@ describe('Feature: A user can watch mail for more than one school (TASK-055 shap
   describe('Scenario: Saving several schools as several jobs', () => {
     const jobs = [
       job({ name: 'Ashfield', schoolName: 'Ashfield Public School' }),
-      job({ name: 'St Marys', schoolName: "St Mary's Primary", domain: 'stmarys.edu.au' }),
+      job({ name: 'St Marys', schoolName: "St Mary's Primary", domains: ['stmarys.edu.au'] }),
     ];
 
     it('When they PUT settings with two jobs, Then the status is 200 and both come back', async () => {
@@ -179,8 +179,8 @@ describe('Feature: A user can watch mail for more than one school (TASK-055 shap
     it('When they PUT jobs named ["Zeta", "Alpha"], Then the body keeps that order', async () => {
       const { response, body } = await putSettings({
         processingJobs: [
-          job({ name: 'Zeta', schoolName: 'Zeta College', domain: 'zeta.edu.au' }),
-          job({ name: 'Alpha', schoolName: 'Alpha School', domain: 'alpha.edu.au' }),
+          job({ name: 'Zeta', schoolName: 'Zeta College', domains: ['zeta.edu.au'] }),
+          job({ name: 'Alpha', schoolName: 'Alpha School', domains: ['alpha.edu.au'] }),
         ],
       });
       assert.equal(response.statusCode, 200);
@@ -198,8 +198,8 @@ describe('Feature: A user can watch mail for more than one school (TASK-055 shap
       const { response, body } = await putSettings(
         {
           processingJobs: [
-            job({ name: 'Alpha School', domain: 'alpha.edu.au' }),
-            job({ name: '  ALPHA SCHOOL  ', domain: 'alpha.edu.au' }),
+            job({ name: 'Alpha School', domains: ['alpha.edu.au'] }),
+            job({ name: '  ALPHA SCHOOL  ', domains: ['alpha.edu.au'] }),
           ],
         },
         { updateItem: spy.updateItem }
@@ -232,7 +232,7 @@ describe('Feature: A user can watch mail for more than one school (TASK-055 shap
     for (const name of names) {
       it(`When they PUT a job whose schoolName is "${name}", Then it comes back byte-for-byte`, async () => {
         const { response, body } = await putSettings({
-          processingJobs: [job({ name, schoolName: name, domain: 'school.edu.au' })],
+          processingJobs: [job({ name, schoolName: name, domains: ['school.edu.au'] })],
         });
         assert.equal(response.statusCode, 200);
         assert.equal(body.processingJobs[0].schoolName, name);
@@ -242,7 +242,7 @@ describe('Feature: A user can watch mail for more than one school (TASK-055 shap
 
     it('And a name containing a comma is ONE entry, never split', async () => {
       const { body } = await putSettings({
-        processingJobs: [job({ schoolName: 'Newtown High, Annexe Campus', domain: 'school.edu.au' })],
+        processingJobs: [job({ schoolName: 'Newtown High, Annexe Campus', domains: ['school.edu.au'] })],
       });
       assert.equal(body.processingJobs.length, 1);
       assert.equal(body.processingJobs[0].schoolName, 'Newtown High, Annexe Campus');
@@ -251,7 +251,7 @@ describe('Feature: A user can watch mail for more than one school (TASK-055 shap
 
   describe('Scenario: Twenty jobs are accepted, twenty-one are not', () => {
     const twenty = Array.from({ length: 20 }, (_, i) =>
-      job({ name: `Job Number ${i}`, schoolName: `School Number ${i}`, domain: 'school.edu.au' })
+      job({ name: `Job Number ${i}`, schoolName: `School Number ${i}`, domains: ['school.edu.au'] })
     );
 
     it('Then the 20-job request returns 200 with 20 entries', async () => {
@@ -279,7 +279,7 @@ describe('Feature: A user can watch mail for more than one school (TASK-055 shap
       assert.ok(within.length > 120, 'fixture is not over 120 UTF-16 units');
       assert.equal([...within].length, 113);
       const { response, body } = await putSettings({
-        processingJobs: [job({ schoolName: within, domain: 'school.edu.au' })],
+        processingJobs: [job({ schoolName: within, domains: ['school.edu.au'] })],
       });
       assert.equal(response.statusCode, 200, 'a .length bound would have refused this');
       assert.equal(body.processingJobs[0].schoolName, within);
@@ -290,7 +290,7 @@ describe('Feature: A user can watch mail for more than one school (TASK-055 shap
       const over = '👍'.repeat(121);
       assert.equal([...over].length, 121);
       const { response, body } = await putSettings(
-        { processingJobs: [job({ schoolName: over, domain: 'school.edu.au' })] },
+        { processingJobs: [job({ schoolName: over, domains: ['school.edu.au'] })] },
         { updateItem: spy.updateItem }
       );
       assert.equal(response.statusCode, 400);
@@ -342,7 +342,7 @@ describe('Feature: A user can watch mail for more than one school (TASK-055 shap
             job({
               name: 'Highly Identifying Job Name',
               schoolName: 'Highly Identifying School Name',
-              domain: 'secretschool.edu.au',
+              domains: ['secretschool.edu.au'],
               searchTerms: ['Second Secret Term'],
             }),
           ],
@@ -385,7 +385,8 @@ describe('Feature: Existing single-name rows keep working (TASK-055 migrate-on-r
       assert.equal(body.processingJobs.length, 1);
       assert.equal(body.processingJobs[0].name, 'Default');
       assert.equal(body.processingJobs[0].schoolName, 'Ashfield Public School');
-      assert.equal(body.processingJobs[0].domain, 'ashfield.nsw.edu.au');
+      assert.deepEqual(body.processingJobs[0].domains, ['ashfield.nsw.edu.au']);
+      assert.ok(!('domain' in body.processingJobs[0]), 'the singular domain key leaked (TASK-059)');
       assert.ok(!('schoolName' in body), 'GET /settings leaked the legacy key');
       assert.ok(!('searchDomains' in body), 'GET /settings leaked the legacy key');
     });
@@ -522,7 +523,7 @@ describe('Feature: Existing single-name rows keep working (TASK-055 migrate-on-r
   describe('Scenario: processingJobs wins when a row carries both shapes', () => {
     it('When a body carries both, Then only processingJobs is read', async () => {
       const { response, body } = await putSettings({
-        processingJobs: [job({ name: 'New Shape', schoolName: 'New Shape School', domain: 'school.edu.au' })],
+        processingJobs: [job({ name: 'New Shape', schoolName: 'New Shape School', domains: ['school.edu.au'] })],
         schoolNames: ['Old Shape School'],
         schoolName: 'Older Shape School',
         searchDomains: ['old.edu.au'],
@@ -537,7 +538,7 @@ describe('Feature: Existing single-name rows keep working (TASK-055 migrate-on-r
         id: '6f1d2c1e-1c2a-4a3b-8c4d-9e0f1a2b3c4d',
         name: 'New Shape',
         schoolName: 'New Shape School',
-        domain: 'school.edu.au',
+        domains: ['school.edu.au'],
         searchTerms: [],
       };
       const projected = toPublicJson({

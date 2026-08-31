@@ -71,7 +71,7 @@ function job(overrides = {}) {
   return {
     name: "St Mary's",
     schoolName: "St Mary's Primary",
-    domain: 'stmarys.edu.au',
+    domains: ['stmarys.edu.au'],
     searchTerms: [],
     ...overrides,
   };
@@ -127,7 +127,7 @@ describe('TASK-055 unit: constants and shape', () => {
       { newId: stubIds().newId }
     );
     assert.deepEqual(Object.keys(validated).sort(), [
-      'domain',
+      'domains',
       'id',
       'name',
       'schoolName',
@@ -244,7 +244,7 @@ describe('TASK-055 unit: validateProcessingJobs - schoolName', () => {
   });
 });
 
-describe('TASK-055 unit: validateProcessingJobs - domain', () => {
+describe('TASK-055 unit: validateProcessingJobs - domains (pluralised by TASK-059)', () => {
   it('runs the EXISTING normalizeDomain then isValidDomain, storing the lower-cased host', () => {
     for (const form of [
       'https://StMarys.EDU.au/news',
@@ -254,29 +254,41 @@ describe('TASK-055 unit: validateProcessingJobs - domain', () => {
       'stmarys.edu.au:443',
       '  STMARYS.EDU.AU  ',
     ]) {
-      const [validated] = validateProcessingJobs([job({ domain: form })], { newId: stubIds().newId });
-      assert.equal(validated.domain, 'stmarys.edu.au', `form ${form}`);
+      const [validated] = validateProcessingJobs([job({ domains: [form] })], { newId: stubIds().newId });
+      assert.deepEqual(validated.domains, ['stmarys.edu.au'], `form ${form}`);
     }
   });
 
-  for (const [label, value] of [
-    ['absent', undefined],
-    ['null', null],
-    ['empty', ''],
-    ['a single label', 'stmarys'],
-    ['a malformed label', '-bad-.edu.au'],
-    ['an ARRAY', ['a.edu.au']],
-    ['a number', 123],
-  ]) {
-    it(`rejects a ${label} domain with field processingJobs[0].domain`, () => {
-      const err = refusal([job({ domain: value })]);
-      assert.equal(err.field, 'processingJobs[0].domain');
+  // TASK-059 made the list OPTIONAL: absent and null are no longer refusals.
+  for (const [label, value] of [['absent', undefined], ['null', null], ['an empty list', []]]) {
+    it(`ACCEPTS ${label} domains and stores []`, () => {
+      const [validated] = validateProcessingJobs([job({ domains: value })], { newId: stubIds().newId });
+      assert.deepEqual(validated.domains, []);
     });
   }
 
+  for (const [label, value] of [
+    ['a blank entry', ''],
+    ['a single label', 'stmarys'],
+    ['a malformed label', '-bad-.edu.au'],
+    ['a nested ARRAY entry', ['a.edu.au']],
+    ['a number entry', 123],
+  ]) {
+    it(`rejects ${label} with field processingJobs[0].domains`, () => {
+      const err = refusal([job({ domains: [value] })]);
+      assert.equal(err.field, 'processingJobs[0].domains');
+    });
+  }
+
+  it('REFUSES a bare string rather than treating it as one domain', () => {
+    const err = refusal([job({ domains: 'stmarys.edu.au' })]);
+    assert.equal(err.field, 'processingJobs[0].domains');
+    assert.equal(err.message, 'School email domains must be a list');
+  });
+
   it('applies the EXISTING public-provider check per job, with the same message', () => {
-    const err = refusal([job({ domain: 'gmail.com' })]);
-    assert.equal(err.field, 'processingJobs[0].domain');
+    const err = refusal([job({ domains: ['gmail.com'] })]);
+    assert.equal(err.field, 'processingJobs[0].domains');
     assert.ok(err.message.includes('gmail.com'), err.message);
     assert.ok(err.message.includes('is a public email provider'), err.message);
   });
@@ -284,15 +296,15 @@ describe('TASK-055 unit: validateProcessingJobs - domain', () => {
 
 describe('TASK-055 unit: validateProcessingJobs - searchTerms', () => {
   it('normalises absent, null and undefined all to []', () => {
-    const { name, schoolName, domain } = job();
+    const { name, schoolName, domains } = job();
     for (const value of [undefined, null]) {
       const [validated] = validateProcessingJobs(
-        [{ name, schoolName, domain, searchTerms: value }],
+        [{ name, schoolName, domains, searchTerms: value }],
         { newId: stubIds().newId }
       );
       assert.deepEqual(validated.searchTerms, []);
     }
-    const [omitted] = validateProcessingJobs([{ name, schoolName, domain }], { newId: stubIds().newId });
+    const [omitted] = validateProcessingJobs([{ name, schoolName, domains }], { newId: stubIds().newId });
     assert.deepEqual(omitted.searchTerms, []);
   });
 
@@ -476,7 +488,7 @@ describe('TASK-055 unit: validateProcessingJobs - the collection', () => {
       { newId: stubIds().newId }
     );
     assert.equal(jobs.length, 2);
-    assert.deepEqual(jobs.map((entry) => entry.domain), ['stmarys.edu.au', 'stmarys.edu.au']);
+    assert.deepEqual(jobs.map((entry) => entry.domains), [['stmarys.edu.au'], ['stmarys.edu.au']]);
     assert.deepEqual(jobs.map((entry) => entry.schoolName), ["St Mary's Primary", "St Mary's Primary"]);
   });
 
@@ -495,13 +507,13 @@ describe('TASK-055 unit: validateProcessingJobs - the collection', () => {
 
 describe('TASK-055 unit: error field naming', () => {
   it('uses the SUBMITTED zero-based index in the indexed field name', () => {
-    const err = refusal([job({ name: 'One' }), job({ name: 'Two' }), job({ name: 'Three', domain: 'stmarys' })]);
-    assert.equal(err.field, 'processingJobs[2].domain');
+    const err = refusal([job({ name: 'One' }), job({ name: 'Two' }), job({ name: 'Three', domains: ['stmarys'] })]);
+    assert.equal(err.field, 'processingJobs[2].domains');
   });
 
   it('names the offending job when a later job omits a required field', () => {
-    const { name, domain } = job();
-    const err = refusal([job({ name: 'First' }), { name: 'Second', domain }]);
+    const { name, domains } = job();
+    const err = refusal([job({ name: 'First' }), { name: 'Second', domains }]);
     assert.equal(err.field, 'processingJobs[1].schoolName');
     assert.ok(name);
   });
@@ -577,9 +589,9 @@ describe('TASK-055 unit: requireValidSettings / validateSettingsPayload', () => 
   });
 
   it('validateSettingsPayload carries the INDEXED field name and rethrows anything else', () => {
-    const verdict = validateSettingsPayload({ processingJobs: [job(), job({ name: 'Two', domain: 'gmail.com' })] });
+    const verdict = validateSettingsPayload({ processingJobs: [job(), job({ name: 'Two', domains: ['gmail.com'] })] });
     assert.equal(verdict.valid, false);
-    assert.equal(verdict.field, 'processingJobs[1].domain');
+    assert.equal(verdict.field, 'processingJobs[1].domains');
 
     assert.throws(
       () => validateSettingsPayload({ processingJobs: [job()] }, {
@@ -616,7 +628,7 @@ describe('TASK-055 unit: buildConnectionPatch and the compiled UpdateExpression'
     assert.notEqual(typeof patch.processingJobs, 'string');
     for (const entry of patch.processingJobs) {
       assert.equal(Object.getPrototypeOf(entry), Object.prototype);
-      assert.deepEqual(Object.keys(entry).sort(), ['domain', 'id', 'name', 'schoolName', 'searchTerms']);
+      assert.deepEqual(Object.keys(entry).sort(), ['domains', 'id', 'name', 'schoolName', 'searchTerms']);
       assert.ok(Array.isArray(entry.searchTerms));
       assert.ok(!(entry.searchTerms instanceof Set));
     }
@@ -680,13 +692,13 @@ describe('TASK-055 unit: buildConnectionPatch and the compiled UpdateExpression'
 
 describe('TASK-055 unit: migrate-on-read in toPublicJson', () => {
   const storedJobs = [
-    { id: CLIENT_UUID, name: 'Real', schoolName: 'Real School', domain: 'real.edu.au', searchTerms: ['canteen'] },
+    { id: CLIENT_UUID, name: 'Real', schoolName: 'Real School', domains: ['real.edu.au'], searchTerms: ['canteen'] },
   ];
 
   it('passes a stored list of objects through unchanged and UNSORTED', () => {
     const jobs = [
-      { id: 'z', name: 'Zeta', schoolName: 'Z', domain: 'z.edu.au', searchTerms: [] },
-      { id: 'a', name: 'Alpha', schoolName: 'A', domain: 'a.edu.au', searchTerms: [] },
+      { id: 'z', name: 'Zeta', schoolName: 'Z', domains: ['z.edu.au'], searchTerms: [] },
+      { id: 'a', name: 'Alpha', schoolName: 'A', domains: ['a.edu.au'], searchTerms: [] },
     ];
     const json = toPublicJson({ processingJobs: jobs });
     assert.deepEqual(json.processingJobs, jobs, 'a List must not be sorted - its order is the user\'s');
@@ -702,7 +714,7 @@ describe('TASK-055 unit: migrate-on-read in toPublicJson', () => {
         id: 'default',
         name: 'Default',
         schoolName: "St Mary's Primary",
-        domain: 'stmarys.edu.au',
+        domains: ['stmarys.edu.au'],
         searchTerms: [],
       },
     ]);
@@ -717,7 +729,7 @@ describe('TASK-055 unit: migrate-on-read in toPublicJson', () => {
       searchDomains: new Set(['alpha.edu.au', 'beta.edu.au']),
     });
     assert.equal(json.processingJobs[0].schoolName, 'Alpha School');
-    assert.equal(json.processingJobs[0].domain, 'alpha.edu.au');
+    assert.deepEqual(json.processingJobs[0].domains, ['alpha.edu.au']);
     assert.deepEqual(json.processingJobs[0].searchTerms, ['Beta School', 'Gamma School', 'beta.edu.au']);
   });
 
@@ -734,7 +746,7 @@ describe('TASK-055 unit: migrate-on-read in toPublicJson', () => {
     });
     assert.deepEqual(first.processingJobs, second.processingJobs);
     assert.equal(first.processingJobs[0].schoolName, 'Alpha School');
-    assert.equal(first.processingJobs[0].domain, 'alpha.edu.au');
+    assert.deepEqual(first.processingJobs[0].domains, ['alpha.edu.au']);
   });
 
   it('normalises a Set, a low-level { SS: [...] } and a plain array alike, dropping blanks', () => {
@@ -752,18 +764,19 @@ describe('TASK-055 unit: migrate-on-read in toPublicJson', () => {
       searchDomains: new Set(['alpha.edu.au']),
     });
     assert.equal(json.processingJobs[0].schoolName, 'Alpha School');
-    assert.equal(json.processingJobs[0].domain, 'alpha.edu.au');
+    assert.deepEqual(json.processingJobs[0].domains, ['alpha.edu.au']);
     assert.ok(!('schoolName' in json));
   });
 
-  it('synthesises an empty domain when only school names exist, and vice versa', () => {
+  it('synthesises an EMPTY domains list when only school names exist, and vice versa', () => {
     const namesOnly = toPublicJson({ schoolNames: new Set(['Alpha School']) });
     assert.equal(namesOnly.processingJobs[0].schoolName, 'Alpha School');
-    assert.equal(namesOnly.processingJobs[0].domain, '');
+    assert.deepEqual(namesOnly.processingJobs[0].domains, []);
+    assert.ok(!('domain' in namesOnly.processingJobs[0]));
 
     const domainsOnly = toPublicJson({ searchDomains: new Set(['alpha.edu.au']) });
     assert.equal(domainsOnly.processingJobs[0].schoolName, '');
-    assert.equal(domainsOnly.processingJobs[0].domain, 'alpha.edu.au');
+    assert.deepEqual(domainsOnly.processingJobs[0].domains, ['alpha.edu.au']);
   });
 
   it('NEVER triggers when a non-empty processingJobs exists - the stored jobs always win', () => {
@@ -810,8 +823,13 @@ describe('TASK-055 unit: migrate-on-read in toPublicJson', () => {
   it('the synthesised job is NOT valid PUT input when a legacy source was missing', () => {
     // Deliberate: the user must fill the gap before their first real save, and
     // the validator is not relaxed to let a half-migrated job through.
-    const synthesized = toPublicJson({ schoolNames: new Set(['Alpha School']) }).processingJobs;
+    // TASK-059 made `domains` OPTIONAL, so a names-only synthesis IS valid input
+    // now; the gap that still refuses is a synthesis with no school name at all.
+    const namesOnly = toPublicJson({ schoolNames: new Set(['Alpha School']) }).processingJobs;
+    assert.equal(validateProcessingJobs(namesOnly, { newId: stubIds().newId }).length, 1);
+
+    const synthesized = toPublicJson({ searchDomains: new Set(['alpha.edu.au']) }).processingJobs;
     const err = refusal(synthesized);
-    assert.equal(err.field, 'processingJobs[0].domain');
+    assert.equal(err.field, 'processingJobs[0].schoolName');
   });
 });

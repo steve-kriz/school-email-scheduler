@@ -737,7 +737,7 @@ describe('Settings Module - Unit Tests', () => {
   const validJob = {
     name: 'Test Job',
     schoolName: 'Test School',
-    domain: 'example.edu.au',
+    domains: ['example.edu.au'],
     searchTerms: ['canteen roster'],
   };
 
@@ -747,7 +747,8 @@ describe('Settings Module - Unit Tests', () => {
       assert.equal(result.processingJobs.length, 1);
       assert.equal(result.processingJobs[0].name, 'Test Job');
       assert.equal(result.processingJobs[0].schoolName, 'Test School');
-      assert.equal(result.processingJobs[0].domain, 'example.edu.au');
+      assert.deepEqual(result.processingJobs[0].domains, ['example.edu.au']);
+      assert.ok(!('domain' in result.processingJobs[0]), 'the singular domain key survived (TASK-059)');
       assert.deepEqual(result.processingJobs[0].searchTerms, ['canteen roster']);
       assert.ok(!('schoolNames' in result));
       assert.ok(!('searchDomains' in result));
@@ -825,10 +826,10 @@ describe('Settings Module - Unit Tests', () => {
 
     it('should carry the INDEXED field name for a per-job failure', () => {
       const result = validateSettingsPayload({
-        processingJobs: [validJob, { ...validJob, name: 'Second', domain: 'stmarys' }],
+        processingJobs: [validJob, { ...validJob, name: 'Second', domains: ['stmarys'] }],
       });
       assert.equal(result.valid, false);
-      assert.equal(result.field, 'processingJobs[1].domain');
+      assert.equal(result.field, 'processingJobs[1].domains');
     });
 
     it('should not throw on invalid payload', () => {
@@ -842,7 +843,7 @@ describe('Settings Module - Unit Tests', () => {
       id: '6f1d2c1e-1c2a-4a3b-8c4d-9e0f1a2b3c4d',
       name: 'Test Job',
       schoolName: 'Test School',
-      domain: 'example.edu.au',
+      domains: ['example.edu.au'],
       searchTerms: ['canteen roster'],
     };
 
@@ -913,7 +914,7 @@ describe('Settings Module - Unit Tests', () => {
       id: '6f1d2c1e-1c2a-4a3b-8c4d-9e0f1a2b3c4d',
       name: 'Test Job',
       schoolName: 'Test School',
-      domain: 'example.edu.au',
+      domains: ['example.edu.au'],
       searchTerms: [],
     };
 
@@ -954,7 +955,7 @@ describe('Settings Module - Unit Tests', () => {
       const result = toSettingsJson(connection);
       assert.ok(Array.isArray(result.processingJobs));
       assert.equal(result.processingJobs.length, 1);
-      assert.equal(result.processingJobs[0].domain, 'domain1.edu.au');
+      assert.deepEqual(result.processingJobs[0].domains, ['domain1.edu.au']);
       assert.deepEqual(result.processingJobs[0].searchTerms, ['domain2.edu.au']);
       assert.ok(!('searchDomains' in result));
     });

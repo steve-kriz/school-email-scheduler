@@ -1208,7 +1208,7 @@ describe('Connections Functions', () => {
         userId: 'google#123',
         email: 'test@example.com',
         processingJobs: [
-          { id: 'job-1', name: 'Newsletters', schoolName: 'My School', domain: 'myschool.edu.au', searchTerms: [] },
+          { id: 'job-1', name: 'Newsletters', schoolName: 'My School', domains: ['myschool.edu.au'], searchTerms: [] },
         ],
         hasRefreshToken: true,
         refreshTokenEnc: 'should-not-appear',
@@ -1260,7 +1260,7 @@ describe('Connections Functions', () => {
         id: 'fallback-1',
         name: 'Fallback',
         schoolName: 'Fallback School',
-        domain: 'fallback.edu.au',
+        domains: ['fallback.edu.au'],
         searchTerms: [],
       };
       const json = toPublicJson(null, { email: 'fallback@example.com', processingJobs: [fallbackJob] });
@@ -1273,7 +1273,7 @@ describe('Connections Functions', () => {
         id: 'primary-1',
         name: 'Primary',
         schoolName: 'Primary School',
-        domain: 'primary.edu.au',
+        domains: ['primary.edu.au'],
         searchTerms: [],
       };
       const json = toPublicJson(

@@ -176,8 +176,8 @@ function mail({ id, from, subject, body = 'Details inside.', receivedAt, matchTo
   return { id, from, subject, body, receivedAt, matchTokens, events };
 }
 
-function makeJob(id, { name, schoolName, domain, searchTerms = [] }) {
-  return { id, name, schoolName, domain, searchTerms };
+function makeJob(id, { name, schoolName, domains = [], searchTerms = [] }) {
+  return { id, name, schoolName, domains, searchTerms };
 }
 
 /**
@@ -246,7 +246,7 @@ describe('Feature: Per-job Gmail search and per-job event attribution (TASK-056 
       const job = makeJob('job-a', {
         name: "St Mary's",
         schoolName: "St Mary's Primary",
-        domain: 'stmarys.edu.au',
+        domains: ['stmarys.edu.au'],
         searchTerms: ['Year 4', 'Canteen'],
       });
       // And the scan watermark resolves to 2026-05-19
@@ -267,7 +267,7 @@ describe('Feature: Per-job Gmail search and per-job event attribution (TASK-056 
 
   describe('Scenario: A domain-only job produces byte-identical output to the old single-domain query', () => {
     it('Given a job with only a domain, When the query is built, Then it is exactly "(from:@stmarys.edu.au) after:2026/05/19"', () => {
-      const job = makeJob('job-a', { name: "St Mary's", schoolName: '', domain: 'stmarys.edu.au', searchTerms: [] });
+      const job = makeJob('job-a', { name: "St Mary's", schoolName: '', domains: ['stmarys.edu.au'], searchTerms: [] });
       const since = new Date('2026-05-19T00:00:00.000Z');
 
       const query = buildJobQuery({ job, since });
@@ -302,8 +302,8 @@ describe('Feature: Per-job Gmail search and per-job event attribution (TASK-056 
       // When a scheduled scan runs
       const { result, gmail, store, patches } = await scan({
         jobs: [
-          makeJob('job-a', { name: "St Mary's", schoolName: "St Mary's Primary", domain: 'stmarys.edu.au' }),
-          makeJob('job-b', { name: 'Riverside High', schoolName: 'Riverside High', domain: 'riverside.edu.au' }),
+          makeJob('job-a', { name: "St Mary's", schoolName: "St Mary's Primary", domains: ['stmarys.edu.au'] }),
+          makeJob('job-b', { name: 'Riverside High', schoolName: 'Riverside High', domains: ['riverside.edu.au'] }),
         ],
         mailbox,
         lastScanAt: '2026-05-21T00:00:00.000Z',
@@ -372,10 +372,10 @@ describe('Feature: Per-job Gmail search and per-job event attribution (TASK-056 
           makeJob('job-a', {
             name: "St Mary's",
             schoolName: "St Mary's Primary",
-            domain: 'stmarys.edu.au',
+            domains: ['stmarys.edu.au'],
             searchTerms: ['Tuckshop'],
           }),
-          makeJob('job-b', { name: 'Riverside High', schoolName: 'Riverside High', domain: 'riverside.edu.au' }),
+          makeJob('job-b', { name: 'Riverside High', schoolName: 'Riverside High', domains: ['riverside.edu.au'] }),
         ],
         mailbox,
         lastScanAt: '2026-05-21T00:00:00.000Z',
@@ -421,8 +421,8 @@ describe('Feature: Per-job Gmail search and per-job event attribution (TASK-056 
           events: [{ title: 'Book Fair', startsAt: '2026-06-10T00:00:00.000Z' }],
         }),
       ];
-      const jobA = makeJob('job-a', { name: 'A', schoolName: 'Shared School', domain: 'shared.edu.au' });
-      const jobB = makeJob('job-b', { name: 'B', schoolName: 'Shared School', domain: 'shared.edu.au' });
+      const jobA = makeJob('job-a', { name: 'A', schoolName: 'Shared School', domains: ['shared.edu.au'] });
+      const jobB = makeJob('job-b', { name: 'B', schoolName: 'Shared School', domains: ['shared.edu.au'] });
       const store = new FakeEventsStore();
 
       // When a scan runs
@@ -495,7 +495,7 @@ describe('Feature: Per-job Gmail search and per-job event attribution (TASK-056 
 
       // When a later scan re-extracts the same event under job "job-b"
       await scan({
-        jobs: [makeJob('job-b', { name: 'B', schoolName: 'Shared School', domain: 'shared.edu.au' })],
+        jobs: [makeJob('job-b', { name: 'B', schoolName: 'Shared School', domains: ['shared.edu.au'] })],
         mailbox,
         store,
         lastScanAt: '2026-06-04T00:00:00.000Z',
@@ -530,9 +530,9 @@ describe('Feature: Per-job Gmail search and per-job event attribution (TASK-056 
       const { result, gmail, store, patches, locks } = await scan({
         // Given three processing jobs "job-a", "job-b" and "job-c"
         jobs: [
-          makeJob('job-a', { name: 'A', schoolName: 'A School', domain: 'a.edu.au' }),
-          makeJob('job-b', { name: 'B', schoolName: 'B School', domain: 'b.edu.au' }),
-          makeJob('job-c', { name: 'C', schoolName: 'C School', domain: 'c.edu.au' }),
+          makeJob('job-a', { name: 'A', schoolName: 'A School', domains: ['a.edu.au'] }),
+          makeJob('job-b', { name: 'B', schoolName: 'B School', domains: ['b.edu.au'] }),
+          makeJob('job-c', { name: 'C', schoolName: 'C School', domains: ['c.edu.au'] }),
         ],
         mailbox,
         // And the stored lastScanAt is "2026-05-21" so the query floor is 2026-05-19
@@ -593,8 +593,8 @@ describe('Feature: Per-job Gmail search and per-job event attribution (TASK-056 
       // which is fewer than job-a's mailbox holds - a real truncation.
       const { result, patches } = await scan({
         jobs: [
-          makeJob('job-a', { name: 'A', schoolName: 'A School', domain: 'a.edu.au' }),
-          makeJob('job-b', { name: 'B', schoolName: 'B School', domain: 'b.edu.au' }),
+          makeJob('job-a', { name: 'A', schoolName: 'A School', domains: ['a.edu.au'] }),
+          makeJob('job-b', { name: 'B', schoolName: 'B School', domains: ['b.edu.au'] }),
         ],
         mailbox,
         maxMessages: 2,
@@ -619,8 +619,8 @@ describe('Feature: Per-job Gmail search and per-job event attribution (TASK-056 
 
       const { result, gmail, store } = await scan({
         jobs: [
-          makeJob('job-a', { name: 'A', schoolName: '', domain: '', searchTerms: [] }),
-          makeJob('job-b', { name: 'B', schoolName: 'Riverside High', domain: 'riverside.edu.au' }),
+          makeJob('job-a', { name: 'A', schoolName: '', domains: [], searchTerms: [] }),
+          makeJob('job-b', { name: 'B', schoolName: 'Riverside High', domains: ['riverside.edu.au'] }),
         ],
         mailbox,
         lastScanAt: '2026-05-21T00:00:00.000Z',
@@ -657,8 +657,8 @@ describe('Feature: Per-job Gmail search and per-job event attribution (TASK-056 
     it('Given every job is blank, When a scan runs, Then not_configured is returned with no lock and no Gmail or Anthropic call', async () => {
       const { result, gmail, anthropic, locks, patches } = await scan({
         jobs: [
-          makeJob('job-a', { name: 'A', schoolName: '', domain: '', searchTerms: [] }),
-          makeJob('job-b', { name: 'B', schoolName: '   ', domain: ' ', searchTerms: ['  '] }),
+          makeJob('job-a', { name: 'A', schoolName: '', domains: [], searchTerms: [] }),
+          makeJob('job-b', { name: 'B', schoolName: '   ', domains: [], searchTerms: ['  '] }),
         ],
       });
 
@@ -686,9 +686,9 @@ describe('Feature: Per-job Gmail search and per-job event attribution (TASK-056 
 
       const { result, gmail, store, patches } = await scan({
         jobs: [
-          makeJob('job-a', { name: 'A', schoolName: 'A School', domain: 'a.edu.au' }),
-          makeJob('job-b', { name: 'B', schoolName: 'B School', domain: 'b.edu.au' }),
-          makeJob('job-c', { name: 'C', schoolName: 'C School', domain: 'c.edu.au' }),
+          makeJob('job-a', { name: 'A', schoolName: 'A School', domains: ['a.edu.au'] }),
+          makeJob('job-b', { name: 'B', schoolName: 'B School', domains: ['b.edu.au'] }),
+          makeJob('job-c', { name: 'C', schoolName: 'C School', domains: ['c.edu.au'] }),
         ],
         mailbox,
         lastScanAt: '2026-05-21T00:00:00.000Z',
@@ -725,9 +725,9 @@ describe('Feature: Per-job Gmail search and per-job event attribution (TASK-056 
       let tokenMints = 0;
       const { result, gmail, patches, locks } = await scan({
         jobs: [
-          makeJob('job-a', { name: 'A', schoolName: 'A School', domain: 'a.edu.au' }),
-          makeJob('job-b', { name: 'B', schoolName: 'B School', domain: 'b.edu.au' }),
-          makeJob('job-c', { name: 'C', schoolName: 'C School', domain: 'c.edu.au' }),
+          makeJob('job-a', { name: 'A', schoolName: 'A School', domains: ['a.edu.au'] }),
+          makeJob('job-b', { name: 'B', schoolName: 'B School', domains: ['b.edu.au'] }),
+          makeJob('job-c', { name: 'C', schoolName: 'C School', domains: ['c.edu.au'] }),
         ],
         mailbox,
         lastScanAt: '2026-05-21T00:00:00.000Z',
@@ -764,7 +764,7 @@ describe('Feature: Per-job Gmail search and per-job event attribution (TASK-056 
   describe('Scenario: A manual scan splits its message budget across jobs', () => {
     it('Given five jobs and a manual cap of 50, When the scan runs, Then each job asks Gmail for at most 10 messages', async () => {
       const jobs = ['a', 'b', 'c', 'd', 'e'].map((key) =>
-        makeJob(`job-${key}`, { name: key.toUpperCase(), schoolName: `${key} School`, domain: `${key}.edu.au` })
+        makeJob(`job-${key}`, { name: key.toUpperCase(), schoolName: `${key} School`, domains: [`${key}.edu.au`] })
       );
 
       const { gmail } = await scan({ jobs, mode: 'manual', lastScanAt: '2026-05-21T00:00:00.000Z' });
@@ -784,7 +784,7 @@ describe('Feature: Per-job Gmail search and per-job event attribution (TASK-056 
       const job = makeJob('job-a', {
         name: 'A',
         schoolName: '',
-        domain: '',
+        domains: [],
         searchTerms: ['Year "4" OR from:@evil.example'],
       });
 

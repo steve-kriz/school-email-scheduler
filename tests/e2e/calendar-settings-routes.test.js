@@ -115,7 +115,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
     id: '6f1d2c1e-1c2a-4a3b-8c4d-9e0f1a2b3c4d',
     name: 'Newsletters',
     schoolName: 'Test School',
-    domain: 'school.edu.au',
+    domains: ['school.edu.au'],
     searchTerms: [],
   };
 
@@ -124,7 +124,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
     return {
       name: 'Newsletters',
       schoolName: 'Test School',
-      domain: 'school.edu.au',
+      domains: ['school.edu.au'],
       searchTerms: [],
       ...overrides,
     };
@@ -255,7 +255,8 @@ describe('Calendar Settings Routes - E2E Tests', () => {
       assert.ok(Array.isArray(body.processingJobs));
       assert.equal(body.processingJobs.length, 1);
       assert.equal(body.processingJobs[0].id, 'default');
-      assert.equal(body.processingJobs[0].domain, 'domain1.edu.au');
+      assert.deepEqual(body.processingJobs[0].domains, ['domain1.edu.au']);
+      assert.ok(!('domain' in body.processingJobs[0]), 'the singular key leaked (TASK-059)');
       assert.deepEqual(body.processingJobs[0].searchTerms, ['domain2.edu.au']);
       assert.ok(!('searchDomains' in body));
     });
@@ -352,7 +353,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
     it('should return 400 when processingJobs exceeds 20 jobs', async () => {
       const cookie = makeSessionCookie();
       const jobs = Array.from({ length: 21 }, (_, i) =>
-        jobBody({ name: `Job ${i}`, domain: `domain${i}.edu.au` })
+        jobBody({ name: `Job ${i}`, domains: [`domain${i}.edu.au`] })
       );
       const event = makeEvent('PUT', '/calendar/api/settings', {
         processingJobs: jobs,
@@ -377,13 +378,13 @@ describe('Calendar Settings Routes - E2E Tests', () => {
 
       for (const badDomain of testCases) {
         const event = makeEvent('PUT', '/calendar/api/settings', {
-          processingJobs: [jobBody({ domain: badDomain })],
+          processingJobs: [jobBody({ domains: [badDomain] })],
         }, cookie);
 
         const response = await handler(event, {}, { env: defaultEnv });
         assert.equal(response.statusCode, 400, `Should reject domain: ${badDomain}`);
         const body = JSON.parse(response.body);
-        assert.equal(body.field, 'processingJobs[0].domain');
+        assert.equal(body.field, 'processingJobs[0].domains');
       }
     });
 
@@ -393,13 +394,13 @@ describe('Calendar Settings Routes - E2E Tests', () => {
 
       for (const host of publicHosts) {
         const event = makeEvent('PUT', '/calendar/api/settings', {
-          processingJobs: [jobBody({ domain: host })],
+          processingJobs: [jobBody({ domains: [host] })],
         }, cookie);
 
         const response = await handler(event, {}, { env: defaultEnv });
         assert.equal(response.statusCode, 400, `Should reject public host: ${host}`);
         const body = JSON.parse(response.body);
-        assert.equal(body.field, 'processingJobs[0].domain');
+        assert.equal(body.field, 'processingJobs[0].domains');
         assert.ok(body.error.includes(host));
       }
     });
@@ -416,7 +417,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
 
       for (const form of testForms) {
         const event = makeEvent('PUT', '/calendar/api/settings', {
-          processingJobs: [jobBody({ domain: form })],
+          processingJobs: [jobBody({ domains: [form] })],
         }, cookie);
 
         const response = await handler(event, {}, {
@@ -427,7 +428,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
         assert.equal(response.statusCode, 200, `Should accept domain form: ${form}`);
         const body = JSON.parse(response.body);
         assert.deepEqual(
-          body.processingJobs.map((entry) => entry.domain),
+          body.processingJobs.flatMap((entry) => entry.domains),
           ['example.edu.au']
         );
       }
@@ -505,7 +506,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
       const spy = makeEchoUpdateItem({ hasRefreshToken: true });
 
       const event = makeEvent('PUT', '/calendar/api/settings', {
-        processingJobs: [jobBody({ name: 'Updated', schoolName: 'Updated School', domain: 'updated.edu.au' })],
+        processingJobs: [jobBody({ name: 'Updated', schoolName: 'Updated School', domains: ['updated.edu.au'] })],
       }, cookie);
 
       const response = await handler(event, {}, {
@@ -517,7 +518,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
       const body = JSON.parse(response.body);
       assert.equal(body.processingJobs.length, 1);
       assert.equal(body.processingJobs[0].schoolName, 'Updated School');
-      assert.equal(body.processingJobs[0].domain, 'updated.edu.au');
+      assert.deepEqual(body.processingJobs[0].domains, ['updated.edu.au']);
       assert.match(
         body.processingJobs[0].id,
         /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
@@ -533,7 +534,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
       assert.ok(Array.isArray(written.processingJobs));
       assert.ok(!(written.processingJobs instanceof Set));
       assert.deepEqual(Object.keys(written.processingJobs[0]).sort(), [
-        'domain',
+        'domains',
         'id',
         'name',
         'schoolName',
@@ -620,7 +621,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
           jobBody({
             name: 'Secret Job Name',
             schoolName: 'Secret School Name',
-            domain: 'secretdomain.edu.au',
+            domains: ['secretdomain.edu.au'],
             searchTerms: ['Secret Search Term'],
           }),
         ],
@@ -717,7 +718,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
       const longDomain = 'a'.repeat(64) + '.' + 'b'.repeat(64) + '.' + 'c'.repeat(64) + '.' + 'd'.repeat(64) + '.com';
 
       const event = makeEvent('PUT', '/calendar/api/settings', {
-        processingJobs: [jobBody({ domain: longDomain })],
+        processingJobs: [jobBody({ domains: [longDomain] })],
       }, cookie);
 
       const response = await handler(event, {}, { env: defaultEnv });
@@ -727,7 +728,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
     it('should reject domain with trailing dot', async () => {
       const cookie = makeSessionCookie();
       const event = makeEvent('PUT', '/calendar/api/settings', {
-        processingJobs: [jobBody({ domain: 'example.edu.au.' })],
+        processingJobs: [jobBody({ domains: ['example.edu.au.'] })],
       }, cookie);
 
       const response = await handler(event, {}, { env: defaultEnv });
@@ -737,7 +738,7 @@ describe('Calendar Settings Routes - E2E Tests', () => {
     it('should reject domain that is only a wildcard', async () => {
       const cookie = makeSessionCookie();
       const event = makeEvent('PUT', '/calendar/api/settings', {
-        processingJobs: [jobBody({ domain: '*.' })],
+        processingJobs: [jobBody({ domains: ['*.'] })],
       }, cookie);
 
       const response = await handler(event, {}, { env: defaultEnv });
@@ -755,18 +756,63 @@ describe('Calendar Settings Routes - E2E Tests', () => {
       assert.equal(JSON.parse(response.body).field, 'processingJobs');
     });
 
-    it('should reject a job whose domain is null, a number or an array', async () => {
+    // TASK-059: `domains` is a LIST and is OPTIONAL. A non-list container is
+    // refused outright; null/absent/[] are accepted and store as [].
+    it('should reject a job whose domains is a number, a bare string, an object or true', async () => {
       const cookie = makeSessionCookie();
-      const testCases = [null, 123, ['example.edu.au'], { domain: 'example.edu.au' }];
+      const testCases = [123, 'example.edu.au', { domain: 'example.edu.au' }, true];
 
-      for (const domain of testCases) {
+      for (const domains of testCases) {
         const event = makeEvent('PUT', '/calendar/api/settings', {
-          processingJobs: [jobBody({ domain })],
+          processingJobs: [jobBody({ domains })],
         }, cookie);
 
         const response = await handler(event, {}, { env: defaultEnv });
-        assert.equal(response.statusCode, 400, `Should reject domain: ${JSON.stringify(domain)}`);
-        assert.equal(JSON.parse(response.body).field, 'processingJobs[0].domain');
+        assert.equal(response.statusCode, 400, `Should reject domains: ${JSON.stringify(domains)}`);
+        const body = JSON.parse(response.body);
+        assert.equal(body.field, 'processingJobs[0].domains');
+        assert.equal(body.error, 'School email domains must be a list');
+      }
+    });
+
+    it('should reject a job whose domains list holds null, a number or a nested array', async () => {
+      const cookie = makeSessionCookie();
+
+      for (const entry of [null, 123, ['example.edu.au']]) {
+        const event = makeEvent('PUT', '/calendar/api/settings', {
+          processingJobs: [jobBody({ domains: [entry] })],
+        }, cookie);
+
+        const response = await handler(event, {}, { env: defaultEnv });
+        assert.equal(response.statusCode, 400, `Should reject entry: ${JSON.stringify(entry)}`);
+        const body = JSON.parse(response.body);
+        assert.equal(body.field, 'processingJobs[0].domains');
+        assert.equal(body.error, 'A school email domain cannot be blank');
+      }
+    });
+
+    it('should ACCEPT a job with no domains at all (TASK-059 made the list optional)', async () => {
+      const cookie = makeSessionCookie();
+      // Local echo stub - no DynamoDB client, no credentials, no network.
+      const updateItem = async ({ updates }) => {
+        const row = { userId: connectionUserId(testGoogleSub), email: testEmail };
+        for (const [attribute, value] of Object.entries(updates || {})) {
+          if (value === REMOVE_ATTRIBUTE) delete row[attribute];
+          else row[attribute] = value;
+        }
+        return row;
+      };
+
+      for (const domains of [undefined, null, []]) {
+        const payload = jobBody();
+        delete payload.domains;
+        if (domains !== undefined) payload.domains = domains;
+
+        const event = makeEvent('PUT', '/calendar/api/settings', { processingJobs: [payload] }, cookie);
+        const response = await handler(event, {}, { env: defaultEnv, updateItem });
+
+        assert.equal(response.statusCode, 200, `domains: ${JSON.stringify(domains)}`);
+        assert.deepEqual(JSON.parse(response.body).processingJobs[0].domains, []);
       }
     });
 
