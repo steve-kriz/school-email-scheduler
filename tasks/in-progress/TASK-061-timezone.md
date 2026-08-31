@@ -1,10 +1,11 @@
 ---
 id: TASK-061
 title: timezone
-status: defining
+status: in-progress
+agent: orchestrator-session-1
 created: 2026-08-31T00:20:25.539Z
-updated: 2026-08-31T11:30:00Z
-question: Should the time zone selector list every IANA zone (Intl.supportedValuesOf('timeZone'), ~400 entries, needs a fallback for browsers that lack it), or a short curated list of the zones this school tool actually serves (e.g. the Australian zones plus UTC) with the stored zone appended if it is outside that list? And is this strictly about when the scan job fires, or should the chosen zone also drive how event times are DISPLAYED on the calendar (which renders in the browser's own zone today)?
+updated: 2026-08-31T11:40:00Z
+question: RESOLVED by the user directly. (1) Full IANA list, not a curated one - use Intl.supportedValuesOf("timeZone") (~400 entries) as the option source. Since that API is missing on some older browsers, fall back to a small hard-coded list (at minimum "UTC" plus the stored/detected zone itself, so the page never renders with zero usable options) when it throws or is undefined - see the added Acceptance Criteria under "Timezone option source" below. (2) Scan schedule only - this does NOT touch how event times are displayed on the calendar; the calendar keeps rendering in the browser's own timezone exactly as it does today. Do not touch anything under TASK-010's calendar-display code.
 ---
 
 ## Description
@@ -31,6 +32,24 @@ rejected by the schedule endpoint, leaving the user with a saved setting and a
 schedule that was never updated.
 
 ## Acceptance Criteria
+
+### Timezone option source (resolved: full IANA list, not curated)
+- [ ] Options are built from `Intl.supportedValuesOf("timeZone")` when that
+      function exists (modern Chrome/Edge/Firefox/Safari) - every IANA zone it
+      returns becomes one option, value and label both the zone id (e.g.
+      `Australia/Sydney`), sorted alphabetically.
+- [ ] When `Intl.supportedValuesOf` is missing or throws, fall back to a small
+      hard-coded list that includes at minimum `"UTC"` and every stored/detected
+      zone actually needed at render time - the page must never end up with an
+      empty or single-`""`-option select on an older browser.
+- [ ] This is a large option list (~400 entries): a plain native `<select>` is
+      sufficient (browsers already make a long native select scrollable/typeahead
+      capable) - do not add a search box, a third-party combobox widget, or any
+      new dependency for this.
+- [ ] The stored (or detected) zone being outside the `Intl.supportedValuesOf`
+      list is still handled by the existing "add it as an option if missing" rule
+      below - this matters most on the fallback path.
+
 - [ ] The time zone field in `settings.html` is a `<select class="field-input">`
       following the same markup pattern as `#schedule-frequency-input` and
       `#schedule-day-input`, instead of `<input type="text">`.
