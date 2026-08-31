@@ -1440,7 +1440,17 @@ describe('Feature: The settings page', () => {
       assert.equal(doc.getElementById('job-0-schoolName').value, 'Ashfield Public School');
       assert.equal(doc.getElementById('job-0-domains').value, 'ashfield-p.schools.nsw.edu.au');
       assert.equal(doc.getElementById('processing-jobs-empty').hidden, true);
+      // A <select> since TASK-061: the stored zone is the SELECTED option, and
+      // it is one of the options rather than a value with nothing behind it.
+      assert.equal(doc.getElementById('timezone-input').tagName, 'SELECT');
       assert.equal(doc.getElementById('timezone-input').value, 'Australia/Sydney');
+      assert.ok(
+        doc
+          .getElementById('timezone-input')
+          .querySelectorAll('option')
+          .some((option) => option.value === 'Australia/Sydney'),
+        'the stored zone is not one of the offered options'
+      );
       assert.equal(doc.getElementById('schedule-hour-input').value, '7');
       assert.equal(doc.getElementById('schedule-enabled-input').checked, false);
       assert.match(textOf(doc.getElementById('settings-summary')), /Watching mail for Ashfield Public School/);

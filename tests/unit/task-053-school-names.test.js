@@ -579,7 +579,8 @@ describe('TASK-053 unit (TASK-057 shape): the settings summary joins job names a
     doc.register('settings-form', 'form');
     doc.register('processing-jobs', 'div');
     doc.register('processing-jobs-empty', 'p');
-    doc.register('timezone-input', 'input');
+    // A <select> since TASK-061; settings.js fills its options through el().
+    doc.register('timezone-input', 'select');
     doc.register('schedule-hour-input', 'input');
     doc.register('schedule-frequency-input', 'input');
     doc.register('schedule-enabled-input', 'input');

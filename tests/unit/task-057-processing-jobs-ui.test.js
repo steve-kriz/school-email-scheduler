@@ -102,7 +102,9 @@ function makeSettingsDoc() {
         <select id="schedule-frequency-input" class="field-input"><option value="daily">Daily</option></select>
         <select id="schedule-day-input" class="field-input"><option value="0">Sunday</option></select>
         <input id="schedule-hour-input" class="field-input" type="number" />
-        <input id="timezone-input" class="field-input" type="text" />
+        <!-- A <select> since TASK-061, seeded with the same static UTC option
+             the shipped page carries; settings.js refills it on every load. -->
+        <select id="timezone-input" class="field-input"><option value="UTC">UTC</option></select>
         <p id="error-scheduleEnabled" class="field-error" hidden></p>
         <p id="error-scheduleFrequency" class="field-error" hidden></p>
         <p id="error-scheduleHour" class="field-error" hidden></p>
@@ -1157,6 +1159,9 @@ describe('TASK-057 unit: settings.html ships the processing-jobs section', () =>
       assert.notEqual(doc.getElementById(id), null, `${id} went missing`);
     }
     assert.equal(doc.getElementById('save-settings').getAttribute('type'), 'submit');
+    // TASK-061 turned the free-text zone box into a selector; the id, the label
+    // and the error slot above are deliberately unchanged.
+    assert.equal(doc.getElementById('timezone-input').tagName, 'SELECT');
     assert.equal(doc.body.getAttribute('data-page'), 'settings', 'the bootstrap contract changed');
   });
 
