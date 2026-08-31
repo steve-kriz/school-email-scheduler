@@ -100,7 +100,7 @@ variable "anthropic_model" {
   description = <<-EOT
     Anthropic model id used to extract calendar events from school emails.
 
-    Default is claude-opus-5 (the current Opus, 1M context, $5/$25 per MTok).
+    Default is claude-haiku-4-5 (the current Opus, 1M context, $5/$25 per MTok).
     claude-sonnet-5 is the cheaper option ($3/$15 per MTok) and gives near-Opus
     quality on this class of structured-extraction task, so it is a reasonable
     swap for cost-sensitive environments.
@@ -109,7 +109,7 @@ variable "anthropic_model" {
     -20250514; dated aliases are not valid here and will fail at call time.
   EOT
   type        = string
-  default     = "claude-opus-5"
+  default     = "claude-haiku-4-5"
 }
 
 variable "tags" {
