@@ -290,10 +290,14 @@ export function buildQuery({ searchDomains, since = null, sinceDays = DEFAULT_SI
  * Same shape-tolerance as `toDomainList` (JS `Set` from the document client,
  * `{ SS: [...] }` from the low-level one, a plain array, or a lone string), but
  * deliberately NOT the same normalisation: a search term is the user's own free
- * text, so it is neither lower-cased nor split on commas - "Year 4, Kindy" is one
- * phrase the user typed, and splitting it would search for something they never
- * asked for. settings.mjs (TASK-055) owns the validation rules; this only
- * tolerates whatever is in the table.
+ * text, so it is not lower-cased. Nor is it split on commas HERE - this function
+ * reads what is stored and each stored entry is already one whole phrase; a term
+ * is split, if at all, where it is ENTERED. The settings UI (TASK-060) treats a
+ * comma as the delimiter in its search-terms field and stores the pieces
+ * separately, so a stored entry containing a comma is a legacy value from before
+ * that change, and re-splitting it here would search for something the table does
+ * not say. settings.mjs (TASK-055) owns the validation rules; this only tolerates
+ * whatever is in the table.
  *
  * @param {unknown} value
  * @returns {string[]} Trimmed, non-blank phrases, in the stored order.
