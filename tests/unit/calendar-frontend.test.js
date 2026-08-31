@@ -1102,14 +1102,27 @@ describe('TASK-010 unit: settings.js helpers', () => {
   // TASK-057 replaced the two split-on-punctuation textareas with one editable
   // row per job, so `parseDomainList`/`formatDomainList` are gone. Their
   // equivalents in the new shape are the row normaliser and the row-to-payload
-  // builder: one field is one value, trimmed on the way out and never split.
-  it('normalises a stored list into editable rows without splitting a single field', () => {
+  // builder. TASK-059 made `domain` a `domains` LIST and TASK-060 renders that
+  // list into one comma-separated input, so the splitting rule moved rather
+  // than disappearing: `toEditableJobs` still never splits - it keeps whatever
+  // list was stored - and `splitCommaList` owns the one place a comma matters.
+  it('normalises a stored list into editable rows, keeping the stored list as a list', () => {
     const rows = settings.toEditableJobs([
-      { id: 'job-1', name: 'Ashfield', schoolName: 'Ashfield PS', domain: 'a.edu.au, b.edu.au', searchTerms: ['x'] },
+      {
+        id: 'job-1',
+        name: 'Ashfield',
+        schoolName: 'Ashfield PS',
+        domains: ['a.edu.au', 'b.edu.au'],
+        searchTerms: ['x'],
+      },
     ]);
     assert.equal(rows.length, 1);
-    assert.equal(rows[0].domain, 'a.edu.au, b.edu.au', 'one field is one value - it is never comma-split');
+    assert.deepEqual(rows[0].domains, ['a.edu.au', 'b.edu.au'], 'a stored list is kept entry-for-entry');
+    assert.equal('domain' in rows[0], false, 'the superseded singular key survived on an editable row');
     assert.deepEqual(rows[0].searchTerms, ['x']);
+    // A stored value that is not a list at all - a legacy `domain` scalar, a
+    // null - is no entries, so the field renders empty rather than throwing.
+    assert.deepEqual(settings.toEditableJobs([{ domains: 'a.edu.au, b.edu.au' }])[0].domains, []);
     // Values reach an input's `value` untrimmed: trimming what the user is
     // about to edit would move their caret. The trim happens on the way out.
     assert.equal(settings.toEditableJobs([{ name: '  Ashfield  ' }])[0].name, '  Ashfield  ');
@@ -1119,28 +1132,28 @@ describe('TASK-010 unit: settings.js helpers', () => {
     assert.deepEqual(settings.toEditableJobs(null), []);
     assert.deepEqual(settings.toEditableJobs('Ashfield'), []);
     assert.deepEqual(settings.toEditableJobs(undefined), []);
-    const blank = { id: '', name: '', schoolName: '', domain: '', searchTerms: [] };
+    const blank = { id: '', name: '', schoolName: '', domains: [], searchTerms: [] };
     assert.deepEqual(settings.toEditableJobs([null, 7]), [blank, blank]);
     assert.deepEqual(settings.emptyProcessingJob(), blank);
   });
 
-  it('trims on the way out, drops blank terms, and never invents an id', () => {
+  it('trims on the way out, drops blank list entries, and never invents an id', () => {
     assert.deepEqual(
       settings.buildJobsPayload([
         {
           id: '  job-1  ',
           name: ' Ashfield ',
           schoolName: ' Ashfield PS ',
-          domain: ' a.edu.au ',
+          domains: [' a.edu.au ', '  ', 7],
           searchTerms: [' x ', '  ', 7],
         },
-        { id: '', key: 'row-2', name: 'Beta', schoolName: 'Beta PS', domain: 'b.edu.au', searchTerms: [] },
+        { id: '', key: 'row-2', name: 'Beta', schoolName: 'Beta PS', domains: ['b.edu.au'], searchTerms: [] },
       ]),
       [
-        { id: 'job-1', name: 'Ashfield', schoolName: 'Ashfield PS', domain: 'a.edu.au', searchTerms: ['x'] },
+        { id: 'job-1', name: 'Ashfield', schoolName: 'Ashfield PS', domains: ['a.edu.au'], searchTerms: ['x'] },
         // No `id` key at all for a row added this session, and the client-side
         // `key` is never sent.
-        { name: 'Beta', schoolName: 'Beta PS', domain: 'b.edu.au', searchTerms: [] },
+        { name: 'Beta', schoolName: 'Beta PS', domains: ['b.edu.au'], searchTerms: [] },
       ]
     );
     assert.deepEqual(settings.buildJobsPayload(null), []);
@@ -1149,7 +1162,12 @@ describe('TASK-010 unit: settings.js helpers', () => {
   it('always sends processingJobs, and omits the schedule fields left blank', () => {
     const payload = settings.buildSettingsPayload({
       processingJobs: [
-        { id: 'job-1', name: '  Ashfield  ', schoolName: '  Ashfield Public School  ', domain: 'ashfield.nsw.edu.au' },
+        {
+          id: 'job-1',
+          name: '  Ashfield  ',
+          schoolName: '  Ashfield Public School  ',
+          domains: ['ashfield.nsw.edu.au'],
+        },
       ],
       scheduleEnabled: false,
       scheduleFrequency: '',
@@ -1162,7 +1180,7 @@ describe('TASK-010 unit: settings.js helpers', () => {
           id: 'job-1',
           name: 'Ashfield',
           schoolName: 'Ashfield Public School',
-          domain: 'ashfield.nsw.edu.au',
+          domains: ['ashfield.nsw.edu.au'],
           searchTerms: [],
         },
       ],

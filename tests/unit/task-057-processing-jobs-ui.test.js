@@ -11,9 +11,12 @@
  *     driven DIRECTLY against a minimal hand-built container - including the two
  *     degenerate inputs (no container, a `processingJobs` that is not an array)
  *     the guards in the code exist for;
- *   - `createSettingsPage`'s list behaviour (add / add-term / remove-term /
- *     arm / confirm / cancel, and the client-side rejection path of `save`)
- *     driven through an INJECTED api client;
+ *   - `createSettingsPage`'s list behaviour (add / arm / confirm / cancel, and
+ *     the client-side rejection path of `save`) driven through an INJECTED api
+ *     client. The per-term add/remove controls TASK-057 shipped were REMOVED by
+ *     TASK-060: `domains` and `searchTerms` are one comma-separated input each,
+ *     so this file's assertions track that shape (see
+ *     `tests/unit/task-060-comma-separated-job-fields.test.js` for the parser);
  *   - the shipped `settings.html` and `styles.css` read as TEXT, because there
  *     is no CSS engine and no layout anywhere in this repo (see the docblocks in
  *     `tests/helpers/fake-dom.mjs` and `tests/helpers/css-text.mjs`).
@@ -54,7 +57,9 @@ const job = (overrides = {}) => ({
   id: 'job-1',
   name: 'Ashfield',
   schoolName: 'Ashfield Public School',
-  domain: 'ashfield.nsw.edu.au',
+  // TASK-059 renamed the singular `domain` to a `domains` LIST; TASK-060 renders
+  // that list into one comma-separated input.
+  domains: ['ashfield.nsw.edu.au'],
   searchTerms: [],
   ...overrides,
 });
@@ -184,7 +189,6 @@ describe('TASK-057 unit: validateProcessingJobsClient', () => {
   for (const [field, message] of [
     ['name', /name is required/i],
     ['schoolName', /school name is required/i],
-    ['domain', /domain is required/i],
   ]) {
     it(`reports a missing "${field}" as processingJobs[0].${field}`, () => {
       for (const blank of ['', '   ', undefined, null, 42]) {
@@ -195,6 +199,20 @@ describe('TASK-057 unit: validateProcessingJobsClient', () => {
       }
     });
   }
+
+  it('no longer requires a domain of any kind (TASK-059 made domains optional)', () => {
+    // TASK-057 shipped a "domain is required" pre-flight. TASK-059 made the
+    // field optional server-side and TASK-060 removed the client check, so an
+    // absent, empty or malformed `domains` is as unremarkable as an empty
+    // `searchTerms` - the coverage moves rather than disappearing.
+    for (const empty of [[], undefined, null, '', 'ashfield.nsw.edu.au', 42, {}]) {
+      assert.equal(
+        settings.validateProcessingJobsClient([job({ domains: empty })]),
+        null,
+        `domains = ${JSON.stringify(empty)} was refused locally`
+      );
+    }
+  });
 
   it('shapes the problem exactly like the server 400 body, so no adapter is needed', () => {
     const problem = settings.validateProcessingJobsClient([job({ name: '' })]);
@@ -237,13 +255,13 @@ describe('TASK-057 unit: validateProcessingJobsClient', () => {
   it('walks jobs in list order, so the reported problem is the topmost one on screen', () => {
     const problem = settings.validateProcessingJobsClient([
       job({ name: '' }),
-      job({ id: 'job-2', name: 'Beta', domain: '' }),
+      job({ id: 'job-2', name: 'Beta', domains: [] }),
     ]);
     assert.equal(problem.field, 'processingJobs[0].name');
   });
 
-  it('checks name -> schoolName -> domain within a job', () => {
-    const problem = settings.validateProcessingJobsClient([job({ schoolName: '', domain: '' })]);
+  it('checks name -> schoolName within a job, and stops there', () => {
+    const problem = settings.validateProcessingJobsClient([job({ schoolName: '', domains: [] })]);
     assert.equal(problem.field, 'processingJobs[0].schoolName');
   });
 
@@ -251,8 +269,12 @@ describe('TASK-057 unit: validateProcessingJobsClient', () => {
     // Domain shape, a public mail provider, string lengths, the job cap and the
     // search-term cap are ALL server-owned. A page that refused any of them
     // could refuse a value TASK-055 would have accepted.
-    assert.equal(settings.validateProcessingJobsClient([job({ domain: 'gmail.com' })]), null);
-    assert.equal(settings.validateProcessingJobsClient([job({ domain: 'not a domain at all' })]), null);
+    assert.equal(settings.validateProcessingJobsClient([job({ domains: ['gmail.com'] })]), null);
+    assert.equal(settings.validateProcessingJobsClient([job({ domains: ['not a domain at all'] })]), null);
+    assert.equal(
+      settings.validateProcessingJobsClient([job({ domains: Array.from({ length: 30 }, (_, i) => `d${i}.edu.au`) })]),
+      null
+    );
     assert.equal(settings.validateProcessingJobsClient([job({ name: 'A'.repeat(500) })]), null);
     assert.equal(
       settings.validateProcessingJobsClient(
@@ -305,11 +327,14 @@ describe('TASK-057 unit: fieldErrorId resolves the indexed form and nothing else
   });
 
   it('resolves processingJobs[<digits>].<allowlisted key> to the row slot', () => {
-    for (const key of ['name', 'schoolName', 'domain', 'searchTerms']) {
+    for (const key of ['name', 'schoolName', 'domains', 'searchTerms']) {
       assert.equal(settings.fieldErrorId(`processingJobs[0].${key}`), `error-job-0-${key}`);
       assert.equal(settings.fieldErrorId(`processingJobs[12].${key}`), `error-job-12-${key}`);
     }
-    assert.deepEqual([...settings.JOB_ERROR_FIELDS], ['name', 'schoolName', 'domain', 'searchTerms']);
+    // TASK-059/TASK-060: the singular `domain` is gone and is deliberately NOT
+    // kept as an alias, so it fails closed to the form line.
+    assert.deepEqual([...settings.JOB_ERROR_FIELDS], ['name', 'schoolName', 'domains', 'searchTerms']);
+    assert.equal(settings.fieldErrorId('processingJobs[0].domain'), settings.FORM_ERROR_ID);
   });
 
   it('FAILS CLOSED for a malformed index, an unlisted sub-field, or anything else', () => {
@@ -361,18 +386,27 @@ describe('TASK-057 unit: buildJobsPayload and buildSettingsPayload', () => {
   it('round-trips an existing server id and OMITS the key for a new row', () => {
     const out = settings.buildJobsPayload([
       job(),
-      { id: '', key: 'row-7', name: 'Beta', schoolName: 'Beta School', domain: 'beta.edu.au', searchTerms: [] },
+      { id: '', key: 'row-7', name: 'Beta', schoolName: 'Beta School', domains: ['beta.edu.au'], searchTerms: [] },
     ]);
     assert.equal(out[0].id, 'job-1');
     assert.equal('id' in out[1], false, 'a client temp id reached the payload');
     assert.equal('key' in out[1], false, 'the client-side row key reached the payload');
   });
 
-  it('trims all three strings and every term, and drops blank terms', () => {
+  it('trims both strings and every list entry, and drops blank entries', () => {
     const out = settings.buildJobsPayload([
-      { name: ' A ', schoolName: ' B ', domain: ' c.edu.au ', searchTerms: ['  newsletter  ', '', '   ', null] },
+      {
+        name: ' A ',
+        schoolName: ' B ',
+        domains: ['  c.edu.au  ', '', '   ', null],
+        searchTerms: ['  newsletter  ', '', '   ', null],
+      },
     ]);
-    assert.deepEqual(out, [{ name: 'A', schoolName: 'B', domain: 'c.edu.au', searchTerms: ['newsletter'] }]);
+    assert.deepEqual(out, [
+      { name: 'A', schoolName: 'B', domains: ['c.edu.au'], searchTerms: ['newsletter'] },
+    ]);
+    // And no singular `domain` key survives anywhere in the payload.
+    assert.equal('domain' in out[0], false, 'the superseded singular domain key was still sent');
   });
 
   it('saves an empty term list as [] and never as [""]', () => {
@@ -462,14 +496,17 @@ describe('TASK-057 unit: renderProcessingJobs', () => {
     assert.equal(container.childNodes.indexOf(rows[0]) < container.childNodes.indexOf(rows[1]), true);
   });
 
-  it('builds the three fields with their labels and their own error slots', () => {
+  it('builds the four fields with their labels and their own error slots', () => {
     const { doc, container } = makeJobsHost();
-    settings.renderProcessingJobs(doc, container, [job()]);
+    settings.renderProcessingJobs(doc, container, [job({ searchTerms: ['canteen', 'uniform shop'] })]);
 
+    // TASK-060: all four are the SAME `jobField` builder, so the two list-valued
+    // ones are indistinguishable from the two scalar ones apart from their value.
     for (const [key, label, value] of [
       ['name', 'Name', 'Ashfield'],
       ['schoolName', 'School name', 'Ashfield Public School'],
-      ['domain', 'Email domain', 'ashfield.nsw.edu.au'],
+      ['domains', 'Email domains (comma separated)', 'ashfield.nsw.edu.au'],
+      ['searchTerms', 'Search terms (comma separated)', 'canteen, uniform shop'],
     ]) {
       const input = doc.getElementById(`job-0-${key}`);
       assert.notEqual(input, null, `job-0-${key} is missing`);
@@ -492,6 +529,8 @@ describe('TASK-057 unit: renderProcessingJobs', () => {
       assert.equal(slot.hidden, true);
     }
 
+    // The id the removed `termsBlock` used to build by hand still exists, so a
+    // server 400 on processingJobs[0].searchTerms still lands somewhere.
     assert.notEqual(doc.getElementById('error-job-0-searchTerms'), null, 'the terms error slot is missing');
     const head = doc.getElementById('job-0-head');
     assert.equal(head.className, 'job__head');
@@ -520,12 +559,13 @@ describe('TASK-057 unit: renderProcessingJobs', () => {
   it('renders a hostile stored value as literal text, creating no element from it', () => {
     const { doc, container } = makeJobsHost();
     settings.renderProcessingJobs(doc, container, [
-      { id: 'job-1', name: XSS, schoolName: 'S', domain: 'd.edu.au', searchTerms: ['<script>alert(1)</script>'] },
+      { id: 'job-1', name: XSS, schoolName: 'S', domains: ['d.edu.au'], searchTerms: ['<script>alert(1)</script>'] },
     ]);
 
     assert.equal(valueOf(doc, 'job-0-name'), XSS);
     assert.equal(doc.getElementById('job-0-head').textContent, XSS);
-    assert.equal(valueOf(doc, 'job-0-term-0'), '<script>alert(1)</script>');
+    // The comma-joined string is still character data in an input `value`.
+    assert.equal(valueOf(doc, 'job-0-searchTerms'), '<script>alert(1)</script>');
     // Stronger than asserting escaped text: the element simply does not exist.
     assert.deepEqual(findElements(doc, 'img'), [], 'an IMG was created from a job name');
     assert.deepEqual(findElements(doc, 'script'), [], 'a SCRIPT was created from a search term');
@@ -578,37 +618,51 @@ describe('TASK-057 unit: renderProcessingJobs', () => {
     assert.equal(settings.renderProcessingJobs(stripped.doc, stripped.container, [job()]), 1);
   });
 
-  it('renders the search-terms sub-list with one row per term plus an add button', () => {
+  it('renders the search terms as ONE comma-joined input, not as a row per term', () => {
+    // TASK-060 replaced TASK-057's per-term row editor outright. The coverage
+    // below is the same ground - several stored terms reaching the page - read
+    // against the shape that replaced it.
     const { doc, container } = makeJobsHost();
     settings.renderProcessingJobs(doc, container, [job({ searchTerms: ['newsletter', 'canteen'] })]);
 
-    const list = doc.getElementById('job-0-terms');
-    assert.equal(list.tagName, 'UL');
-    assert.equal(list.className, 'job__terms');
-    assert.equal(list.querySelectorAll('.job__term').length, 2);
+    const input = doc.getElementById('job-0-searchTerms');
+    assert.equal(input.tagName, 'INPUT');
+    assert.equal(input.getAttribute('type'), 'text');
+    assert.equal(input.className, 'field-input');
+    assert.equal(input.getAttribute('data-job-index'), '0');
+    assert.equal(input.getAttribute('autocomplete'), 'off');
+    assert.equal(input.value, 'newsletter, canteen');
+    assert.equal(
+      doc.getElementById('processing-jobs').querySelectorAll('#job-0-searchTerms').length,
+      1,
+      'more than one search-terms input was rendered for one job'
+    );
 
-    for (const [index, value] of [['0', 'newsletter'], ['1', 'canteen']]) {
-      const input = doc.getElementById(`job-0-term-${index}`);
-      assert.equal(input.value, value);
-      assert.equal(input.className, 'field-input');
-      assert.equal(input.getAttribute('data-job-index'), '0');
-      assert.equal(input.getAttribute('data-term-index'), index);
-      const remove = doc.getElementById(`remove-job-0-term-${index}`);
-      assert.notEqual(remove, null, `remove-job-0-term-${index} is missing`);
-      assert.equal(textOf(remove), 'Remove term');
-      assert.equal(remove.className, 'btn btn-small');
-    }
-
-    const add = doc.getElementById('add-term-0');
-    assert.equal(textOf(add), 'Add search term');
-    assert.equal(add.getAttribute('type'), 'button');
+    // Every structure the removed editor built is gone.
+    assert.equal(doc.getElementById('job-0-terms'), null, 'the <ul> term list survived');
+    assert.equal(doc.getElementById('job-0-terms-label'), null);
+    assert.equal(doc.getElementById('job-0-term-0'), null);
+    assert.equal(doc.getElementById('add-term-0'), null, 'the Add search term button survived');
+    assert.equal(doc.getElementById('remove-job-0-term-0'), null);
+    assert.equal(doc.getElementById('processing-jobs').querySelectorAll('.job__term').length, 0);
+    assert.equal(doc.getElementById('processing-jobs').querySelectorAll('.job__terms').length, 0);
+    const built = new Set();
+    walk(doc.getElementById('processing-jobs'), (node) => built.add(node.tagName), false);
+    assert.equal(built.has('UL'), false, 'a <ul> term list was built');
+    assert.equal(built.has('LI'), false, 'an <li> term row was built');
+    assert.deepEqual(
+      doc.getElementById('processing-jobs').querySelectorAll('[data-term-index]'),
+      [],
+      'a node still carries data-term-index'
+    );
   });
 
-  it('renders zero term rows plus the add button for searchTerms: []', () => {
+  it('renders an EMPTY search-terms input for searchTerms: [], and no add button', () => {
     const { doc, container } = makeJobsHost();
     settings.renderProcessingJobs(doc, container, [job({ searchTerms: [] })]);
-    assert.equal(doc.getElementById('job-0-terms').querySelectorAll('.job__term').length, 0);
-    assert.notEqual(doc.getElementById('add-term-0'), null);
+    assert.equal(valueOf(doc, 'job-0-searchTerms'), '');
+    assert.equal(doc.getElementById('job-0-terms'), null);
+    assert.equal(doc.getElementById('add-term-0'), null);
     assert.equal(doc.getElementById('job-0-term-0'), null);
   });
 
@@ -663,7 +717,9 @@ describe('TASK-057 unit: renderProcessingJobs', () => {
     );
 
     const buttons = findElements(doc.getElementById('processing-jobs'), 'button');
-    assert.ok(buttons.length >= 3, `only ${buttons.length} buttons were built`);
+    // Two, since TASK-060 removed the per-term Add/Remove: Confirm remove and
+    // Cancel on the armed row.
+    assert.ok(buttons.length >= 2, `only ${buttons.length} buttons were built`);
     for (const button of buttons) {
       // type="button" is load-bearing: every one of these sits inside
       // #settings-form, where a default type="submit" would save on every tap.
@@ -718,8 +774,8 @@ describe('TASK-057 unit: the settings controller drives the list', () => {
     assert.equal(rowsIn(doc).length, 2);
     assert.equal(valueOf(doc, 'job-1-name'), '');
     assert.equal(valueOf(doc, 'job-1-schoolName'), '');
-    assert.equal(valueOf(doc, 'job-1-domain'), '');
-    assert.equal(doc.getElementById('job-1-terms').querySelectorAll('.job__term').length, 0);
+    assert.equal(valueOf(doc, 'job-1-domains'), '');
+    assert.equal(valueOf(doc, 'job-1-searchTerms'), '');
     assert.equal(page.state.focusFieldId, 'job-1-name');
   });
 
@@ -727,18 +783,20 @@ describe('TASK-057 unit: the settings controller drives the list', () => {
     const { doc, page } = await openPage([]);
     page.addJob();
     doc.getElementById('job-0-name').value = 'Ashfield';
-    doc.getElementById('job-0-domain').value = 'ashfield.nsw.edu.au';
+    doc.getElementById('job-0-domains').value = 'ashfield.nsw.edu.au, ashfieldpandc.org.au';
+    doc.getElementById('job-0-searchTerms').value = 'canteen, uniform shop';
     page.addJob();
 
     assert.equal(rowsIn(doc).length, 2);
     assert.equal(valueOf(doc, 'job-0-name'), 'Ashfield', 'the first row lost what was typed into it');
-    assert.equal(valueOf(doc, 'job-0-domain'), 'ashfield.nsw.edu.au');
+    assert.equal(valueOf(doc, 'job-0-domains'), 'ashfield.nsw.edu.au, ashfieldpandc.org.au');
+    assert.equal(valueOf(doc, 'job-0-searchTerms'), 'canteen, uniform shop');
     assert.equal(valueOf(doc, 'job-1-name'), '');
   });
 
   it('binds NO listener to a job input, so typing can never trigger a re-render', async () => {
     const { doc } = await openPage([job({ searchTerms: ['x'] })]);
-    for (const id of ['job-0-name', 'job-0-schoolName', 'job-0-domain', 'job-0-term-0']) {
+    for (const id of ['job-0-name', 'job-0-schoolName', 'job-0-domains', 'job-0-searchTerms']) {
       assert.equal(doc.getElementById(id).listeners.size, 0, `${id} carries a listener`);
     }
   });
@@ -755,29 +813,38 @@ describe('TASK-057 unit: the settings controller drives the list', () => {
     // discarded and rebuilt with the nodes they belong to.
     assert.equal(doc.getElementById('add-processing-job').listeners.get('click').length, 1);
     assert.equal(doc.getElementById('remove-job-0').listeners.get('click').length, 1);
-    assert.equal(doc.getElementById('add-term-0').listeners.get('click').length, 1);
   });
 
-  it('adds and removes a term on ONE job, leaving the others untouched', async () => {
-    const { doc, page } = await openPage([job({ searchTerms: ['a'] }), job({ id: 'job-2', name: 'B', searchTerms: ['b'] })]);
-    page.addTerm(1);
-    assert.equal(doc.getElementById('job-1-terms').querySelectorAll('.job__term').length, 2);
-    assert.equal(doc.getElementById('job-0-terms').querySelectorAll('.job__term').length, 1, 'the other job changed');
-    assert.equal(valueOf(doc, 'job-1-term-1'), '');
-    assert.equal(page.state.focusFieldId, 'job-1-term-1');
-
-    doc.getElementById('job-1-term-1').value = 'canteen';
-    page.removeTerm(1, 0);
-    assert.equal(doc.getElementById('job-1-terms').querySelectorAll('.job__term').length, 1);
-    assert.equal(valueOf(doc, 'job-1-term-0'), 'canteen', 'the wrong term was removed');
+  it('no longer exposes addTerm or removeTerm on the controller (TASK-060)', async () => {
+    const { page } = await openPage([job({ searchTerms: ['a'] })]);
+    assert.equal(page.addTerm, undefined, 'addTerm is still on the controller');
+    assert.equal(page.removeTerm, undefined, 'removeTerm is still on the controller');
+    assert.equal(SETTINGS_JS.includes('onAddTerm'), false, 'the onAddTerm handler survived');
+    assert.equal(SETTINGS_JS.includes('onRemoveTerm'), false, 'the onRemoveTerm handler survived');
+    assert.equal(SETTINGS_JS.includes('data-term-index'), false, 'the term-index wiring survived');
   });
 
-  it('ignores an out-of-range term removal instead of throwing', async () => {
-    const { doc, page } = await openPage([job({ searchTerms: ['a'] })]);
-    page.removeTerm(0, 5);
-    page.removeTerm(0, -1);
-    page.removeTerm(9, 0);
-    assert.equal(doc.getElementById('job-0-terms').querySelectorAll('.job__term').length, 1);
+  it('edits terms on ONE job through its own input, leaving the others untouched', async () => {
+    // The replacement for the add-term/remove-term coverage above: the same
+    // "one job's terms change, its neighbour's do not" property, now expressed
+    // through the single comma-separated field.
+    const { doc, page, api } = await openPage([
+      job({ searchTerms: ['a'] }),
+      job({ id: 'job-2', name: 'B', searchTerms: ['b'] }),
+    ]);
+    assert.equal(valueOf(doc, 'job-0-searchTerms'), 'a');
+    assert.equal(valueOf(doc, 'job-1-searchTerms'), 'b');
+
+    doc.getElementById('job-1-searchTerms').value = 'b, canteen';
+    // A structural action re-reads the DOM, so the edit survives it.
+    page.addJob();
+    assert.equal(valueOf(doc, 'job-1-searchTerms'), 'b, canteen');
+    assert.equal(valueOf(doc, 'job-0-searchTerms'), 'a', 'the other job changed');
+
+    // And it is the split LIST that would be sent, not the text.
+    assert.deepEqual(page.readJobsFromDom()[1].searchTerms, ['b', 'canteen']);
+    assert.deepEqual(page.readJobsFromDom()[0].searchTerms, ['a']);
+    assert.equal(settingsPutBodies(api).length, 0, 'an edit reached the network');
   });
 
   it('arms a removal without removing anything, and cancels back to normal', async () => {
@@ -804,23 +871,23 @@ describe('TASK-057 unit: the settings controller drives the list', () => {
     assert.equal(doc.getElementById('confirm-remove-job-0'), null, 'two rows were armed at once');
     assert.notEqual(doc.getElementById('confirm-remove-job-2'), null);
 
-    // The four things the ticket names as invalidating a pending confirmation:
-    // arming another row (above), adding a job, removing a term, and a
-    // successful save. Each mirrors `onChoiceChange` in the disconnect control.
+    // The things the ticket names as invalidating a pending confirmation:
+    // arming another row (above), adding a job, cancelling, and a successful
+    // save. Each mirrors `onChoiceChange` in the disconnect control. (The
+    // "removing a term" case went with TASK-060's per-term editor.)
     page.armRemoveJob(2);
     page.addJob();
     assert.equal(page.state.confirmingKey, null, 'adding a job left a stale confirmation');
 
-    page.addTerm(0);
     page.armRemoveJob(0);
-    page.removeTerm(0, 0);
-    assert.equal(page.state.confirmingKey, null, 'removing a term left a stale confirmation');
+    page.cancelRemoveJob(0);
+    assert.equal(page.state.confirmingKey, null, 'cancelling left a stale confirmation');
 
     // Fill the row the add() above appended, so the save is not refused by the
     // pre-flight before it can get as far as re-rendering.
     doc.getElementById('job-3-name').value = 'D';
     doc.getElementById('job-3-schoolName').value = 'D School';
-    doc.getElementById('job-3-domain').value = 'd.edu.au';
+    doc.getElementById('job-3-domains').value = 'd.edu.au';
     page.armRemoveJob(0);
     assert.equal((await page.save()).ok, true);
     assert.equal(page.state.confirmingKey, null, 'a successful save left a stale confirmation');
@@ -924,29 +991,29 @@ describe('TASK-057 unit: save() pre-flights before the round trip', () => {
       putResult: {
         ok: false,
         status: 400,
-        data: { error: 'That domain is not accepted.', field: 'processingJobs[0].domain' },
+        data: { error: 'That domain is not accepted.', field: 'processingJobs[0].domains' },
       },
     });
     await page.save();
-    assert.equal(doc.getElementById('error-job-0-domain').hidden, false);
+    assert.equal(doc.getElementById('error-job-0-domains').hidden, false);
 
     doc.getElementById('job-0-name').value = '   ';
     await page.save();
 
     assert.equal(
-      doc.getElementById('error-job-0-domain').hidden,
+      doc.getElementById('error-job-0-domains').hidden,
       true,
       'a stale row error survived a client-side rejection'
     );
-    assert.equal(textOf(doc.getElementById('error-job-0-domain')), '');
+    assert.equal(textOf(doc.getElementById('error-job-0-domains')), '');
     assert.equal(doc.getElementById('error-job-0-name').hidden, false);
   });
 
   it('routes a server 400 to the named row, and falls back to the form line when it cannot', async () => {
     const { doc, page } = await openPage([job()]);
 
-    assert.deepEqual(page.showFieldError('processingJobs[0].domain', 'That domain is not accepted.'), {
-      id: 'error-job-0-domain',
+    assert.deepEqual(page.showFieldError('processingJobs[0].domains', 'That domain is not accepted.'), {
+      id: 'error-job-0-domains',
       shown: true,
       text: 'That domain is not accepted.',
     });
@@ -977,7 +1044,7 @@ describe('TASK-057 unit: save() pre-flights before the round trip', () => {
     page.addJob();
     doc.getElementById('job-0-name').value = 'Ashfield';
     doc.getElementById('job-0-schoolName').value = 'Ashfield Public School';
-    doc.getElementById('job-0-domain').value = 'ashfield.nsw.edu.au';
+    doc.getElementById('job-0-domains').value = 'ashfield.nsw.edu.au';
 
     assert.equal((await page.save()).ok, true);
     assert.equal('id' in settingsPutBodies(api)[0].processingJobs[0], false, 'a new row sent an id');
@@ -1111,18 +1178,28 @@ describe('TASK-057 unit: styles.css keeps the job editor usable on a phone', () 
   const outside = css.outsideMediaQueries(STYLES_CSS);
   const media = css.mediaBlocks(STYLES_CSS);
 
-  it('adds a rule for every new class, outside any media query', () => {
-    for (const selector of ['.jobs', '.job', '.job__head', '.job__terms', '.job__term', '.job__actions', '.job__confirm']) {
+  it('adds a rule for every surviving class, outside any media query', () => {
+    for (const selector of ['.jobs', '.job', '.job__head', '.job__actions', '.job__confirm']) {
       assert.equal(css.rulesFor(outside, selector).length >= 1, true, `no rule for ${selector}`);
     }
   });
 
-  it('lays .job and .job__term out as a single-column grid', () => {
+  it('has DROPPED the term-row rules with the term-row editor (TASK-060)', () => {
+    // The search-terms field needs no CSS of its own: it carries .field and
+    // .field-input like every other field on the page.
+    for (const dead of ['.job__terms', '.job__term']) {
+      assert.deepEqual(css.rulesFor(outside, dead), [], `${dead} survived its only consumer`);
+    }
+    assert.equal(/\.job__term\b/.test(STYLES_CSS), false, '.job__term survived in the raw stylesheet');
+    assert.equal(/\.job__terms\b/.test(STYLES_CSS), false, '.job__terms survived in the raw stylesheet');
+    assert.ok(css.rulesFor(outside, '.field-input').length >= 1, '.field-input carries the shared input rule');
+  });
+
+  it('lays .jobs and .job out as a single-column grid', () => {
     assert.equal(css.declaredValue(outside, '.job', 'display'), 'grid');
-    assert.equal(css.declaredValue(outside, '.job__term', 'display'), 'grid');
     assert.equal(css.declaredValue(outside, '.jobs', 'display'), 'grid');
     // A single implicit column: nothing declares a multi-column track list.
-    for (const selector of ['.jobs', '.job', '.job__term']) {
+    for (const selector of ['.jobs', '.job']) {
       assert.equal(css.declaredValue(outside, selector, 'grid-template-columns'), null, selector);
     }
   });
@@ -1234,7 +1311,7 @@ describe('TASK-057 unit: source discipline', () => {
 });
 
 describe('TASK-057 unit: the fenced app.js change', () => {
-  const named = (name) => ({ id: 'job-1', name, schoolName: 'S', domain: 'd.edu.au', searchTerms: [] });
+  const named = (name) => ({ id: 'job-1', name, schoolName: 'S', domains: ['d.edu.au'], searchTerms: [] });
 
   /** The smallest host `renderConnectionCards` can be driven against. */
   function host() {

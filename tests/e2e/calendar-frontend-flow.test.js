@@ -60,13 +60,16 @@ const XSS = '<img src=x onerror=alert(1)>';
  * so the coverage moved with the contract rather than being dropped.
  *
  * @param {object} [overrides]
- * @returns {{ id: string, name: string, schoolName: string, domain: string, searchTerms: string[] }}
+ * @returns {{ id: string, name: string, schoolName: string, domains: string[], searchTerms: string[] }}
  */
 const job = (overrides = {}) => ({
   id: 'job-1',
   name: 'Ashfield Public School',
   schoolName: 'Ashfield Public School',
-  domain: 'ashfield-p.schools.nsw.edu.au',
+  // TASK-059 renamed the singular `domain` to a `domains` LIST; TASK-060
+  // renders that list into one comma-separated input, so the element ids are
+  // `job-<i>-domains` / `error-job-<i>-domains`.
+  domains: ['ashfield-p.schools.nsw.edu.au'],
   searchTerms: [],
   ...overrides,
 });
@@ -1330,7 +1333,7 @@ describe('Feature: Empty months, credentials and session expiry', () => {
       await page.start();
       doc.getElementById('job-0-name').value = 'Ashfield Public School';
       doc.getElementById('job-0-schoolName').value = 'Ashfield Public School';
-      doc.getElementById('job-0-domain').value = 'ashfield-p.schools.nsw.edu.au';
+      doc.getElementById('job-0-domains').value = 'ashfield-p.schools.nsw.edu.au';
       await page.save();
 
       assert.ok(world.calls.length >= 3, `only ${world.calls.length} requests were made`);
@@ -1435,7 +1438,7 @@ describe('Feature: The settings page', () => {
       assert.equal(doc.getElementById('processing-jobs').querySelectorAll('.job').length, 1);
       assert.equal(doc.getElementById('job-0-name').value, 'Ashfield Public School');
       assert.equal(doc.getElementById('job-0-schoolName').value, 'Ashfield Public School');
-      assert.equal(doc.getElementById('job-0-domain').value, 'ashfield-p.schools.nsw.edu.au');
+      assert.equal(doc.getElementById('job-0-domains').value, 'ashfield-p.schools.nsw.edu.au');
       assert.equal(doc.getElementById('processing-jobs-empty').hidden, true);
       assert.equal(doc.getElementById('timezone-input').value, 'Australia/Sydney');
       assert.equal(doc.getElementById('schedule-hour-input').value, '7');
@@ -1462,7 +1465,7 @@ describe('Feature: The settings page', () => {
 
       doc.getElementById('job-0-name').value = '  Ashfield  ';
       doc.getElementById('job-0-schoolName').value = '  Ashfield Public School  ';
-      doc.getElementById('job-0-domain').value = '  ashfield-p.schools.nsw.edu.au  ';
+      doc.getElementById('job-0-domains').value = '  ashfield-p.schools.nsw.edu.au  ';
       await doc.getElementById('settings-form').dispatch('submit');
       await drain();
 
@@ -1476,7 +1479,7 @@ describe('Feature: The settings page', () => {
             id: 'job-1',
             name: 'Ashfield',
             schoolName: 'Ashfield Public School',
-            domain: 'ashfield-p.schools.nsw.edu.au',
+            domains: ['ashfield-p.schools.nsw.edu.au'],
             searchTerms: [],
           },
         ],
@@ -1507,7 +1510,7 @@ describe('Feature: The settings page', () => {
         settingsPutStatus: 400,
         settingsPutBody: {
           error: 'gmail.com is a public mail provider, so it cannot be a school domain',
-          field: 'processingJobs[0].domain',
+          field: 'processingJobs[0].domains',
         },
       });
       const { doc, page } = openSettings(world);
@@ -1515,11 +1518,11 @@ describe('Feature: The settings page', () => {
 
       doc.getElementById('job-0-name').value = 'Ashfield';
       doc.getElementById('job-0-schoolName').value = 'Ashfield Public School';
-      doc.getElementById('job-0-domain').value = 'gmail.com';
+      doc.getElementById('job-0-domains').value = 'gmail.com';
       await doc.getElementById('settings-form').dispatch('submit');
       await drain();
 
-      const fieldError = doc.getElementById('error-job-0-domain');
+      const fieldError = doc.getElementById('error-job-0-domains');
       assert.equal(fieldError.hidden, false, 'the field error stayed hidden');
       assert.equal(textOf(fieldError), 'gmail.com is a public mail provider, so it cannot be a school domain');
       assert.match(textOf(doc.getElementById('settings-status')), /Nothing was saved/);
@@ -1562,12 +1565,12 @@ describe('Feature: The settings page', () => {
     it('And a field error is cleared before the next save, so it cannot linger', async () => {
       const world = makeWorld({
         settingsPutStatus: 400,
-        settingsPutBody: { error: 'gmail.com is a public mail provider', field: 'processingJobs[0].domain' },
+        settingsPutBody: { error: 'gmail.com is a public mail provider', field: 'processingJobs[0].domains' },
       });
       const { doc, page } = openSettings(world);
       await page.start();
       await page.save();
-      assert.equal(doc.getElementById('error-job-0-domain').hidden, false);
+      assert.equal(doc.getElementById('error-job-0-domains').hidden, false);
 
       world.settingsPutStatus = 200;
       world.settingsPutBody = null;
@@ -1575,8 +1578,8 @@ describe('Feature: The settings page', () => {
 
       // The per-row slots are BUILT by the renderer, so they are not in the
       // static FIELD_ERROR_IDS table `clearErrors` used to iterate on its own.
-      assert.equal(doc.getElementById('error-job-0-domain').hidden, true, 'a stale field error survived a good save');
-      assert.equal(textOf(doc.getElementById('error-job-0-domain')), '');
+      assert.equal(doc.getElementById('error-job-0-domains').hidden, true, 'a stale field error survived a good save');
+      assert.equal(textOf(doc.getElementById('error-job-0-domains')), '');
     });
   });
 
@@ -1600,13 +1603,13 @@ describe('Feature: The settings page', () => {
     it('And a field error echoing what the user typed is text too', async () => {
       const world = makeWorld({
         settingsPutStatus: 400,
-        settingsPutBody: { error: `"${XSS}" is not a valid domain`, field: 'processingJobs[0].domain' },
+        settingsPutBody: { error: `"${XSS}" is not a valid domain`, field: 'processingJobs[0].domains' },
       });
       const { doc, page } = openSettings(world);
       await page.start();
       await page.save();
 
-      assert.equal(doc.getElementById('error-job-0-domain').textContent, `"${XSS}" is not a valid domain`);
+      assert.equal(doc.getElementById('error-job-0-domains').textContent, `"${XSS}" is not a valid domain`);
       assert.deepEqual(findElements(doc, 'img'), []);
     });
   });

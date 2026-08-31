@@ -385,25 +385,25 @@ describe('TASK-053 unit: buildUserContent emits one <school_name> per name', () 
 describe('TASK-053 unit (TASK-057 shape): a school name is one field, never split', () => {
   it("a name with commas, semicolons and spaces stays ONE value", () => {
     const name = "St Mary's Primary, Manly; North Campus";
-    const rows = settingsPage.toEditableJobs([{ id: 'job-1', name: 'Manly', schoolName: name, domain: 'm.edu.au' }]);
+    const rows = settingsPage.toEditableJobs([{ id: 'job-1', name: 'Manly', schoolName: name, domains: ['m.edu.au'] }]);
     assert.equal(rows[0].schoolName, name);
     assert.equal(settingsPage.buildJobsPayload(rows)[0].schoolName, name);
   });
 
   it('round-trips a stored list back out unchanged, order preserved', () => {
     const stored = [
-      { id: 'job-1', name: 'Alpha', schoolName: 'Alpha School', domain: 'alpha.edu.au', searchTerms: ['canteen'] },
-      { id: 'job-2', name: 'Beta', schoolName: 'École Publique', domain: 'beta.edu.au', searchTerms: [] },
+      { id: 'job-1', name: 'Alpha', schoolName: 'Alpha School', domains: ['alpha.edu.au'], searchTerms: ['canteen'] },
+      { id: 'job-2', name: 'Beta', schoolName: 'École Publique', domains: ['beta.edu.au'], searchTerms: [] },
     ];
     assert.deepEqual(settingsPage.buildJobsPayload(settingsPage.toEditableJobs(stored)), stored);
   });
 
   it('trims and drops blank search terms on the way out, and preserves case everywhere', () => {
     const out = settingsPage.buildJobsPayload([
-      { id: '', name: '  ALPHA School  ', schoolName: ' Alpha School ', domain: ' Alpha.edu.au ', searchTerms: ['  x  ', '   '] },
+      { id: '', name: '  ALPHA School  ', schoolName: ' Alpha School ', domains: [' Alpha.edu.au '], searchTerms: ['  x  ', '   '] },
     ]);
     assert.deepEqual(out, [
-      { name: 'ALPHA School', schoolName: 'Alpha School', domain: 'Alpha.edu.au', searchTerms: ['x'] },
+      { name: 'ALPHA School', schoolName: 'Alpha School', domains: ['Alpha.edu.au'], searchTerms: ['x'] },
     ]);
   });
 

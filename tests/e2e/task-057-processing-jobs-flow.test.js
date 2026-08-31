@@ -87,7 +87,9 @@ const job = (overrides = {}) => ({
   id: 'job-1',
   name: 'Ashfield',
   schoolName: 'Ashfield Public School',
-  domain: 'ashfield.nsw.edu.au',
+  // TASK-059 renamed the singular `domain` to a `domains` LIST; TASK-060
+  // renders that list into one comma-separated input.
+  domains: ['ashfield.nsw.edu.au'],
   searchTerms: [],
   ...overrides,
 });
@@ -172,7 +174,16 @@ async function givenTheSettingsPageHasLoaded(world) {
 }
 
 const jobBlocks = (doc) => doc.getElementById('processing-jobs').querySelectorAll('.job');
-const termsOf = (doc, index) => doc.getElementById(`job-${index}-terms`).querySelectorAll('.job__term');
+/**
+ * The search terms of a row, as a LIST.
+ *
+ * TASK-057's `termsOf` counted `.job__term` rows in a `<ul>`. TASK-060 replaced
+ * that editor with one comma-separated input, so the same question - "which
+ * terms does this row currently show?" - is now answered by splitting the field.
+ */
+const termsOf = (doc, index) => settings.splitCommaList(doc.getElementById(`job-${index}-searchTerms`)?.value);
+/** The same, for the domains field. */
+const domainsOf = (doc, index) => settings.splitCommaList(doc.getElementById(`job-${index}-domains`)?.value);
 const valueOf = (doc, id) => doc.getElementById(id)?.value;
 const isHidden = (doc, id) => doc.getElementById(id).hidden;
 
@@ -202,10 +213,11 @@ const settingsPuts = (world) => world.calls.filter((call) => call.method === 'PU
 const settingsRequests = (world) => world.calls.filter((call) => call.path === SETTINGS_PATH);
 
 /** Fill a whole row, so a scenario only has to state the bit it is about. */
-function fillRow(doc, index, { name, schoolName, domain }) {
+function fillRow(doc, index, { name, schoolName, domains, searchTerms }) {
   type(doc, `job-${index}-name`, name);
   type(doc, `job-${index}-schoolName`, schoolName);
-  type(doc, `job-${index}-domain`, domain);
+  if (domains !== undefined) type(doc, `job-${index}-domains`, domains);
+  if (searchTerms !== undefined) type(doc, `job-${index}-searchTerms`, searchTerms);
 }
 
 /* =========================================================================
@@ -218,7 +230,7 @@ describe('Feature: A user manages several named processing jobs from the setting
       const world = makeWorld({
         processingJobs: [
           job({ id: 'job-1', name: 'Ashfield', searchTerms: ['newsletter', 'canteen'] }),
-          job({ id: 'job-2', name: "St Mary's", schoolName: "St Mary's Primary", domain: 'stmarys.nsw.edu.au' }),
+          job({ id: 'job-2', name: "St Mary's", schoolName: "St Mary's Primary", domains: ['stmarys.nsw.edu.au'] }),
         ],
       });
       const { doc } = await givenTheSettingsPageHasLoaded(world);
@@ -233,13 +245,14 @@ describe('Feature: A user manages several named processing jobs from the setting
 
       assert.equal(valueOf(doc, 'job-0-name'), 'Ashfield');
       assert.equal(valueOf(doc, 'job-0-schoolName'), 'Ashfield Public School');
-      assert.equal(valueOf(doc, 'job-0-domain'), 'ashfield.nsw.edu.au');
-      assert.equal(termsOf(doc, 0).length, 2);
-      assert.equal(valueOf(doc, 'job-0-term-0'), 'newsletter');
-      assert.equal(valueOf(doc, 'job-0-term-1'), 'canteen');
+      assert.equal(valueOf(doc, 'job-0-domains'), 'ashfield.nsw.edu.au');
+      // TASK-060: several stored terms render as ONE comma-joined value.
+      assert.equal(valueOf(doc, 'job-0-searchTerms'), 'newsletter, canteen');
+      assert.deepEqual(termsOf(doc, 0), ['newsletter', 'canteen']);
 
       assert.equal(valueOf(doc, 'job-1-name'), "St Mary's");
-      assert.equal(termsOf(doc, 1).length, 0, 'a job with no terms rendered a term row');
+      assert.equal(valueOf(doc, 'job-1-searchTerms'), '', 'a job with no terms rendered something');
+      assert.deepEqual(termsOf(doc, 1), []);
 
       assert.equal(isHidden(doc, 'processing-jobs-empty'), true);
       assert.equal(textOf(doc.getElementById('settings-summary')), "Watching mail for Ashfield, St Mary's");
@@ -272,10 +285,10 @@ describe('Feature: A user manages several named processing jobs from the setting
       fillRow(doc, 0, {
         name: 'Ashfield',
         schoolName: 'Ashfield Public School',
-        domain: 'ashfield.nsw.edu.au',
+        domains: 'ashfield.nsw.edu.au',
       });
-      await activate(doc, 'add-term-0');
-      type(doc, 'job-0-term-0', 'newsletter');
+      // TASK-060: the terms go into the SAME kind of input as everything else.
+      type(doc, 'job-0-searchTerms', 'newsletter');
       await submit(doc);
 
       const puts = settingsPuts(world);
@@ -284,12 +297,13 @@ describe('Feature: A user manages several named processing jobs from the setting
         {
           name: 'Ashfield',
           schoolName: 'Ashfield Public School',
-          domain: 'ashfield.nsw.edu.au',
+          domains: ['ashfield.nsw.edu.au'],
           searchTerms: ['newsletter'],
         },
       ]);
       assert.equal('schoolNames' in puts[0].body, false);
       assert.equal('searchDomains' in puts[0].body, false);
+      assert.equal('domain' in puts[0].body.processingJobs[0], false, 'the superseded domain key was sent');
       assert.equal('id' in puts[0].body.processingJobs[0], false, 'a client temp id was sent');
       assert.equal(textOf(doc.getElementById('settings-status')), 'Saved.');
     });
@@ -313,7 +327,7 @@ describe('Feature: A user manages several named processing jobs from the setting
       fillRow(doc, 0, {
         name: 'Ashfield',
         schoolName: 'Ashfield Public School',
-        domain: 'ashfield.nsw.edu.au',
+        domains: 'ashfield.nsw.edu.au',
       });
       await submit(doc);
 
@@ -358,21 +372,24 @@ describe('Feature: A user manages several named processing jobs from the setting
     });
   });
 
-  describe('Scenario: Adding and removing search terms uses the same pattern as adding a job', () => {
-    it('Given one term, When one is added and the first removed, Then only the survivor is saved', async () => {
+  describe('Scenario: Search terms are edited as one comma-separated field (TASK-060)', () => {
+    it('Given one term, When a second is typed after a comma and the first deleted, Then only the survivor is saved', async () => {
+      // TASK-060 replaced the Add/Remove-term row editor with one text input.
+      // Same ground as TASK-057's add-then-remove scenario, read against the
+      // shape that replaced it: the user edits the text, and only what remains
+      // in it is sent.
       const world = makeWorld({ processingJobs: [job({ searchTerms: ['newsletter'] })] });
       const { doc } = await givenTheSettingsPageHasLoaded(world);
 
-      await activate(doc, 'add-term-0');
-      assert.equal(termsOf(doc, 0).length, 2);
-      assert.equal(valueOf(doc, 'job-0-term-1'), '');
+      assert.equal(valueOf(doc, 'job-0-searchTerms'), 'newsletter');
+      assert.equal(doc.getElementById('add-term-0'), null, 'the Add search term button survived');
+      assert.equal(doc.getElementById('remove-job-0-term-0'), null, 'the Remove term button survived');
 
-      type(doc, 'job-0-term-1', 'canteen');
-      // Removing a term is NOT confirmed - it is one field, not a whole job.
-      await activate(doc, 'remove-job-0-term-0');
+      type(doc, 'job-0-searchTerms', 'newsletter, canteen');
+      assert.deepEqual(termsOf(doc, 0), ['newsletter', 'canteen']);
 
-      assert.equal(termsOf(doc, 0).length, 1);
-      assert.equal(valueOf(doc, 'job-0-term-0'), 'canteen');
+      type(doc, 'job-0-searchTerms', 'canteen');
+      assert.deepEqual(termsOf(doc, 0), ['canteen']);
 
       await submit(doc);
       assert.deepEqual(settingsPuts(world)[0].body.processingJobs[0].searchTerms, ['canteen']);
@@ -380,21 +397,25 @@ describe('Feature: A user manages several named processing jobs from the setting
   });
 
   describe('Scenario: A blank search term is dropped rather than sent', () => {
-    it('Given an added but empty term, When the form is submitted, Then searchTerms is []', async () => {
+    it('Given a terms field of only commas and spaces, When submitted, Then searchTerms is []', async () => {
       const world = makeWorld({ processingJobs: [job({ searchTerms: [] })] });
       const { doc } = await givenTheSettingsPageHasLoaded(world);
 
-      await activate(doc, 'add-term-0');
-      assert.equal(valueOf(doc, 'job-0-term-0'), '');
-      fillRow(doc, 0, { name: 'Ashfield', schoolName: 'Ashfield Public School', domain: 'ashfield.nsw.edu.au' });
+      assert.equal(valueOf(doc, 'job-0-searchTerms'), '');
+      fillRow(doc, 0, {
+        name: 'Ashfield',
+        schoolName: 'Ashfield Public School',
+        domains: 'ashfield.nsw.edu.au',
+        searchTerms: ' , , ',
+      });
       await submit(doc);
 
       assert.deepEqual(settingsPuts(world)[0].body.processingJobs[0].searchTerms, [], 'a blank term was sent as ""');
     });
   });
 
-  describe('Scenario: Adding a search term to one job leaves the other jobs alone', () => {
-    it('Given two jobs with one term each, When a term is added to job 1, Then job 0 is untouched', async () => {
+  describe('Scenario: Editing one job\'s search terms leaves the other jobs alone', () => {
+    it('Given two jobs with one term each, When job 1 gains a term, Then job 0 is untouched', async () => {
       const world = makeWorld({
         processingJobs: [
           job({ id: 'job-1', name: 'A', searchTerms: ['a'] }),
@@ -403,11 +424,14 @@ describe('Feature: A user manages several named processing jobs from the setting
       });
       const { doc } = await givenTheSettingsPageHasLoaded(world);
 
-      await activate(doc, 'add-term-1');
+      type(doc, 'job-1-searchTerms', 'b, canteen');
+      // A structural action re-reads the DOM into state, so the edit survives it.
+      await activate(doc, 'remove-job-0');
+      await activate(doc, 'cancel-remove-job-0');
 
-      assert.equal(termsOf(doc, 1).length, 2);
-      assert.equal(termsOf(doc, 0).length, 1);
-      assert.equal(valueOf(doc, 'job-0-term-0'), 'a');
+      assert.deepEqual(termsOf(doc, 1), ['b', 'canteen']);
+      assert.deepEqual(termsOf(doc, 0), ['a']);
+      assert.equal(valueOf(doc, 'job-0-searchTerms'), 'a');
     });
   });
 
@@ -416,7 +440,7 @@ describe('Feature: A user manages several named processing jobs from the setting
       const world = makeWorld({
         processingJobs: [
           job({ id: 'job-1', name: 'Ashfield' }),
-          job({ id: 'job-2', name: "St Mary's", schoolName: "St Mary's Primary", domain: 'stmarys.nsw.edu.au' }),
+          job({ id: 'job-2', name: "St Mary's", schoolName: "St Mary's Primary", domains: ['stmarys.nsw.edu.au'] }),
         ],
       });
       const { doc } = await givenTheSettingsPageHasLoaded(world);
@@ -564,7 +588,9 @@ describe('Feature: A user manages several named processing jobs from the setting
   });
 
   describe('Scenario Outline: A required field left blank is refused before the round trip', () => {
-    for (const field of ['name', 'schoolName', 'domain']) {
+    // TASK-059/TASK-060: `domains` is OPTIONAL, so it is no longer in this list
+    // - the "blank domains is still sent" scenario below covers it instead.
+    for (const field of ['name', 'schoolName']) {
       it(`Given one job whose "${field}" is blank, When saved, Then nothing is sent and it is flagged`, async () => {
         const world = makeWorld({ processingJobs: [job()] });
         const { doc } = await givenTheSettingsPageHasLoaded(world);
@@ -581,18 +607,34 @@ describe('Feature: A user manages several named processing jobs from the setting
   });
 
   describe('Scenario: Only the first problem is reported, topmost first', () => {
-    it('Given job 0 with a blank name and job 1 with a blank domain, Then only job 0 is flagged', async () => {
+    it('Given job 0 with a blank name and job 1 with a blank school name, Then only job 0 is flagged', async () => {
       const world = makeWorld({
         processingJobs: [job({ id: 'job-1', name: 'A' }), job({ id: 'job-2', name: 'B' })],
       });
       const { doc } = await givenTheSettingsPageHasLoaded(world);
 
       type(doc, 'job-0-name', '');
-      type(doc, 'job-1-domain', '');
+      type(doc, 'job-1-schoolName', '');
       await submit(doc);
 
       assert.equal(isHidden(doc, 'error-job-0-name'), false);
-      assert.equal(isHidden(doc, 'error-job-1-domain'), true, 'a second problem was reported at the same time');
+      assert.equal(isHidden(doc, 'error-job-1-schoolName'), true, 'a second problem was reported at the same time');
+      assert.equal(isHidden(doc, 'error-job-1-domains'), true);
+    });
+  });
+
+  describe('Scenario: A blank domains field is NOT a client-side problem (TASK-059/TASK-060)', () => {
+    it('Given a job whose domains field is cleared, When saved, Then the request IS sent with []', async () => {
+      const world = makeWorld({ processingJobs: [job()] });
+      const { doc } = await givenTheSettingsPageHasLoaded(world);
+
+      type(doc, 'job-0-domains', '   ');
+      await submit(doc);
+
+      assert.equal(settingsPuts(world).length, 1, 'an empty domains list was refused locally');
+      assert.deepEqual(settingsPuts(world)[0].body.processingJobs[0].domains, []);
+      assert.equal(isHidden(doc, 'error-job-0-domains'), true, 'a domains error was invented client-side');
+      assert.equal(textOf(doc.getElementById('settings-status')), 'Saved.');
     });
   });
 
@@ -619,27 +661,40 @@ describe('Feature: A user manages several named processing jobs from the setting
       const world = makeWorld({ processingJobs: [job()] });
       const { doc } = await givenTheSettingsPageHasLoaded(world);
 
-      type(doc, 'job-0-domain', 'gmail.com');
+      type(doc, 'job-0-domains', 'gmail.com');
+      assert.deepEqual(domainsOf(doc, 0), ['gmail.com']);
       await submit(doc);
 
       assert.equal(settingsPuts(world).length, 1, 'the client refused a value the server may have accepted');
-      assert.equal(settingsPuts(world)[0].body.processingJobs[0].domain, 'gmail.com');
+      assert.deepEqual(settingsPuts(world)[0].body.processingJobs[0].domains, ['gmail.com']);
+    });
+
+    it('Given a domain of "not a domain at all", When saved, Then it is still sent verbatim', async () => {
+      const world = makeWorld({ processingJobs: [job()] });
+      const { doc } = await givenTheSettingsPageHasLoaded(world);
+
+      // `splitCommaList` performs no domain-shape check: whitespace is NOT a
+      // delimiter, so this is one entry, not four.
+      type(doc, 'job-0-domains', 'not a domain at all');
+      await submit(doc);
+
+      assert.deepEqual(settingsPuts(world)[0].body.processingJobs[0].domains, ['not a domain at all']);
     });
   });
 
   /* --- Server-side validation: the server stays the source of truth ------- */
 
   describe("Scenario: A server field error lands on the named job's field", () => {
-    it('Given a 400 naming processingJobs[0].domain, Then that row\'s slot shows the server\'s words', async () => {
+    it('Given a 400 naming processingJobs[0].domains, Then that row\'s slot shows the server\'s words', async () => {
       const world = makeWorld({ processingJobs: [job()] });
       world.settingsPutStatus = 400;
-      world.settingsPutBody = { error: 'That domain is not accepted.', field: 'processingJobs[0].domain' };
+      world.settingsPutBody = { error: 'That domain is not accepted.', field: 'processingJobs[0].domains' };
       const { doc } = await givenTheSettingsPageHasLoaded(world);
 
       await submit(doc);
 
-      assert.equal(isHidden(doc, 'error-job-0-domain'), false);
-      assert.equal(textOf(doc.getElementById('error-job-0-domain')), 'That domain is not accepted.');
+      assert.equal(isHidden(doc, 'error-job-0-domains'), false);
+      assert.equal(textOf(doc.getElementById('error-job-0-domains')), 'That domain is not accepted.');
       assert.equal(isHidden(doc, 'error-form'), true);
       assert.equal(isHidden(doc, 'error-processingJobs'), true);
       assert.equal(
@@ -658,7 +713,7 @@ describe('Feature: A user manages several named processing jobs from the setting
     it('Given 21 jobs and a 400 naming processingJobs, Then #error-processingJobs carries it', async () => {
       const world = makeWorld({
         processingJobs: Array.from({ length: 21 }, (_, index) =>
-          job({ id: `job-${index}`, name: `Job ${index}`, domain: `job${index}.nsw.edu.au` })
+          job({ id: `job-${index}`, name: `Job ${index}`, domains: [`job${index}.nsw.edu.au`] })
         ),
       });
       world.settingsPutStatus = 400;
@@ -721,17 +776,17 @@ describe('Feature: A user manages several named processing jobs from the setting
       // clearErrors sweeping the dynamic slots can take a stale row error away.
       const world = makeWorld({ processingJobs: [job()] });
       world.settingsPutStatus = 400;
-      world.settingsPutBody = { error: 'That domain is not accepted.', field: 'processingJobs[0].domain' };
+      world.settingsPutBody = { error: 'That domain is not accepted.', field: 'processingJobs[0].domains' };
       const { doc } = await givenTheSettingsPageHasLoaded(world);
 
       await submit(doc);
-      assert.equal(isHidden(doc, 'error-job-0-domain'), false);
+      assert.equal(isHidden(doc, 'error-job-0-domains'), false);
 
       type(doc, 'job-0-name', '   ');
       await submit(doc);
 
-      assert.equal(isHidden(doc, 'error-job-0-domain'), true, 'a stale row error survived a client-side rejection');
-      assert.equal(textOf(doc.getElementById('error-job-0-domain')), '');
+      assert.equal(isHidden(doc, 'error-job-0-domains'), true, 'a stale row error survived a client-side rejection');
+      assert.equal(textOf(doc.getElementById('error-job-0-domains')), '');
       assert.equal(isHidden(doc, 'error-job-0-name'), false);
       assert.equal(settingsPuts(world).length, 1, 'the second, refused save still went to the server');
     });
@@ -742,12 +797,14 @@ describe('Feature: A user manages several named processing jobs from the setting
   describe('Scenario: A hostile job name is rendered as literal text everywhere', () => {
     it('Given a stored name of "<img src=x onerror=alert(1)>", Then no element is created from it', async () => {
       const world = makeWorld({
-        processingJobs: [{ id: 'job-1', name: XSS, schoolName: 'S', domain: 'd.edu.au', searchTerms: ['<script>alert(1)</script>'] }],
+        processingJobs: [{ id: 'job-1', name: XSS, schoolName: 'S', domains: ['d.edu.au'], searchTerms: ['<script>alert(1)</script>'] }],
       });
       const { doc } = await givenTheSettingsPageHasLoaded(world);
 
       assert.equal(valueOf(doc, 'job-0-name'), XSS);
-      assert.equal(valueOf(doc, 'job-0-term-0'), '<script>alert(1)</script>');
+      // The comma-joined terms string is still an input `value`, character data
+      // by definition - no element is created from it.
+      assert.equal(valueOf(doc, 'job-0-searchTerms'), '<script>alert(1)</script>');
       assert.equal(doc.getElementById('job-0-head').textContent, XSS);
       assert.equal(doc.getElementById('settings-school-name').textContent, XSS);
 
@@ -857,12 +914,14 @@ describe('Feature: A user manages several named processing jobs from the setting
       const before = world.calls.length;
 
       await activate(doc, 'add-processing-job');
-      await activate(doc, 'add-term-0');
+      await activate(doc, 'remove-job-0');
+      await activate(doc, 'cancel-remove-job-0');
 
       assert.equal(world.calls.length, before, 'adding a row submitted the form');
       assert.equal(doc.getElementById('add-processing-job').getAttribute('type'), 'button');
-      assert.equal(doc.getElementById('add-term-0').getAttribute('type'), 'button');
       assert.equal(doc.getElementById('remove-job-0').getAttribute('type'), 'button');
+      // TASK-060 removed the only other button the renderer used to build.
+      assert.equal(doc.getElementById('add-term-0'), null);
     });
   });
 
@@ -928,10 +987,12 @@ describe('Feature: The processing-job editor is usable on a phone', () => {
 
       assert.equal(css.rulesFor(outside, '.job').length >= 1, true, 'there is no rule for .job at all');
       assert.equal(css.declaredValue(outside, '.job', 'display'), 'grid');
-      assert.equal(css.declaredValue(outside, '.job__term', 'display'), 'grid');
       assert.equal(css.declaredValue(outside, '.jobs', 'display'), 'grid');
+      // TASK-060 deleted .job__terms/.job__term with the term-row editor: the
+      // search-terms field needs no CSS of its own, it is a plain .field.
+      assert.equal(/\.job__terms?/.test(stylesheet), false, 'a term-row rule survived in the served CSS');
       // A single implicit column: no rule declares a multi-column track list.
-      for (const selector of ['.jobs', '.job', '.job__term']) {
+      for (const selector of ['.jobs', '.job']) {
         assert.equal(css.declaredValue(outside, selector, 'grid-template-columns'), null, selector);
       }
 
@@ -958,12 +1019,12 @@ describe('Feature: The processing-job editor is usable on a phone', () => {
       const page = loadDocument(SETTINGS_HTML);
       assert.equal(page.getElementById('add-processing-job').className, 'btn');
 
-      // And the five controls the renderer builds, on a rendered, armed row.
+      // And the controls the renderer still builds, on a rendered, armed row.
       const world = makeWorld({ processingJobs: [job({ searchTerms: ['newsletter'] })] });
       const { doc } = await givenTheSettingsPageHasLoaded(world);
       await activate(doc, 'remove-job-0');
 
-      for (const id of ['confirm-remove-job-0', 'cancel-remove-job-0', 'add-term-0', 'remove-job-0-term-0']) {
+      for (const id of ['confirm-remove-job-0', 'cancel-remove-job-0']) {
         const control = doc.getElementById(id);
         assert.notEqual(control, null, `${id} is not rendered`);
         assert.equal(control.className, 'btn btn-small', `${id} carries no 44px class`);
