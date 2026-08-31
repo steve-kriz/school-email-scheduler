@@ -363,8 +363,13 @@ function legacyStringList(value) {
  * attributes for good (see `buildConnectionPatch`). No write is issued by a GET.
  *
  * The REMAINING legacy entries are folded in as `searchTerms` rather than dropped:
- * under the new model a job's school name, domain and search terms are all OR'd
+ * under the new model a job's school name, domains and search terms are all OR'd
  * together (TASK-056), so this preserves the full search coverage the user had.
+ * Only the FIRST legacy domain becomes the job's `domains` (TASK-059 renamed the
+ * singular `domain` to a list, so it is a one-element list here, or `[]`); the
+ * rest keep folding into `searchTerms` exactly as before. Widening this to put
+ * every legacy domain in `domains` would change what a migrated user sees on a
+ * read, which is not this rename's business.
  *
  * The result is NOT necessarily valid PUT input - a row with only domains yields
  * `schoolName: ""`, which the validator refuses. That is intended: the user fills
@@ -395,10 +400,78 @@ function synthesizeLegacyProcessingJob(source, fallback) {
       id: "default",
       name: "Default",
       schoolName: names[0] || "",
-      domain: domains[0] || "",
+      domains: domains[0] ? [domains[0]] : [],
       searchTerms: [...names.slice(1), ...domains.slice(1)],
     },
   ];
+}
+
+/**
+ * Coerce one stored job's `domains` value into a plain list of hostnames.
+ *
+ * Same shape-tolerance the rest of this module applies to stored values: a plain
+ * array (document client), a `{ L: [{ S: "..." }] }` list or a `{ SS: [...] }`
+ * set (low-level client), or a JS `Set`. Trimmed, blanks dropped, ORDER
+ * PRESERVED - unlike a string set, a job's domain list is the user's own order
+ * and is not sorted.
+ *
+ * @param {unknown} value
+ * @returns {string[]}
+ */
+function jobDomainList(value) {
+  const raw = value instanceof Set
+    ? [...value]
+    : Array.isArray(value)
+      ? value
+      : value && typeof value === "object" && Array.isArray(value.L)
+        ? value.L
+        : value && typeof value === "object" && Array.isArray(value.SS)
+          ? value.SS
+          : [];
+  return raw
+    .map((entry) => (typeof entry === "string" ? entry : String(entry?.S ?? entry ?? "")).trim())
+    .filter((entry) => entry !== "");
+}
+
+/**
+ * Project one STORED processing job for a response body (TASK-059).
+ *
+ * READ-COMPATIBILITY FOR THE SINGULAR `domain`, and nothing else. A job saved
+ * under TASK-055/057 carries `domain: "<host>"`; a job saved from TASK-059
+ * onwards carries the `domains` list. Without this shim every existing user's
+ * configured sender domain would vanish from the settings page and from
+ * `/auth/me` the moment this ships, and would only come back if they noticed and
+ * re-saved. So a job map with no `domains` attribute but a non-blank `domain` is
+ * reported as `domains: [domain]` instead.
+ *
+ * The singular key is NEVER emitted, on either path (a migrated-on-read legacy
+ * row or a previously-stored job): it is dropped here, so no response body can
+ * carry both spellings and no reader has to choose between them.
+ *
+ * THIS IS A READ, NOT A MIGRATION. Nothing is written back - the row still holds
+ * the old key until its owner's next save, where `validateProcessingJobs` drops
+ * it as an unknown key and `buildConnectionPatch` writes `domains`. It is the
+ * settings/auth-me sibling of the same shim in scan.mjs's `toProcessingJobs`, so
+ * the scan and the page agree about what a stored job means.
+ *
+ * @param {unknown} job One entry of a stored `processingJobs` list.
+ * @returns {unknown} The same job with a `domains` list and no `domain` key;
+ *   anything that is not a job map is returned untouched.
+ */
+function projectStoredJob(job) {
+  if (!job || typeof job !== "object" || Array.isArray(job)) return job;
+  // A low-level `{ M: {...} }` entry keeps its wrapper: this function fixes the
+  // domain key, it does not unmarshal a row.
+  if (job.M && typeof job.M === "object" && !Array.isArray(job.M)) {
+    return { ...job, M: projectStoredJob(job.M) };
+  }
+
+  const { domain, domains, ...rest } = job;
+  const stored = jobDomainList(domains);
+  if (domains !== undefined && domains !== null) return { ...rest, domains: stored };
+
+  const legacy = (typeof domain === "string" ? domain : String(domain?.S ?? "")).trim();
+  return { ...rest, domains: legacy ? [legacy] : [] };
 }
 
 /**
@@ -426,6 +499,12 @@ function synthesizeLegacyProcessingJob(source, fallback) {
  * stays until it can be shown no row still has the old attributes; rows migrate
  * one at a time as their owners save (see `buildConnectionPatch`).
  *
+ * THE SECOND, SMALLER LEGACY READ (TASK-059): every projected job goes through
+ * `projectStoredJob`, which reports a job saved with the singular `domain` as
+ * `domains: [domain]` and never emits the singular key. That is what keeps an
+ * existing user's configured sender domain visible on the settings page and in
+ * `/auth/me` the moment the rename ships, without a re-save.
+ *
  * @param {object|null} connection A row from `getConnection`, or null.
  * @param {object} [fallback] Values to fall back on when there is no row yet
  *   (the session's email, typically - a user who has signed in but whose row has
@@ -449,6 +528,9 @@ export function toPublicJson(connection, fallback = {}, { lookupFailed = false }
     const synthesized = synthesizeLegacyProcessingJob(source, fallback);
     if (synthesized) out.processingJobs = synthesized;
   }
+  // Applied to BOTH paths, so every job in a response body carries a `domains`
+  // list and none carries the superseded singular `domain` (TASK-059).
+  if (Array.isArray(out.processingJobs)) out.processingJobs = out.processingJobs.map(projectStoredJob);
 
   const known = lookupFailed !== true;
   out.connected = known && source.hasRefreshToken === true;

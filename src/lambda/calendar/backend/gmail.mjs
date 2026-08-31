@@ -15,12 +15,14 @@
  *   fetchCandidateMessages -> the three above, for one user, plus a watermark
  *
  * ONE SEARCH PER PROCESSING JOB (TASK-056). A job carries its own
- * `{ id, name, schoolName, domain, searchTerms }`, and its query ORs the sender
- * domain together with QUOTED TEXT searches for the school name and each search
- * term. That widens matching from "sender domain only" to "sender domain or this
- * text anywhere in the subject or body", deliberately: it is what lets a school's
- * mail be found when it arrives via a newsletter relay. The caller therefore must
- * NOT assume every returned message came from the job's domain.
+ * `{ id, name, schoolName, domains, searchTerms }`, and its query ORs EVERY
+ * sender domain (TASK-059 - a job may watch several, e.g. a school's own domain
+ * and its P&C's) together with QUOTED TEXT searches for the school name and each
+ * search term. That widens matching from "sender domain only" to "one of these
+ * sender domains or this text anywhere in the subject or body", deliberately: it
+ * is what lets a school's mail be found when it arrives via a newsletter relay.
+ * The caller therefore must NOT assume every returned message came from one of
+ * the job's domains.
  *
  * WHY THE CAP AND THE WINDOW: a first scan of an unfiltered mailbox is unbounded
  * work against a rate-limited API. Every query is therefore domain-filtered and
@@ -348,16 +350,24 @@ export function toQueryPhrase(value) {
  * The OR clauses one processing job contributes to a Gmail query.
  *
  * Order is fixed and contractual (the regression guard in TASK-056 compares the
- * emitted string byte for byte): the sender-domain clause first, then the school
- * name, then each search term in stored order. The domain goes through the SAME
- * `toDomainList`/`normalizeDomain` path the old single-query builder used, so
- * there is still exactly one definition of "what a domain is" in this codebase.
+ * emitted string byte for byte): the sender-domain clauses first, in stored
+ * order, then the school name, then each search term in stored order. The domains
+ * go through the SAME `toDomainList`/`normalizeDomain` path the old single-query
+ * builder used, so there is still exactly one definition of "what a domain is" in
+ * this codebase.
+ *
+ * A JOB MAY WATCH SEVERAL DOMAINS (TASK-059), and `domains` may equally be absent
+ * or empty. Nothing here needed new looping to support that: `toDomainList`
+ * already accepts a plain array (as well as a `Set` and `{ SS: [...] }`), already
+ * normalises and de-duplicates it, and the loop below already emits one
+ * `from:@<host>` clause per entry - which is the same OR-per-domain shape
+ * `buildQuery` has always produced for the whole-connection form.
  *
  * Blank entries are dropped and duplicate clauses are emitted once (compared
  * case-insensitively, since Gmail's text search is case-insensitive anyway and a
  * repeated clause only costs query length).
  *
- * @param {{ domain?: unknown, schoolName?: unknown, searchTerms?: unknown }} [job]
+ * @param {{ domains?: unknown, schoolName?: unknown, searchTerms?: unknown }} [job]
  * @returns {string[]}
  */
 export function buildJobClauses(job = {}) {
@@ -372,7 +382,7 @@ export function buildJobClauses(job = {}) {
     clauses.push(clause);
   };
 
-  for (const domain of toDomainList([job?.domain])) add(`from:@${domain}`);
+  for (const domain of toDomainList(job?.domains)) add(`from:@${domain}`);
   add(toQueryPhrase(job?.schoolName));
   for (const term of toSearchTermList(job?.searchTerms)) add(toQueryPhrase(term));
 
@@ -398,27 +408,33 @@ export function hasJobQueryClauses(job) {
  *
  * Example:
  *   `(from:@stmarys.edu.au OR "St Mary's Primary" OR "Year 4") after:2026/05/19`
+ *   `(from:@stmarys.edu.au OR from:@pandc.org.au OR "St Mary's") after:2026/05/19`
  *
  * This is the per-job sibling of `buildQuery` and follows exactly the same
  * bracketing rule: the clauses are OR-joined inside ONE pair of parentheses and
  * the `after:` floor is appended OUTSIDE the group, because Gmail's implicit
  * operator is AND and an unbracketed `after:` would bind to the last clause only.
- * A job whose only clause is its domain therefore emits `(from:@d) after:...`,
- * byte-identical to what the single-domain query emitted before this ticket.
+ * A job whose only clause is its one domain therefore emits `(from:@d) after:...`,
+ * byte-identical to what the single-domain query emitted before TASK-059.
  *
  * DELIBERATE WIDENING: unlike `buildQuery`, this matches on TEXT as well as on
  * sender - a quoted school name or search term matches subject and body. That is
  * the point of a processing job, not an accident. It also means the caller must
- * not assume every returned message came from `job.domain`.
+ * not assume every returned message came from one of `job.domains`.
  *
  * A job with NO usable clause THROWS (`code: "no_job_query"`) rather than
  * emitting a bare `after:` query: that query would return the user's entire
- * personal mailbox and put it through extraction. Upstream validation (TASK-055)
- * makes all three fields required, but this refuses the empty case anyway rather
- * than trusting that validation never regresses.
+ * personal mailbox and put it through extraction. THIS GUARD IS NOT MERELY
+ * DEFENSIVE (TASK-059): `domains` is OPTIONAL upstream, so only `name` and
+ * `schoolName` are required by `validateProcessingJobs`, and a job with no
+ * domains, no search terms and a `schoolName` that `toQueryPhrase` strips to ""
+ * (say `"""`) passes validation and reaches here with zero clauses. It is a
+ * REACHABLE case, and the throw is what stops a mailbox-wide query being issued
+ * for it - `hasJobQueryClauses` is how scan.mjs sees it coming and reports the job
+ * `not_configured` instead.
  *
  * @param {object} args
- * @param {{ id?: string, name?: string, schoolName?: unknown, domain?: unknown, searchTerms?: unknown }} args.job
+ * @param {{ id?: string, name?: string, schoolName?: unknown, domains?: unknown, searchTerms?: unknown }} args.job
  * @param {Date|string|number|null} [args.since] Watermark; the window starts here.
  * @param {number} [args.sinceDays] Lookback used when `since` is absent.
  * @param {() => Date} [args.now] Injectable clock.
@@ -1063,8 +1079,9 @@ export async function getMessage(
  * @param {number} [args.maxBodyChars]
  * @param {string[]|Set<string>|null} [args.searchDomains] Pass what the caller
  *   already read, to save a second table lookup.
- * @param {{ id?: string, name?: string, schoolName?: unknown, domain?: unknown, searchTerms?: unknown }|null} [args.job]
- *   One processing job to search for (TASK-056).
+ * @param {{ id?: string, name?: string, schoolName?: unknown, domains?: unknown, searchTerms?: unknown }|null} [args.job]
+ *   One processing job to search for (TASK-056; `domains` is a list since
+ *   TASK-059 and is optional).
  * @param {string|null} [args.query] A pre-built Gmail query, used verbatim.
  * @param {object} [deps]
  * @param {(userId: string, options?: object) => Promise<string>} [deps.getAccessToken]
