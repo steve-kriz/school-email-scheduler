@@ -1,11 +1,11 @@
 /**
  * School calendar - settings page.
  *
- * The processing jobs (TASK-055/TASK-057) - a named school + domain + search
- * terms, one block per job - the recurring-scan controls (TASK-010), and the
- * Disconnect Gmail control (TASK-013). Shares its API client, its connection
- * cards and its text helpers with app.js (same origin, plain ES module import,
- * no bundler).
+ * The processing jobs (TASK-055/TASK-057/TASK-060) - a named school, the sender
+ * domains its mail comes from and its extra search terms, one block per job -
+ * the recurring-scan controls (TASK-010), and the Disconnect Gmail control
+ * (TASK-013). Shares its API client, its connection cards and its text helpers
+ * with app.js (same origin, plain ES module import, no bundler).
  *
  * The two halves are independent: the settings form below is driven by
  * `createSettingsPage`, the disconnect section at the foot of the file by
@@ -15,26 +15,37 @@
  * THREE THINGS WORTH KNOWING BEFORE CHANGING THIS FILE.
  *
  * 1. EVERY STORED VALUE IS RENDERED AS TEXT, always - a job's name, its school
- *    name, its domain and each of its search terms. They are stored raw - the
- *    storage layer in backend/settings.mjs names escaping-on-render as its
- *    mitigation - so a stored `<img src=x onerror=alert(1)>` has to come back out
- *    as those literal characters. A value reaches the page in exactly two places:
- *    an input's `value` (character data by definition) and a `textContent`
- *    assignment. No markup is ever assembled from one, here or anywhere else.
+ *    name, its domains and its search terms, the last two comma-joined into one
+ *    field each by `joinCommaList`. They are stored raw - the storage layer in
+ *    backend/settings.mjs names escaping-on-render as its mitigation - so a
+ *    stored `<img src=x onerror=alert(1)>` has to come back out as those literal
+ *    characters, comma-joined string included. A value reaches the page in
+ *    exactly two places: an input's `value` (character data by definition) and a
+ *    `textContent` assignment. No markup is ever assembled from one, here or
+ *    anywhere else.
  *
  * 2. THE SERVER IS THE SOURCE OF TRUTH FOR VALIDATION, AND NO RULE HERE IS EVER
- *    STRICTER THAN ITS RULE (amended by TASK-057). The form sends what the user
- *    typed and renders whatever `400 { error, field }` comes back next to the
- *    field that was named. The ONE thing checked before the round trip is
- *    `validateProcessingJobsClient`, and it is deliberately confined to two rule
- *    families the server cannot report usefully in bulk: a REQUIRED
- *    name/schoolName/domain, and a DUPLICATE job name (trimmed, case-insensitive,
- *    per backend/settings.mjs `validateProcessingJobs`). It does NOT check domain
+ *    STRICTER THAN ITS RULE (amended by TASK-057, narrowed again by TASK-060).
+ *    The form sends what the user typed and renders whatever
+ *    `400 { error, field }` comes back next to the field that was named. The ONE
+ *    thing checked before the round trip is `validateProcessingJobsClient`, and
+ *    it is deliberately confined to two rule families the server cannot report
+ *    usefully in bulk: a REQUIRED name and schoolName, and a DUPLICATE job name
+ *    (trimmed, case-insensitive, per backend/settings.mjs
+ *    `validateProcessingJobs`). `domains` is OPTIONAL per job (TASK-059 - a job
+ *    with a school name and no domains is valid and still searchable), so there
+ *    is deliberately NO required-domains check here. It does NOT check domain
  *    shape, public-provider hosts, string lengths, the job cap or the search-term
  *    cap - re-implementing those would give two sources of truth that drift, and
  *    would let a page that is out of date silently refuse a value the server
  *    would have accepted. If a rule is not in that short list, it belongs on the
  *    server and its message arrives as a 400.
+ *
+ *    THE DOMAINS AND SEARCH-TERMS FIELDS ARE COMMA-SEPARATED TEXT (TASK-060).
+ *    One input each, split on commas by `splitCommaList` on the way out and
+ *    re-joined by `joinCommaList` on the way in. There is no per-term row editor
+ *    any more, and a comma can no longer be part of a search term entered here -
+ *    that is the deliberate reversal of TASK-056's old rule.
  *
  * 3. NO MARKUP ASSIGNMENT, ANYWHERE. Every string that reaches the DOM in this
  *    file goes through `textContent` or an input's `value`, including the
@@ -106,8 +117,13 @@ export const FORM_ERROR_ID = "error-form";
  * A sub-field outside it - a rename on the server, a typo, a hostile string - has
  * no slot on this page, so it falls through to the form-level line rather than
  * being interpolated into an element lookup.
+ *
+ * The superseded singular `domain` (renamed to `domains` by TASK-059) is
+ * deliberately NOT kept as an alias, exactly as `schoolName`/`searchDomains` are
+ * not kept in `FIELD_ERROR_IDS`: no element with that id is rendered any more, so
+ * aliasing it would point an error at nothing. It fails closed to the form line.
  */
-export const JOB_ERROR_FIELDS = Object.freeze(["name", "schoolName", "domain", "searchTerms"]);
+export const JOB_ERROR_FIELDS = Object.freeze(["name", "schoolName", "domains", "searchTerms"]);
 
 /**
  * The one indexed field shape the server emits, anchored at both ends.
@@ -153,6 +169,67 @@ function trimText(value) {
 }
 
 /**
+ * Parse one comma-separated field into a list (TASK-060).
+ *
+ * THE ONE PARSER ON THIS PAGE. Both list-valued job fields - `domains` and
+ * `searchTerms` - go through this pair and nothing else splits or joins a job
+ * field anywhere in this file. Two parsers would drift, and the drift would show
+ * up as one field tolerating a trailing comma while the other refused the save.
+ *
+ * `,` (U+002C) IS THE ONLY DELIMITER. Whitespace is not one, and neither is a
+ * semicolon: "a.edu.au b.edu.au" is ONE entry, because a domain (or a search
+ * phrase like "uniform shop") can legitimately contain a space and guessing at a
+ * second delimiter would send values the user never typed.
+ *
+ * TOLERANT, NEVER AN ERROR. A trailing comma, a leading comma, doubled commas and
+ * whitespace either side of one are all just "an empty piece to drop" - the user
+ * is mid-type, not mistaken. Nothing here de-duplicates, case-folds, caps the
+ * count or checks the shape of a piece: that is all server-side (rule 2 of the
+ * module docblock), and `validateJobDomains` in backend/settings.mjs collapses
+ * duplicate domains itself.
+ *
+ * Pure: no DOM, no module state, safe to unit-test by direct import.
+ *
+ * @param {unknown} text Raw input value, or anything at all.
+ * @returns {string[]} Trimmed, non-blank pieces in the order typed.
+ */
+export function splitCommaList(text) {
+  if (typeof text !== "string") return [];
+  return text
+    .split(",")
+    .map((piece) => piece.trim())
+    .filter((piece) => piece !== "");
+}
+
+/**
+ * Render a stored list back into one comma-separated field value (TASK-060).
+ *
+ * The inverse of `splitCommaList` for every value that one produces:
+ * `splitCommaList(joinCommaList(list))` is `list` for any list of non-blank,
+ * comma-free, already-trimmed strings.
+ *
+ * Entries that are not strings, and entries that are blank once trimmed, are
+ * SKIPPED rather than joined, so a stored `["a", "", "b"]` reads as "a, b" and
+ * never as "a, , b" - an empty slot the user would then have to clean up. A
+ * non-array (a legacy scalar, a null) is "", so a malformed stored value renders
+ * an empty field instead of throwing while the page builds.
+ *
+ * LOSSY BY DESIGN for one legacy shape: a stored entry that itself contains a
+ * comma ("canteen, roster", saved before TASK-060) renders into the field
+ * indistinguishably from two entries and will split into two on the next save.
+ * That is the direct, intended consequence of making the comma a delimiter here.
+ *
+ * @param {unknown} list
+ * @returns {string} "" when there is nothing to show.
+ */
+export function joinCommaList(list) {
+  if (!Array.isArray(list)) return "";
+  // The kept entries are NOT trimmed: they go into an input the user is about to
+  // edit, and this function's job is to show what is stored, not to rewrite it.
+  return list.filter((entry) => typeof entry === "string" && entry.trim() !== "").join(", ");
+}
+
+/**
  * Normalise whatever the settings API returned into rows this page can edit.
  *
  * Tolerant on purpose - the same first-run and malformed-body shapes
@@ -165,28 +242,33 @@ function trimText(value) {
  * `value`, and trimming what the user is about to edit would move their cursor.
  * The trim happens once, on the way out, in `buildJobsPayload`.
  *
+ * `domains` and `searchTerms` are both LISTS here (TASK-059/TASK-060) and get the
+ * same tolerance: a stored array maps entry-by-entry with a non-string coerced to
+ * "", and anything that is not an array at all - a legacy `domain` scalar, a
+ * null - is no entries, so the field renders empty rather than throwing.
+ *
  * @param {unknown} value
- * @returns {Array<{ id: string, name: string, schoolName: string, domain: string, searchTerms: string[] }>}
+ * @returns {Array<{ id: string, name: string, schoolName: string, domains: string[], searchTerms: string[] }>}
  */
 export function toEditableJobs(value) {
   if (!Array.isArray(value)) return [];
+  const toStringList = (raw) =>
+    Array.isArray(raw) ? raw.map((entry) => (typeof entry === "string" ? entry : "")) : [];
   return value.map((entry) => {
     const source = entry !== null && typeof entry === "object" && !Array.isArray(entry) ? entry : {};
     return {
       id: typeof source.id === "string" ? source.id : "",
       name: typeof source.name === "string" ? source.name : "",
       schoolName: typeof source.schoolName === "string" ? source.schoolName : "",
-      domain: typeof source.domain === "string" ? source.domain : "",
-      searchTerms: Array.isArray(source.searchTerms)
-        ? source.searchTerms.map((term) => (typeof term === "string" ? term : ""))
-        : [],
+      domains: toStringList(source.domains),
+      searchTerms: toStringList(source.searchTerms),
     };
   });
 }
 
 /** A blank row, the shape "Add processing job" appends. */
 export function emptyProcessingJob() {
-  return { id: "", name: "", schoolName: "", domain: "", searchTerms: [] };
+  return { id: "", name: "", schoolName: "", domains: [], searchTerms: [] };
 }
 
 /**
@@ -199,25 +281,32 @@ export function emptyProcessingJob() {
  * `validateProcessingJobs` mints one server-side for exactly that case, and a
  * client-invented id would be indistinguishable from a real one in storage.
  *
- * Blank search terms are DROPPED rather than sent: an empty row is what an
- * "Add search term" the user changed their mind about looks like, and the server
- * refuses a blank term outright ("A search term cannot be blank"), so sending it
- * would turn a stray tap into a failed save.
+ * `domains` AND `searchTerms` ARE SENT AS LISTS, never as the comma-separated text
+ * the user typed: the server refuses a bare string for either ("Search terms must
+ * be a list", "School email domains must be a list") precisely so that nobody has
+ * to guess at a delimiter server-side. The comma splitting happens once, in
+ * `splitCommaList`, on the way out of the DOM.
+ *
+ * Blank entries are dropped a second time here, belt and braces. `splitCommaList`
+ * has already dropped them - a doubled comma is not an entry - but this layer is
+ * also reachable from state that was never in the DOM, and the server refuses a
+ * blank outright ("A search term cannot be blank", "A school email domain cannot
+ * be blank"), so a stray blank must never turn into a failed save.
  *
  * @param {unknown} jobs Rows from `readForm`.
  * @returns {Array<object>}
  */
 export function buildJobsPayload(jobs) {
   if (!Array.isArray(jobs)) return [];
+  const cleanList = (raw) =>
+    (Array.isArray(raw) ? raw : []).map(trimText).filter((entry) => entry !== "");
   return jobs.map((entry) => {
     const source = entry !== null && typeof entry === "object" && !Array.isArray(entry) ? entry : {};
     const job = {
       name: trimText(source.name),
       schoolName: trimText(source.schoolName),
-      domain: trimText(source.domain),
-      searchTerms: (Array.isArray(source.searchTerms) ? source.searchTerms : [])
-        .map(trimText)
-        .filter((term) => term !== ""),
+      domains: cleanList(source.domains),
+      searchTerms: cleanList(source.searchTerms),
     };
     const id = trimText(source.id);
     if (id !== "") job.id = id;
@@ -233,11 +322,23 @@ export function buildJobsPayload(jobs) {
  * the caller feeds it straight into `showFieldError` with no adapter.
  *
  * ORDER IS THE POINT. Jobs are walked top to bottom and, within a job, the checks
- * run name -> duplicate-name -> schoolName -> domain, which is `validateProcessingJobs`'
+ * run name -> duplicate-name -> schoolName, which is `validateProcessingJobs`'
  * own order. That means the reported problem is always the topmost one on screen,
  * and two jobs with blank names are reported as "required" (job 0 fails on its own
  * name before job 1 is ever compared to it) rather than as duplicates of each
  * other, which would be a baffling thing to be told.
+ *
+ * THERE IS NO REQUIRED-DOMAINS CHECK (TASK-059/TASK-060). `validateJobDomains` on
+ * the server treats an absent, null or empty `domains` list as "no domains", not
+ * as a mistake: `buildJobQuery` builds a usable query from a quoted school name
+ * and/or search terms alone, so a job that matches its school through a newsletter
+ * relay is legitimate. A required-check here would refuse a save the server would
+ * have accepted, which rule 2 forbids. An empty `domains` is exactly as
+ * unremarkable as an empty `searchTerms`, which has never been checked either.
+ *
+ * IT READS LISTS, NOT TEXT. `readJobsFromDom` has already run `splitCommaList`
+ * over both comma-separated fields, so every row reaching here carries real
+ * arrays; nothing in this function re-splits a string or touches an input.
  *
  * WHAT IS NOT CHECKED, ON PURPOSE: domain shape, public-provider hosts, any length
  * bound, the job cap and the search-term cap. See rule 2 - this function may never
@@ -273,9 +374,7 @@ export function validateProcessingJobsClient(jobs) {
     if (trimText(source.schoolName) === "") {
       return { field: at("schoolName"), error: "School name is required" };
     }
-    if (trimText(source.domain) === "") {
-      return { field: at("domain"), error: "School email domain is required" };
-    }
+    // No domains check: see the docblock. `domains` is optional per job.
   }
 
   return null;
@@ -349,17 +448,25 @@ export function detectTimezone() {
 }
 
 /* ---------------------------------------------------------------------------
- * The processing-job rows (TASK-057)
+ * The processing-job rows (TASK-057, TASK-060)
  *
  * The ONLY nodes this file builds. Three rules hold throughout:
  *
  *  - EVERY node comes from `el()` / `createElement`, and every value reaches the
  *    DOM as an input's `value` or a `textContent` - see rule 1 of the docblock.
- *  - ELEMENT IDS ARE INDEX-BASED (`job-2-domain`), so they line up 1:1 with the
- *    server's `processingJobs[2].domain` error names and `fieldErrorId` can
+ *  - ELEMENT IDS ARE INDEX-BASED (`job-2-domains`), so they line up 1:1 with the
+ *    server's `processingJobs[2].domains` error names and `fieldErrorId` can
  *    resolve one into the other. They are therefore only valid for the CURRENT
  *    render: never cache one across an add or a remove, and resolve controls
  *    through `data-job-index` at event time.
+ *
+ *    THAT 1:1 RULE IS WHY THE DOMAIN FIELD'S IDS WERE RENAMED with TASK-059's
+ *    server-side `domain` -> `domains`: `fieldErrorId` builds
+ *    `error-job-${index}-${key}` by concatenating the server's OWN key, so
+ *    holding on to a `job-2-domain` element id while the server named `domains`
+ *    would have needed a key-to-id mapping layer and would have broken the
+ *    invariant this bullet states. The ids are `job-<i>-domains` and
+ *    `error-job-<i>-domains`. Decided in TASK-060; do not re-open it.
  *  - HANDLERS ARE BOUND TO NODES THIS FUNCTION JUST CREATED, once each. The list
  *    is rebuilt wholesale on every structural change, so the old nodes and their
  *    listeners are discarded with them and nothing can stack. (Delegation on the
@@ -416,72 +523,15 @@ function jobField(doc, index, key, labelText, value, describedAs) {
   return field;
 }
 
-/** A `.btn btn-small` button carrying its row (and optionally its term) index. */
-function rowButton(doc, id, text, index, termIndex) {
+/** A `.btn btn-small` button carrying its row index. */
+function rowButton(doc, id, text, index) {
   const button = el(doc, "button", "btn btn-small", text);
   // Always explicit: every one of these sits inside #settings-form, where a
   // default type="submit" would save the whole form on every tap.
   button.setAttribute("type", "button");
   button.setAttribute("id", id);
   button.setAttribute("data-job-index", String(index));
-  if (termIndex !== undefined) button.setAttribute("data-term-index", String(termIndex));
   return button;
-}
-
-/**
- * The search-terms sub-list: the SAME interaction as the job list itself - one
- * button that appends an empty editable row, and a Remove on each row.
- *
- * Removing a term is not confirmed. It is one field, not a whole job, and the
- * arm-then-confirm gate is reserved for the larger action.
- */
-function termsBlock(doc, job, index, handlers, describedAs) {
-  const field = el(doc, "div", "field");
-
-  const heading = el(doc, "p", "field-label", "Extra search terms");
-  heading.setAttribute("id", `job-${index}-terms-label`);
-  field.appendChild(heading);
-
-  const list = el(doc, "ul", "job__terms");
-  list.setAttribute("id", `job-${index}-terms`);
-  list.setAttribute("aria-labelledby", `job-${index}-terms-label`);
-
-  const terms = Array.isArray(job?.searchTerms) ? job.searchTerms : [];
-  for (let termIndex = 0; termIndex < terms.length; termIndex += 1) {
-    const row = el(doc, "li", "job__term");
-    const termId = `job-${index}-term-${termIndex}`;
-
-    const label = el(doc, "label", "field-label", `Search term ${termIndex + 1}`);
-    label.setAttribute("for", termId);
-    row.appendChild(label);
-
-    const input = el(doc, "input", "field-input");
-    input.setAttribute("type", "text");
-    input.setAttribute("id", termId);
-    input.setAttribute("data-job-index", String(index));
-    input.setAttribute("data-term-index", String(termIndex));
-    input.setAttribute("autocomplete", "off");
-    input.setAttribute("aria-label", `Search term ${termIndex + 1} for ${describedAs}`);
-    input.value = typeof terms[termIndex] === "string" ? terms[termIndex] : "";
-    row.appendChild(input);
-
-    const remove = rowButton(doc, `remove-${termId}`, "Remove term", index, termIndex);
-    remove.setAttribute("aria-label", `Remove search term ${termIndex + 1} from ${describedAs}`);
-    remove.addEventListener("click", () => handlers.onRemoveTerm?.(index, termIndex));
-    row.appendChild(remove);
-
-    list.appendChild(row);
-  }
-  field.appendChild(list);
-
-  field.appendChild(errorSlot(doc, `error-job-${index}-searchTerms`));
-
-  const add = rowButton(doc, `add-term-${index}`, "Add search term", index);
-  add.setAttribute("aria-label", `Add a search term to ${describedAs}`);
-  add.addEventListener("click", () => handlers.onAddTerm?.(index));
-  field.appendChild(add);
-
-  return field;
 }
 
 /**
@@ -544,8 +594,24 @@ function jobBlock(doc, job, index, handlers, confirming) {
 
   section.appendChild(jobField(doc, index, "name", "Name", job?.name, describedAs));
   section.appendChild(jobField(doc, index, "schoolName", "School name", job?.schoolName, describedAs));
-  section.appendChild(jobField(doc, index, "domain", "Email domain", job?.domain, describedAs));
-  section.appendChild(termsBlock(doc, job, index, handlers, describedAs));
+  // Both list fields are ONE ordinary text input each (TASK-060), built by the
+  // same helper as the two scalar fields above and carrying the same
+  // `error-job-<i>-<key>` slot - so `error-job-<i>-searchTerms`, the id the old
+  // per-term block used to build by hand, still exists and a server 400 on
+  // `processingJobs[<i>].searchTerms` still lands on it.
+  section.appendChild(
+    jobField(doc, index, "domains", "Email domains (comma separated)", joinCommaList(job?.domains), describedAs)
+  );
+  section.appendChild(
+    jobField(
+      doc,
+      index,
+      "searchTerms",
+      "Search terms (comma separated)",
+      joinCommaList(job?.searchTerms),
+      describedAs
+    )
+  );
 
   if (confirming) {
     section.appendChild(confirmBlock(doc, job, index, handlers, describedAs));
@@ -571,9 +637,9 @@ function jobBlock(doc, job, index, handlers, confirming) {
  * @param {Document} doc
  * @param {Element|null} container The `#processing-jobs` div.
  * @param {Array<object>} jobs Editable rows (see `toEditableJobs`).
- * @param {object} [handlers] `onAddTerm`, `onRemoveTerm`, `onRemoveJob`,
- *   `onConfirmRemoveJob`, `onCancelRemoveJob`, plus `confirmingKey` - the temp key
- *   of the one row, if any, currently armed for removal.
+ * @param {object} [handlers] `onRemoveJob`, `onConfirmRemoveJob`,
+ *   `onCancelRemoveJob`, plus `confirmingKey` - the temp key of the one row, if
+ *   any, currently armed for removal.
  * @returns {number} How many rows were rendered.
  */
 export function renderProcessingJobs(doc, container, jobs, handlers = {}) {
@@ -730,17 +796,32 @@ export function createSettingsPage(options = {}) {
    * would silently discard everything typed since the last save.
    *
    * A row whose input is missing (a stripped page, a test harness with no
-   * container) falls back to the value already in state rather than to "".
+   * container) falls back to the value already in state rather than to "". For
+   * the two comma-separated fields that fallback is the ARRAY in state, not the
+   * result of splitting "": an absent input means "nothing was read", which must
+   * not read as "the user cleared the field".
+   *
+   * NORMALISATION ON RE-RENDER IS ACCEPTED, AND VISIBLE. This function parses and
+   * `renderJobs` re-joins, so any structural action (add a job, remove one, arm
+   * or cancel a removal) rewrites an in-progress "a, b," as "a, b". That is
+   * `splitCommaList`'s tolerance made visible rather than a bug: nothing is
+   * cleared or reordered, and the only thing lost is an empty piece the user
+   * could not have meant.
    */
   function readJobsFromDom() {
+    // `null` is the sentinel for "no such input on the page" - "" is a real value
+    // (the user cleared the field) and the two must not be confused.
+    const listValue = (id, stored) => {
+      const text = inputValue(id, null);
+      if (text === null) return Array.isArray(stored) ? stored : [];
+      return splitCommaList(text);
+    };
     return state.jobs.map((job, index) => ({
       ...job,
       name: inputValue(`job-${index}-name`, job.name),
       schoolName: inputValue(`job-${index}-schoolName`, job.schoolName),
-      domain: inputValue(`job-${index}-domain`, job.domain),
-      searchTerms: (Array.isArray(job.searchTerms) ? job.searchTerms : []).map((term, termIndex) =>
-        inputValue(`job-${index}-term-${termIndex}`, term)
-      ),
+      domains: listValue(`job-${index}-domains`, job.domains),
+      searchTerms: listValue(`job-${index}-searchTerms`, job.searchTerms),
     }));
   }
 
@@ -753,8 +834,6 @@ export function createSettingsPage(options = {}) {
   function renderJobs() {
     return renderProcessingJobs(doc, byId("processing-jobs"), state.jobs, {
       confirmingKey: state.confirmingKey,
-      onAddTerm: addTerm,
-      onRemoveTerm: removeTerm,
       onRemoveJob: armRemoveJob,
       onConfirmRemoveJob: confirmRemoveJob,
       onCancelRemoveJob: cancelRemoveJob,
@@ -782,28 +861,6 @@ export function createSettingsPage(options = {}) {
     renderJobs();
     focusField(`job-${state.jobs.length - 1}-name`);
     return state.jobs.length;
-  }
-
-  function addTerm(index) {
-    syncJobsFromDom();
-    const job = state.jobs[index];
-    if (!job) return;
-    job.searchTerms = Array.isArray(job.searchTerms) ? job.searchTerms : [];
-    job.searchTerms.push("");
-    renderJobs();
-    focusField(`job-${index}-term-${job.searchTerms.length - 1}`);
-  }
-
-  function removeTerm(index, termIndex) {
-    syncJobsFromDom();
-    // A term row is a single field, so its removal is not confirmed - but it is
-    // still a structural change, so it invalidates any pending job confirmation.
-    state.confirmingKey = null;
-    const job = state.jobs[index];
-    if (!job || !Array.isArray(job.searchTerms)) return;
-    if (termIndex < 0 || termIndex >= job.searchTerms.length) return;
-    job.searchTerms.splice(termIndex, 1);
-    renderJobs();
   }
 
   /**
@@ -1058,8 +1115,6 @@ export function createSettingsPage(options = {}) {
     renderProcessingJobs: renderJobs,
     readJobsFromDom,
     addJob,
-    addTerm,
-    removeTerm,
     armRemoveJob,
     cancelRemoveJob,
     confirmRemoveJob,

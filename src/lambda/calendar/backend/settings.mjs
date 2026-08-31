@@ -882,10 +882,17 @@ function validateSearchTerms(raw, field) {
   // its domains alone - so null/undefined normalise to "no terms".
   if (raw === undefined || raw === null) return [];
 
-  // A BARE STRING IS NOT ONE TERM AND IS NEVER COMMA-SPLIT. A search term may
-  // legitimately contain a comma ("canteen, roster"), so guessing at a delimiter
-  // would store terms the user never typed; the same reasoning that stops
-  // `validateSchoolNames` splitting a name. The client sends a list or nothing.
+  // A BARE STRING IS NOT ONE TERM AND IS NEVER COMMA-SPLIT. The API contract is a
+  // list: guessing at a delimiter server-side would store terms the user never
+  // typed, and the caller - which knows what it collected - is the only layer that
+  // can split safely. The client sends a list or nothing.
+  //
+  // NOTE (TASK-060): a comma is now a DELIMITER in the settings UI's search-terms
+  // field, so a term containing one can no longer be entered there; the UI splits
+  // on it and sends the pieces. The old justification for this branch ("a search
+  // term may legitimately contain a comma") no longer holds and has been removed -
+  // do not restore it. The RULE itself is unchanged and still correct: this module
+  // splits nothing.
   if (!Array.isArray(raw)) {
     throw new SettingsValidationError(field, "Search terms must be a list");
   }
