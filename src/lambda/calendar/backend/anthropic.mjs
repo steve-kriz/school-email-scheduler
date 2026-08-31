@@ -555,9 +555,11 @@ export function isWatchedSender(from, searchDomains) {
  * in it.
  *
  * PER PROCESSING JOB (TASK-056), the caller passes exactly that job's own values
- * - `schoolNames: [job.schoolName]`, `searchDomains: [job.domain]` - never a
- * union across jobs, so one school's name is never shown to the model while it
- * reads another school's email.
+ * - `schoolNames: [job.schoolName]`, `searchDomains: job.domains` (a LIST since
+ * TASK-059, passed straight through: a job may watch several sender domains and
+ * every one of them belongs in this block) - never a union across jobs, so one
+ * school's name is never shown to the model while it reads another school's
+ * email.
  *
  * A JOB'S `searchTerms` ARE NEVER SENT (TASK-056, DECISION A). They are a Gmail
  * RETRIEVAL hint and nothing else. Three reasons, none of which should be undone
@@ -1101,7 +1103,7 @@ export async function callModel(
  * `queryMatched` - THE ONE WAY PAST THE COST GATE (TASK-056). Since processing
  * jobs search on QUOTED TEXT as well as on sender domain (`buildJobQuery` in
  * gmail.mjs), a message a job's own query returned may legitimately come from a
- * sender outside `job.domain` - a newsletter relay, a P&C mailing list, a teacher
+ * sender outside `job.domains` - a newsletter relay, a P&C mailing list, a teacher
  * writing from a personal account and quoting the school's name. Those are
  * exactly the messages the widening exists to find, so dropping them here as
  * `skipped_sender` would make the widened query pure cost: Gmail quota spent

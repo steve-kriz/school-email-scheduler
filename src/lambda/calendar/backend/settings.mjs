@@ -2,12 +2,22 @@
  * settings.mjs - what the user asked us to watch for, and how it is validated.
  *
  * A list of named PROCESSING JOBS (TASK-055). Each job is one independent
- * "search + extract" configuration: a display `name`, one `schoolName`, one
- * sender `domain`, and zero or more free-text `searchTerms`. A job is the whole
- * input to the Gmail search query (TASK-056) and the extraction prompt
- * (TASK-007), which is why the validation here is not cosmetic: a domain that is
- * wrong in the wrong direction decides how much of the user's mailbox is read
- * and how much of it is sent to a model.
+ * "search + extract" configuration: a display `name`, one `schoolName`, zero or
+ * more sender `domains` (TASK-059), and zero or more free-text `searchTerms`. A
+ * job is the whole input to the Gmail search query (TASK-056) and the extraction
+ * prompt (TASK-007), which is why the validation here is not cosmetic: a domain
+ * that is wrong in the wrong direction decides how much of the user's mailbox is
+ * read and how much of it is sent to a model.
+ *
+ * `domains` IS OPTIONAL, `name` AND `schoolName` ARE REQUIRED (TASK-059). A job
+ * that watches several sender domains at once - a P&C association's own domain
+ * alongside the school's - is an ordinary setup, so the singular `domain` became
+ * the plural `domains` list, matching `searchTerms`. It is OPTIONAL because
+ * `hasJobQueryClauses`/`buildJobQuery` (gmail.mjs) already build a usable query
+ * from a quoted school name and/or search terms alone: requiring a domain would
+ * add a restriction the pipeline does not need and would refuse a legitimate
+ * "match this school by name via a newsletter relay" job. The "a job must be
+ * searchable" guarantee is carried by the still-required `schoolName`.
  *
  * Each job carries a server-owned `id` (a UUID) that never changes once created,
  * because TASK-056 attributes extracted events to it and the id must survive a
@@ -20,10 +30,10 @@
  * plain JS array of plain objects to `L` of `M` on its own, so the patch carries
  * exactly that - NOT a `Set` (this attribute is not a string set) and not a JSON
  * string. `JSON.stringify(new Set())` is `"{}"`, so a Set that escaped into a
- * response body would silently become an empty object. A job's `searchTerms` is
- * likewise a plain array, and an EMPTY one is stored AS an empty list: the
- * empty-set write error that `REMOVE_ATTRIBUTE` exists for applies to `SS`, not
- * to `L`.
+ * response body would silently become an empty object. A job's `searchTerms` and
+ * its `domains` (TASK-059) are likewise plain arrays, and an EMPTY one is stored
+ * AS an empty list: the empty-set write error that `REMOVE_ATTRIBUTE` exists for
+ * applies to `SS`, not to `L`.
  *
  * LEGACY `schoolNames` (SS), `searchDomains` (SS) and `schoolName` (S). These are
  * the pre-TASK-055 shape and are no longer part of the read or write contract: no
@@ -38,7 +48,16 @@
  * modules and tests import them, and they remain the reference for this file's
  * count-then-normalise-then-dedup shape) but they are NO LONGER part of the
  * settings request path - `requireValidSettings` calls neither. `MAX_SCHOOL_NAMES`
- * and `MAX_SEARCH_DOMAINS` exist only to bound those two retained functions.
+ * and `MAX_SEARCH_DOMAINS` exist only to bound those two retained functions; the
+ * cap that applies to a JOB's domain list is `MAX_SEARCH_DOMAINS_PER_JOB`.
+ *
+ * CO-DEPLOY WITH THE FRONTEND. The request contract here has no legacy alias, so
+ * an older settings page cannot save against it: TASK-055/057 made
+ * `processingJobs` the only accepted shape, and TASK-059 renamed a job's singular
+ * `domain` to the plural `domains` list. TASK-060 is the matching frontend (a
+ * comma-separated domains field) and MUST ship with this module - a settings page
+ * that still sends `domain` will have that key dropped as unknown and will save a
+ * job with no sender filter.
  *
  * NO SANITISATION, DELIBERATELY. Job names, school names, domains and search
  * terms are stored exactly as validated - raw, unescaped text. Stripping or
@@ -126,6 +145,24 @@ export const MAX_PROCESSING_JOB_NAME_LENGTH = 120;
 export const MAX_SEARCH_TERMS_PER_JOB = 20;
 
 /**
+ * How many sender domains one job may watch (TASK-059).
+ *
+ * The sibling of `MAX_SEARCH_TERMS_PER_JOB`, and the cap that actually applies on
+ * the settings request path - a job's `domains` list, not the retained flat
+ * `MAX_SEARCH_DOMAINS`. Every domain is OR'd into that job's Gmail query
+ * (TASK-056) alongside its school name and search terms, so this is what keeps
+ * the generated query inside Google's own length limits: ten `from:@<host>`
+ * clauses of a realistic length is a few hundred bytes, which leaves room for the
+ * twenty quoted search terms `MAX_SEARCH_TERMS_PER_JOB` allows beside them.
+ *
+ * Ten is also the number a person can hold in their head for ONE job: a school,
+ * its P&C, a newsletter relay and a handful of sub-domains. It is deliberately
+ * the same value as `MAX_SEARCH_DOMAINS` (which used to bound the whole
+ * connection) so nobody who was inside the old cap is outside the new one.
+ */
+export const MAX_SEARCH_DOMAINS_PER_JOB = 10;
+
+/**
  * Search term bound, in code points. Deliberately SHORTER than
  * `MAX_SCHOOL_NAME_LENGTH`: a search term is bounded by Gmail QUERY length, not
  * by prompt token cost. Twenty terms of ~86 characters quoted and OR-joined is
@@ -149,7 +186,9 @@ export const MAX_SCHOOL_NAMES = 10;
  * How many domains one user may watch.
  *
  * RETAINED FOR `validateSearchDomains` ONLY (TASK-055), for the same reason as
- * `MAX_SCHOOL_NAMES`: a processing job carries exactly one domain.
+ * `MAX_SCHOOL_NAMES`: a processing job carries its OWN domain list, bounded by
+ * `MAX_SEARCH_DOMAINS_PER_JOB` (TASK-059), and this constant bounds nothing on
+ * the settings request path.
  */
 export const MAX_SEARCH_DOMAINS = 10;
 
@@ -446,9 +485,10 @@ const ECHO_LENGTH = 64;
  *     failure that belongs to the whole field (not an array, empty, too many,
  *     a duplicate job name, a duplicate job id);
  *   - an INDEXED per-job name of the form `processingJobs[<index>].<key>`, e.g.
- *     "processingJobs[2].domain", where `<index>` is the zero-based position in
- *     the SUBMITTED array and `<key>` is one of `name`, `schoolName`, `domain`,
- *     `searchTerms` (TASK-055). The index is the submitted one so the form can
+ *     "processingJobs[2].domains", where `<index>` is the zero-based position in
+ *     the SUBMITTED array and `<key>` is one of `name`, `schoolName`, `domains`,
+ *     `searchTerms` (TASK-055, pluralised by TASK-059). The index is the
+ *     submitted one so the form can
  *     point at the row the user is looking at;
  *   - null when the whole body was unusable.
  */
@@ -647,9 +687,12 @@ export function validateSchoolNames(raw) {
  * Validate and normalise the domain list.
  *
  * NO LONGER ON THE SETTINGS REQUEST PATH (TASK-055), for the same reason as
- * `validateSchoolNames`: a processing job carries exactly one domain, validated
- * by `validateProcessingJobs` through the same `normalizeDomain` ->
- * `isValidDomain` -> `isPublicMailDomain` sequence.
+ * `validateSchoolNames`: a processing job carries its own `domains` list
+ * (TASK-059), validated by `validateJobDomains` through the same
+ * `normalizeDomain` -> `isValidDomain` -> `isPublicMailDomain` sequence. This
+ * function remains the reference for that shape, and `validateJobDomains` is its
+ * indexed, per-job sibling - the ONE rule it diverges on is the empty list, which
+ * is a mistake for a whole connection but not for one job.
  *
  * Rule order is chosen so the message names the real problem:
  *  1. Is it a non-empty array at all, and within MAX_SEARCH_DOMAINS? The count is
@@ -745,6 +788,88 @@ function requiredJobText(raw, { field, label, max }) {
 }
 
 /**
+ * Validate one job's sender domain list (TASK-059).
+ *
+ * The indexed, per-job sibling of `validateSearchDomains`, with the SAME rule
+ * order so the message names the real problem:
+ *  1. Shape and count. The count is checked on what was SUBMITTED, before
+ *     de-duplication, so eleven entries with two duplicates among them is
+ *     reported as "too many" rather than silently collapsing to a number that
+ *     happens to fit.
+ *  2. `normalizeDomain` each entry, then a BLANK check, then `isValidDomain`,
+ *     then `isPublicMailDomain`. The blank check is split out of
+ *     `validateSearchDomains`' single "not a valid email domain" branch on
+ *     purpose: with several entries in one field, `"" is not a valid email
+ *     domain` tells the user nothing, whereas "cannot be blank" names the
+ *     mistake. It mirrors `validateSearchTerms`' blank-entry message.
+ *  3. De-duplicate on the NORMALISED value, first occurrence wins.
+ *
+ * DUPLICATES COLLAPSE, THEY DO NOT ERROR - matching `validateSearchDomains`.
+ * "StMarys.EDU.au", "@stmarys.edu.au" and "https://stmarys.edu.au/news" in one
+ * list are three spellings of one intent, unlike a duplicate JOB NAME, which is
+ * an identity clash and errors.
+ *
+ * ABSENT IS NOT A MISTAKE (the one deliberate divergence from
+ * `validateSearchDomains`, which requires a non-empty list). `domains` is
+ * OPTIONAL: `hasJobQueryClauses`/`buildJobQuery` (gmail.mjs) already build a
+ * usable query from a quoted school name and/or search terms alone, and a job
+ * that matches a school by name via a newsletter relay is legitimate. This
+ * follows `validateSearchTerms`' null/undefined branch instead.
+ *
+ * A BARE STRING IS REFUSED, NEVER COMMA-SPLIT, for the same reason as
+ * `validateSearchTerms`: guessing at a delimiter would store values the user
+ * never typed. TASK-060's UI does the comma splitting client-side and sends a
+ * list.
+ *
+ * @param {unknown} raw
+ * @param {string} field Indexed field name for any error.
+ * @returns {string[]} Normalised, de-duplicated, order preserved. `[]` when the
+ *   caller sent nothing.
+ * @throws {SettingsValidationError}
+ */
+function validateJobDomains(raw, field) {
+  if (raw === undefined || raw === null) return [];
+
+  if (!Array.isArray(raw)) {
+    throw new SettingsValidationError(field, "School email domains must be a list");
+  }
+  if (raw.length > MAX_SEARCH_DOMAINS_PER_JOB) {
+    throw new SettingsValidationError(
+      field,
+      `Enter at most ${MAX_SEARCH_DOMAINS_PER_JOB} school email domains for one processing job`
+    );
+  }
+
+  const seen = new Set();
+  const domains = [];
+
+  for (const entry of raw) {
+    // `normalizeDomain` returns "" for a non-string (a number, null, a nested
+    // array), so those land on the blank message below rather than crashing.
+    const domain = normalizeDomain(entry);
+    if (domain === "") {
+      throw new SettingsValidationError(field, "A school email domain cannot be blank");
+    }
+    if (!isValidDomain(domain)) {
+      // The RAW entry is echoed, not the normalised one, so a user with several
+      // domains in one field can see WHICH of them was wrong.
+      throw new SettingsValidationError(field, `"${echo(entry)}" is not a valid email domain`);
+    }
+    if (isPublicMailDomain(domain)) {
+      throw new SettingsValidationError(
+        field,
+        `${domain} is a public email provider, not a school domain - use the school's own domain`
+      );
+    }
+    if (seen.has(domain)) continue;
+    seen.add(domain);
+    domains.push(domain);
+  }
+
+  return domains;
+}
+
+/**
  * Validate one job's free-text search terms.
  *
  * @param {unknown} raw
@@ -754,7 +879,7 @@ function requiredJobText(raw, { field, label, max }) {
  */
 function validateSearchTerms(raw, field) {
   // Absent is not a mistake - a job may legitimately match on its school name and
-  // domain alone - so null/undefined normalise to "no terms".
+  // its domains alone - so null/undefined normalise to "no terms".
   if (raw === undefined || raw === null) return [];
 
   // A BARE STRING IS NOT ONE TERM AND IS NEVER COMMA-SPLIT. A search term may
@@ -818,9 +943,14 @@ function validateSearchTerms(raw, field) {
  * STORED casing is the user's own, exactly as typed - lower-casing display text
  * is not this layer's decision (see `validateSchoolNames`).
  *
- * Two jobs MAY share a `domain`, a `schoolName`, or both, as long as their names
+ * Two jobs MAY share a domain, a `schoolName`, or both, as long as their names
  * differ - "Newsletters" and "Sport" on one school domain is an ordinary setup,
  * and TASK-056 documents the duplicate events that follow as expected.
+ *
+ * REQUIRED VS OPTIONAL (TASK-059): `name` and `schoolName` are REQUIRED, and
+ * `domains` is OPTIONAL - absent, null or `[]` all normalise to `[]` and save.
+ * See `validateJobDomains` for why, and the module docblock for what still
+ * guarantees a job is searchable.
  *
  * IDS ARE PRESERVED, NOT RE-MINTED, when the client echoes a canonical UUID back.
  * The PUT is a whole-list replace and never reads the stored row, so echoing is
@@ -834,9 +964,11 @@ function validateSearchTerms(raw, field) {
  * @param {object} [deps]
  * @param {() => string} [deps.newId] Id generator; injectable so every branch is
  *   reachable with a stub and no randomness.
- * @returns {Array<{ id: string, name: string, schoolName: string, domain: string, searchTerms: string[] }>}
+ * @returns {Array<{ id: string, name: string, schoolName: string, domains: string[], searchTerms: string[] }>}
  *   Exactly those five keys per job - an unknown key in the payload is DROPPED,
- *   so the stored item cannot grow a field nobody validated. Input order preserved.
+ *   so the stored item cannot grow a field nobody validated. That includes the
+ *   superseded singular `domain` (TASK-059), which is neither read nor emitted.
+ *   Input order preserved.
  * @throws {SettingsValidationError}
  */
 export function validateProcessingJobs(raw, { newId = randomUUID } = {}) {
@@ -887,24 +1019,12 @@ export function validateProcessingJobs(raw, { newId = randomUUID } = {}) {
       max: MAX_SCHOOL_NAME_LENGTH,
     });
 
-    if (source.domain !== undefined && source.domain !== null && typeof source.domain !== "string") {
-      // An array is refused rather than having its first element taken, for the
-      // same reason as `name`/`schoolName`: a job watches exactly one domain.
-      throw new SettingsValidationError(at("domain"), "School email domain must be text");
-    }
-    if (source.domain === undefined || source.domain === null || source.domain.trim() === "") {
-      throw new SettingsValidationError(at("domain"), "School email domain is required");
-    }
-    const domain = normalizeDomain(source.domain);
-    if (!isValidDomain(domain)) {
-      throw new SettingsValidationError(at("domain"), `"${echo(source.domain)}" is not a valid email domain`);
-    }
-    if (isPublicMailDomain(domain)) {
-      throw new SettingsValidationError(
-        at("domain"),
-        `${domain} is a public email provider, not a school domain - use the school's own domain`
-      );
-    }
+    // The SINGULAR `source.domain` a pre-TASK-059 client may still send is not
+    // read here at all: it is an unknown key and is dropped with the rest of
+    // them, so such a payload saves a job with an empty `domains` list rather
+    // than being silently aliased into the new field. See the co-deploy note in
+    // the module docblock - TASK-060 is the matching frontend.
+    const domains = validateJobDomains(source.domains, at("domains"));
 
     const searchTerms = validateSearchTerms(source.searchTerms, at("searchTerms"));
 
@@ -924,7 +1044,7 @@ export function validateProcessingJobs(raw, { newId = randomUUID } = {}) {
       seenIds.add(idKey);
     }
 
-    jobs.push({ id, name, schoolName, domain, searchTerms });
+    jobs.push({ id, name, schoolName, domains, searchTerms });
   }
 
   return jobs;
@@ -1024,8 +1144,8 @@ export function validateSettingsPayload(payload, options = {}) {
  * at all, so a body carrying only those is a 400 naming `processingJobs`. The
  * legacy shape survives only on the READ side, where `toPublicJson` migrates a
  * stored row into one synthesised job; there is no request-side alias. That makes
- * this ticket's frontend (TASK-057) a required co-deploy - an older settings page
- * cannot save against this contract.
+ * this ticket's frontend (TASK-057, and TASK-060 for the `domains` rename) a
+ * required co-deploy - an older settings page cannot save against this contract.
  *
  * The schedule fields are unchanged and still optional: a key the caller omitted
  * means "leave whatever is stored alone", never "reset it".
@@ -1087,8 +1207,9 @@ export function parseJsonBody(event) {
  * client marshals that to a List of Maps (`L` of `M`) on its own, which is the
  * stored shape - NOT a `Set` (this is not a string set, and a `Set` that escaped
  * into a response body would `JSON.stringify` to `{}`) and NOT a JSON string. A
- * job's `searchTerms` is likewise a plain array, and an EMPTY one is written AS an
- * empty list: DynamoDB accepts an empty `L`, so there is nothing to work around.
+ * job's `searchTerms` and its `domains` are likewise plain arrays, and an EMPTY
+ * one is written AS an empty list: DynamoDB accepts an empty `L`, so there is
+ * nothing to work around.
  *
  * The WHOLE-LIST-empty case writes `REMOVE_ATTRIBUTE` instead of an empty list.
  * That is a CONSISTENCY choice with the string-set attributes elsewhere - "unset"
@@ -1124,7 +1245,11 @@ export function buildConnectionPatch(settings = {}) {
             id: job.id,
             name: job.name,
             schoolName: job.schoolName,
-            domain: job.domain,
+            // A copy, exactly as `searchTerms` below: an EMPTY list is written AS
+            // an empty `L` (this is a list, not an `SS`, so the empty-set write
+            // problem does not apply), which is the stored shape of the OPTIONAL
+            // `domains` when the user watches no sender domain (TASK-059).
+            domains: Array.isArray(job.domains) ? [...job.domains] : [],
             searchTerms: Array.isArray(job.searchTerms) ? [...job.searchTerms] : [],
           }))
         : REMOVE_ATTRIBUTE;

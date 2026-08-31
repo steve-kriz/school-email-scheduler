@@ -18,8 +18,9 @@
  *
  * ---------------------------------------------------------------------------
  * ONE SEARCH PER PROCESSING JOB (TASK-056). A user can watch more than one
- * school, and each job carries its own `{ id, name, schoolName, domain,
- * searchTerms }`. Every job is searched INDEPENDENTLY - its own Gmail query, its
+ * school, and each job carries its own `{ id, name, schoolName, domains,
+ * searchTerms }` - `domains` being a LIST since TASK-059, so one job can watch a
+ * school and its P&C together. Every job is searched INDEPENDENTLY - its own Gmail query, its
  * own extraction pass with its own school context, its own `storeEvents` call -
  * because that is the only way a stored event can be attributed back to the job
  * that found it (`processingJobId` on the row). It is a deliberate requirement,
@@ -349,8 +350,16 @@ function emptyResult(status, overrides = {}) {
  * change the moment the user reorders their jobs, which is worse than an
  * unattributed event.
  *
+ * READ-COMPATIBILITY FOR THE SINGULAR `domain` (TASK-059). A job stored under
+ * TASK-055/057 carries `domain: "<host>"`, not the `domains` list this module now
+ * reads. Such a job map is read as the one-element list `[domain]` so its owner's
+ * next scan still filters on the sender they configured - without this they would
+ * silently lose their filter until they happened to re-save. It is a READ-side
+ * tolerance only: nothing writes the singular key back, and a real save through
+ * `validateProcessingJobs` drops it as an unknown key.
+ *
  * @param {object|null|undefined} connection Raw row from `getConnection`.
- * @returns {Array<{ id: string, name: string, schoolName: string, domain: string, searchTerms: string[] }>}
+ * @returns {Array<{ id: string, name: string, schoolName: string, domains: string[], searchTerms: string[] }>}
  */
 export function toProcessingJobs(connection) {
   const raw = connection?.processingJobs;
@@ -364,23 +373,40 @@ export function toProcessingJobs(connection) {
     if (!entry || typeof entry !== "object") continue;
     const source = entry.M && typeof entry.M === "object" ? entry.M : entry;
     const text = (value) => String(value?.S ?? value ?? "").trim();
+    // A stored list arrives either as a plain array (document client) or as
+    // `{ L: [{ S: "..." }] }` (low-level client); blanks are dropped.
+    const list = (value) => {
+      const raw = value && typeof value === "object" && Array.isArray(value.L) ? value.L : value;
+      return Array.isArray(raw) ? raw.map((item) => text(item)).filter((item) => item !== "") : [];
+    };
+    // The SINGULAR `domain` fallback is the TASK-059 read-compatibility shim
+    // described in the docblock: only consulted when the job map has no `domains`
+    // attribute at all, so a job that deliberately watches no domain stays empty.
+    const hasDomains = source.domains !== undefined && source.domains !== null;
+    const legacyDomain = hasDomains ? "" : text(source.domain);
     jobs.push({
       id: text(source.id),
       name: text(source.name),
       schoolName: text(source.schoolName),
-      domain: text(source.domain),
+      domains: hasDomains ? list(source.domains) : legacyDomain ? [legacyDomain] : [],
       searchTerms: toSearchTermList(source.searchTerms?.L ? source.searchTerms.L.map((v) => text(v)) : source.searchTerms),
     });
   }
   if (jobs.length > 0) return jobs;
 
   const names = toSchoolNameList(connection?.schoolNames ?? connection?.schoolName);
+  // ONE JOB PER LEGACY DOMAIN, unchanged (TASK-059 renames the field only). Note
+  // that connections.mjs's `synthesizeLegacyProcessingJob` reads the SAME legacy
+  // attributes into ONE shared "Default" job instead, so a row with two legacy
+  // domains scans as two jobs here but shows as one in the settings response.
+  // That divergence pre-dates this ticket and is deliberately left alone here:
+  // reconciling it changes what a user sees, which is its own piece of work.
   return toDomainList(connection?.searchDomains).map((domain, index) => ({
     // Derived from the domain, which is the only stable thing a legacy row has.
     id: `legacy#${domain}`,
     name: names[index] || names[0] || domain,
     schoolName: names[index] || names[0] || "",
-    domain,
+    domains: [domain],
     searchTerms: [],
   }));
 }
@@ -665,7 +691,10 @@ export async function runScan({ userId, mode = "manual", maxMessages = null } = 
               // DECISION A; the rationale is in anthropic.mjs's
               // `buildUserContent`).
               schoolNames: [job.schoolName],
-              searchDomains: [job.domain],
+              // Already a list (TASK-059), so it is passed straight through: every
+              // domain the job watches reaches `<school_context>` and counts as a
+              // watched sender.
+              searchDomains: job.domains,
               // This message is here because THIS job's own query returned it,
               // and that query matches quoted text as well as sender domain. The
               // sender cost gate has therefore already been satisfied upstream;

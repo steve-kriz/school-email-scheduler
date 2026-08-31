@@ -33,8 +33,18 @@
 #                                             (case-insensitively), <= 120 code
 #                                             points, stored exactly as typed.
 #                           schoolName (S)  : one school name, <= 120 code points.
-#                           domain (S)      : one sender domain, normalised and
-#                                             lower-cased, e.g. "stmarys.edu.au".
+#                           domains (L of S): 0-10 sender domains (TASK-059),
+#                                             each normalised and lower-cased,
+#                                             e.g. "stmarys.edu.au". OPTIONAL -
+#                                             an EMPTY list is stored as an empty
+#                                             L, and a job may match on its
+#                                             school name and search terms alone.
+#                                             Supersedes the singular domain (S);
+#                                             a job map written before TASK-059
+#                                             still carries that key and is read
+#                                             as a one-element list by both
+#                                             toPublicJson and toProcessingJobs
+#                                             until its owner saves again.
 #                           searchTerms (L of S) : 0-20 free-text terms, each <= 80
 #                                             code points. An EMPTY list is stored
 #                                             as an empty L - legal, unlike an
@@ -49,8 +59,9 @@
 #                         All three legacy attributes are READ-MIGRATED, not
 #                         batch-migrated: a row that still carries them projects
 #                         through connections.mjs's toPublicJson as ONE synthesised
-#                         "Default" processing job (first sorted school name and
-#                         domain, every remaining entry folded in as a search
+#                         "Default" processing job (first sorted school name, and
+#                         the first sorted domain as a one-element domains list,
+#                         every remaining entry folded in as a search
 #                         term), and the owner's next settings save SETs
 #                         processingJobs and REMOVEs all three in the same
 #                         UpdateItem. No row carries both shapes; rows convert one
