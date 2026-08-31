@@ -1,10 +1,9 @@
 ---
 id: TASK-061
 title: timezone
-status: in-progress
-agent: orchestrator-session-1
+status: done
 created: 2026-08-31T00:20:25.539Z
-updated: 2026-08-31T11:40:00Z
+updated: 2026-08-31T12:00:00Z
 question: RESOLVED by the user directly. (1) Full IANA list, not a curated one - use Intl.supportedValuesOf("timeZone") (~400 entries) as the option source. Since that API is missing on some older browsers, fall back to a small hard-coded list (at minimum "UTC" plus the stored/detected zone itself, so the page never renders with zero usable options) when it throws or is undefined - see the added Acceptance Criteria under "Timezone option source" below. (2) Scan schedule only - this does NOT touch how event times are displayed on the calendar; the calendar keeps rendering in the browser's own timezone exactly as it does today. Do not touch anything under TASK-010's calendar-display code.
 ---
 

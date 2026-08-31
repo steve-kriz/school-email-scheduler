@@ -1,7 +1,7 @@
 ---
 id: TASK-060
 title: Simplify the processing job settings UI to comma-separated domain and search-term fields
-status: testing
+status: done
 created: 2026-08-31T00:00:00Z
 updated: 2026-08-31T10:30:00Z
 ---
