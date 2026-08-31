@@ -437,14 +437,122 @@ export function buildSchedulePayload(values = {}) {
   return payload;
 }
 
+/** The zone used when nothing else is known. Always offered, so the selector is never empty. */
+export const FALLBACK_TIMEZONE = "UTC";
+
 /** The browser's own zone, used as the default for a user who has none stored. */
 export function detectTimezone() {
   try {
     const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    return typeof zone === "string" && zone !== "" ? zone : "UTC";
+    return typeof zone === "string" && zone !== "" ? zone : FALLBACK_TIMEZONE;
   } catch {
-    return "UTC";
+    return FALLBACK_TIMEZONE;
   }
+}
+
+/**
+ * The zones offered when the browser cannot enumerate its own tz database.
+ *
+ * `Intl.supportedValuesOf` is recent enough that an older browser reaches the
+ * settings page without it, and a select with nothing in it is worse than a text
+ * box - there would be no way to set a zone at all. This is deliberately SHORT:
+ * it is a floor, not a curated list, and the stored or detected zone is added to
+ * it at render time (see `timezoneOptionList`), so the one zone the user
+ * actually needs is present even when it is not written here.
+ */
+export const TIMEZONE_FALLBACK_ZONES = Object.freeze([
+  FALLBACK_TIMEZONE,
+  "Australia/Adelaide",
+  "Australia/Brisbane",
+  "Australia/Darwin",
+  "Australia/Hobart",
+  "Australia/Melbourne",
+  "Australia/Perth",
+  "Australia/Sydney",
+  "Pacific/Auckland",
+  "Europe/London",
+  "America/New_York",
+  "America/Los_Angeles",
+]);
+
+/**
+ * Every IANA zone this browser knows about.
+ *
+ * The list is the browser's own (~400 entries), not a hand-written one: a
+ * curated list goes stale as zones are added and renamed, and would eventually
+ * refuse a zone the server - which validates against the same tz database -
+ * would have accepted. That is rule 2 of the docblock: the option list is an
+ * affordance, never a rule the server does not also enforce.
+ *
+ * @param {typeof Intl} [intlImpl] Injectable for tests; defaults to the global.
+ * @returns {string[]} Never empty.
+ */
+export function supportedTimezones(intlImpl) {
+  const intl = intlImpl || (typeof Intl !== "undefined" ? Intl : null);
+  try {
+    if (intl && typeof intl.supportedValuesOf === "function") {
+      const zones = intl.supportedValuesOf("timeZone");
+      if (Array.isArray(zones)) {
+        const usable = zones.filter((zone) => typeof zone === "string" && zone.trim() !== "");
+        if (usable.length > 0) return usable;
+      }
+    }
+  } catch {
+    // An older browser, or an Intl build with no zone list. Fall through.
+  }
+  return [...TIMEZONE_FALLBACK_ZONES];
+}
+
+/**
+ * The option values for the time zone selector, sorted, with `selected` present.
+ *
+ * THE SELECTED ZONE IS ALWAYS IN THE LIST. A stored zone this browser does not
+ * enumerate (an older browser on the fallback path, or a zone added to the tz
+ * database since the browser shipped) is added rather than dropped - otherwise
+ * the select would silently land on its first entry and the user's next save
+ * would rewrite a working schedule's zone to something they never chose.
+ *
+ * @param {unknown} selected The stored or detected zone.
+ * @param {typeof Intl} [intlImpl]
+ * @returns {string[]}
+ */
+export function timezoneOptionList(selected, intlImpl) {
+  const zones = new Set(supportedTimezones(intlImpl));
+  zones.add(FALLBACK_TIMEZONE);
+  const chosen = typeof selected === "string" ? selected.trim() : "";
+  if (chosen !== "") zones.add(chosen);
+  return [...zones].sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * Fill the time zone select and select `selected`.
+ *
+ * Options are BUILT, never assembled as markup (rule 3): a zone id reaches the
+ * DOM as an option's `textContent` and its `value`, both character data, so even
+ * a legacy stored value that is not a zone at all cannot become an element.
+ *
+ * @param {Document} doc
+ * @param {Element|null} select
+ * @param {unknown} selected
+ * @param {typeof Intl} [intlImpl]
+ * @returns {string} The zone left selected, or "" when there is no select.
+ */
+export function fillTimezoneSelect(doc, select, selected, intlImpl) {
+  if (!select) return "";
+  const chosen = (typeof selected === "string" && selected.trim() !== "" ? selected.trim() : FALLBACK_TIMEZONE);
+  const zones = timezoneOptionList(chosen, intlImpl);
+
+  clear(select);
+  for (const zone of zones) {
+    const option = el(doc, "option", null, zone);
+    option.value = zone;
+    select.appendChild(option);
+  }
+  // Set last, so the matching option already exists: assigning a value with no
+  // option behind it leaves a real select showing "" - the blank state this
+  // whole control exists to remove.
+  select.value = chosen;
+  return chosen;
 }
 
 /* ---------------------------------------------------------------------------
@@ -669,6 +777,8 @@ export function renderProcessingJobs(doc, container, jobs, handlers = {}) {
  * @param {Document} [options.document]
  * @param {Function} [options.fetchImpl]
  * @param {object} [options.api]
+ * @param {Function} [options.detectTimezone] The browser-zone fallback.
+ * @param {typeof Intl} [options.intl] The zone list source; defaults to the global `Intl`.
  * @returns {object} The controller.
  */
 export function createSettingsPage(options = {}) {
@@ -691,6 +801,25 @@ export function createSettingsPage(options = {}) {
   const api = options.api || createApiClient({ fetchImpl: options.fetchImpl, onUnauthorized: () => renderSignedOut() });
   const byId = (id) => doc.getElementById(id);
   const fallbackTimezone = typeof options.detectTimezone === "function" ? options.detectTimezone : detectTimezone;
+  // Injectable so a test can drive the no-`supportedValuesOf` path without
+  // reaching into the global Intl, exactly as `detectTimezone` is injectable.
+  const intlImpl = options.intl || (typeof Intl !== "undefined" ? Intl : null);
+
+  /**
+   * The zone to preselect for a user with none stored, never blank.
+   *
+   * `detectTimezone` already answers "UTC" when Intl throws; this also covers an
+   * INJECTED override that throws or answers with nothing, because a page that
+   * cannot work out a zone must still render a usable selector rather than fail
+   * while filling the form.
+   */
+  function browserTimezone() {
+    try {
+      return textOr(fallbackTimezone(), FALLBACK_TIMEZONE);
+    } catch {
+      return FALLBACK_TIMEZONE;
+    }
+  }
 
   // A client-side key per row, never sent anywhere. It exists only so the
   // confirming-row state survives the re-render that displays it: an index would
@@ -947,7 +1076,13 @@ export function createSettingsPage(options = {}) {
         ? settings.dayOfWeek
         : 0;
     set("schedule-day-input", String(storedDay));
-    set("timezone-input", typeof settings?.timezone === "string" && settings.timezone !== "" ? settings.timezone : fallbackTimezone());
+    // The stored zone wins; a first-time user gets the browser's own. Whichever
+    // it is, it ends up IN the option list even when this browser does not
+    // enumerate it - see `fillTimezoneSelect`. `fallbackTimezone` can itself
+    // fail (an Intl that throws, or an injected stub returning nothing), so the
+    // last word is UTC rather than a blank control.
+    const storedZone = typeof settings?.timezone === "string" ? settings.timezone.trim() : "";
+    fillTimezoneSelect(doc, byId("timezone-input"), storedZone !== "" ? storedZone : browserTimezone(), intlImpl);
 
     const enabled = byId("schedule-enabled-input");
     if (enabled) enabled.checked = settings?.scheduleEnabled === true;

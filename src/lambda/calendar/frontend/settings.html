@@ -96,7 +96,22 @@
 
           <div class="field">
             <label class="field-label" for="timezone-input">Time zone</label>
-            <input id="timezone-input" class="field-input" type="text" autocomplete="off" />
+            <!--
+              The options are filled in by settings.js from the browser's own
+              IANA zone list (TASK-061), which is far too long to write out here
+              and would go stale the moment a zone was renamed. The one static
+              option below is the FLOOR, not the list: it keeps the control
+              non-empty and submittable if the script never runs, and it is
+              replaced wholesale on the first fillForm.
+            -->
+            <select id="timezone-input" class="field-input">
+              <option value="UTC">UTC</option>
+            </select>
+            <p class="field-hint">
+              The automatic scan runs at the hour above, read in this time zone.
+              Daylight saving is followed for you, so the scan stays at the same
+              local hour all year.
+            </p>
             <p id="error-timezone" class="field-error" role="alert" hidden></p>
           </div>
 

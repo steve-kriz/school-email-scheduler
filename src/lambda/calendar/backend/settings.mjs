@@ -464,11 +464,44 @@ export const SCHEDULE_FREQUENCIES = Object.freeze(["daily", "weekly"]);
 /** One DNS label: alphanumeric, inner hyphens only. */
 const DOMAIN_LABEL_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
 
-/** IANA zone shape, e.g. "Australia/Sydney", "UTC", "America/Argentina/Salta". */
-const TIMEZONE_PATTERN = /^[A-Za-z0-9_+-]+(\/[A-Za-z0-9_+-]+){0,2}$/;
-
 /** Longest plausible IANA zone name, with headroom. */
 const MAX_TIMEZONE_LENGTH = 64;
+
+/**
+ * Is this a real IANA time zone?
+ *
+ * DELIBERATELY THE SAME CHECK AS `isValidTimezone` IN scan-schedule.mjs, and for
+ * the same reason: `Intl`'s own tz database is the only thing that knows which
+ * zones exist. This route used to shape-check with a regex, which happily
+ * accepted "Mars/Olympus_Mons" - and since the settings form saves here and then
+ * pushes the same zone to `PUT /calendar/api/scan/schedule`, which HAS always
+ * used the real database, the two endpoints disagreed: the zone was persisted on
+ * the connection row and the schedule it was meant for was never updated. The
+ * user was told "your school was saved, but the automatic scan schedule was
+ * not", with nothing on the page explaining which value was at fault.
+ *
+ * MIRRORED, NOT IMPORTED. Importing scan-schedule.mjs here would pull in
+ * scan.mjs -> gmail.mjs -> this module, a cycle, and would drag the whole scan
+ * stack into every settings request. The check is four lines and has no
+ * configuration or tuning of its own, so the copy cannot drift in any way that
+ * matters - but if scan-schedule.mjs's version ever changes, change this one.
+ *
+ * @param {unknown} value
+ * @returns {boolean}
+ */
+function isValidTimezone(value) {
+  if (typeof value !== "string" || !value.trim()) return false;
+  // Cheap guard first: nothing this long is a zone name, and it keeps an
+  // arbitrarily large body out of the ICU lookup.
+  if (value.length > MAX_TIMEZONE_LENGTH) return false;
+  try {
+    // eslint-disable-next-line no-new -- constructing it IS the validation.
+    new Intl.DateTimeFormat(undefined, { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /** How much of a rejected value is echoed back to the caller. */
 const ECHO_LENGTH = 64;
@@ -1108,8 +1141,10 @@ export function validateSchedule(payload) {
   }
 
   if (has("timezone")) {
+    // The trimmed value is what is checked AND what is stored, so the zone this
+    // route accepts is byte-for-byte the one the schedule route will be handed.
     const value = typeof payload.timezone === "string" ? payload.timezone.trim() : "";
-    if (!value || value.length > MAX_TIMEZONE_LENGTH || !TIMEZONE_PATTERN.test(value)) {
+    if (!isValidTimezone(value)) {
       throw new SettingsValidationError("timezone", `"${echo(payload.timezone)}" is not a valid time zone`);
     }
     out.timezone = value;
