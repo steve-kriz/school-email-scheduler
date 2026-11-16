@@ -635,6 +635,27 @@ describe('Calendar Extraction Unit Tests', () => {
         assert.ok(result.skipped.some(s => s.reason === SKIP_REASON.DUPLICATE), 'Should record duplicate skip');
       });
 
+      it('Given the same title and startsAt from two DIFFERENT source emails, When buildEventItems is called, Then they still collapse to one item', () => {
+        const extractions = [
+          {
+            message: { id: 'msg-from-school', subject: 'Newsletter', from: 'school@example.com', receivedAt: '2026-01-15T10:00:00Z', body: 'Body' },
+            event: { title: 'Book Fair', startsAt: '2026-03-14', allDay: true, category: 'other', needsAttention: false, actionRequired: null, dueBy: null, confidence: 1, description: 'Desc', location: null, endsAt: null },
+          },
+          {
+            message: { id: 'msg-from-pnc', subject: 'P&C reminder', from: 'pnc@example.com', receivedAt: '2026-01-16T10:00:00Z', body: 'Different body' },
+            event: { title: 'Book Fair', startsAt: '2026-03-14', allDay: true, category: 'other', needsAttention: false, actionRequired: null, dueBy: null, confidence: 1, description: 'Desc', location: null, endsAt: null },
+          },
+        ];
+
+        const result = buildEventItems(
+          { userId: 'user1', extractions },
+          { now: () => 1000000 }
+        );
+
+        assert.equal(result.items.length, 1, 'Two different emails describing the same event must not duplicate it');
+        assert.ok(result.skipped.some(s => s.reason === SKIP_REASON.DUPLICATE), 'Should record duplicate skip');
+      });
+
       it('Given duplicate eventIds, When putEvents request is built, Then no duplicate key appears in request', async () => {
         const batchWriteCalls = [];
         const mockBatchWrite = async ({ tableName, items }) => {

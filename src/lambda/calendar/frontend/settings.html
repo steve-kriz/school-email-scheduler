@@ -122,6 +122,31 @@
         </form>
 
         <!--
+          SCAN WINDOW. Shows when the last scan reached and lets the user push the
+          next scan's start date back, so a newly added processing job can find mail
+          older than the normal rolling window. The override clears itself after
+          the first clean scan.
+        -->
+        <section id="scan-window" class="settings__section" aria-labelledby="scan-window-heading">
+          <h2 id="scan-window-heading">Scan history</h2>
+          <p>Last scan reached: <strong id="scan-last-at">never</strong></p>
+          <p id="scan-from-current" class="field-hint" hidden></p>
+          <div class="field">
+            <label class="field-label" for="scan-from-input">Search mail from</label>
+            <input id="scan-from-input" class="field-input" type="date" />
+            <p class="field-hint">
+              The next scan will look for mail from this date onward, then return to the normal window.
+            </p>
+            <p id="error-scanFrom" class="field-error" role="alert" hidden></p>
+          </div>
+          <p>
+            <button type="button" class="btn" id="scan-from-save">Set start date</button>
+            <button type="button" class="btn" id="scan-from-clear">Clear</button>
+          </p>
+          <p id="scan-from-status" role="status" aria-live="polite"></p>
+        </section>
+
+        <!--
           DISCONNECT GMAIL (TASK-013).
 
           Two irreversible things can happen here and the control says both out

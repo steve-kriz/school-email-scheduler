@@ -9,11 +9,14 @@
 #   userId (PK)         : "google#<google sub claim>", same value as the
 #                         connections table
 #   eventId (SK)        : deterministic sha256 hex of
-#                           `sourceMessageId | normalisedTitle | startsAt`
+#                           `normalisedTitle | startsAt`
 #                         Because the key is derived from content rather than
-#                         generated, re-scanning the same email produces the same
+#                         generated, re-scanning the same email - or a DIFFERENT
+#                         email describing the same event - produces the same
 #                         eventId and the PutItem simply overwrites the existing
-#                         row - a rescan can NEVER duplicate an event.
+#                         row: neither a rescan nor a second email about the same
+#                         event can duplicate it. `sourceMessageId` is stored but
+#                         deliberately NOT part of the key, on purpose.
 #   title               : short event title, e.g. "Sports Carnival"
 #   description         : longer detail extracted from the email body
 #   location            : where the event happens, free text

@@ -32,7 +32,14 @@ import {
   serializeClearedSessionCookie,
   serializeSessionCookie,
 } from "./backend/session.mjs";
-import { connectionUserId, getConnection, putConnection, toPublicJson } from "./backend/connections.mjs";
+import {
+  connectionUserId,
+  getConnection,
+  putConnection,
+  toPublicJson,
+  updateConnection as patchStoredConnection,
+  REMOVE_ATTRIBUTE,
+} from "./backend/connections.mjs";
 import { disconnectAccount, RevocationError } from "./backend/disconnect.mjs";
 import {
   loadSettings,
@@ -1371,6 +1378,10 @@ export async function routeSettingsRequest(path, method, event, options = {}) {
 const SCAN_PATH = "/calendar/api/scan";
 const SCAN_STATUS_PATH = "/calendar/api/scan/status";
 const SCAN_SCHEDULE_PATH = "/calendar/api/scan/schedule";
+const SCAN_FROM_PATH = "/calendar/api/scan/from";
+
+/** How far back a user-set scan start may reach. */
+export const MAX_SCAN_FROM_DAYS = 366;
 
 /**
  * POST /calendar/api/scan - run a scan for the signed-in user right now.
@@ -1482,6 +1493,7 @@ export async function handleScanStatus(event, options = {}) {
     200,
     {
       lastScanAt: connection?.lastScanAt ?? null,
+      scanFrom: connection?.scanFrom ?? null,
       lastScanStatus: connection?.lastScanStatus ?? null,
       lastScanError: connection?.lastScanError ?? null,
       messagesScanned: connection?.lastScanMessagesScanned ?? null,
@@ -1595,6 +1607,68 @@ export async function handlePutSchedule(event, options = {}) {
 }
 
 /**
+ * PUT /calendar/api/scan/from - set (or clear) the date the next scan searches from.
+ *
+ * Body: `{ "scanFrom": "2026-10-01" }` (a date or ISO-8601 instant) or
+ * `{ "scanFrom": null }` to go back to the normal rolling window. The value must
+ * not be in the future or more than MAX_SCAN_FROM_DAYS back. The scan consumes it
+ * and clears it after its first clean run (see scan.mjs `computeSince`).
+ */
+export async function handlePutScanFrom(event, options = {}) {
+  const {
+    origin = null,
+    allowlist,
+    env = process.env,
+    nowSeconds = Math.floor(Date.now() / 1000),
+    updateConnection: patch = patchStoredConnection,
+  } = options;
+
+  const session = resolveSession(event, { env, nowSeconds });
+  if (!session.ok) {
+    return jsonResponse(session.statusCode, session.payload, { origin, allowlist });
+  }
+
+  let body;
+  try {
+    body = parseJsonBody(event);
+  } catch (err) {
+    return jsonResponse(400, { error: err?.message || "Invalid body", field: "scanFrom" }, { origin, allowlist });
+  }
+
+  const raw = body?.scanFrom;
+  let value = REMOVE_ATTRIBUTE;
+  let iso = null;
+  if (raw !== null && raw !== undefined) {
+    const ms = typeof raw === "string" && raw.trim() ? Date.parse(raw.trim()) : NaN;
+    const nowMs = nowSeconds * 1000;
+    if (!Number.isFinite(ms)) {
+      return jsonResponse(400, { error: "scanFrom must be a valid date", field: "scanFrom" }, { origin, allowlist });
+    }
+    if (ms > nowMs) {
+      return jsonResponse(400, { error: "scanFrom cannot be in the future", field: "scanFrom" }, { origin, allowlist });
+    }
+    if (ms < nowMs - MAX_SCAN_FROM_DAYS * 86400000) {
+      return jsonResponse(
+        400,
+        { error: `scanFrom cannot be more than ${MAX_SCAN_FROM_DAYS} days ago`, field: "scanFrom" },
+        { origin, allowlist }
+      );
+    }
+    iso = new Date(ms).toISOString();
+    value = iso;
+  }
+
+  try {
+    await patch(connectionUserId(session.claims.sub), { scanFrom: value }, { env });
+  } catch (err) {
+    logBasic("[Calendar] Could not save scanFrom:", { errorName: err?.name || "Error", errorMessage: err?.message || "" });
+    return jsonResponse(500, { error: "Could not save your scan start date" }, { origin, allowlist });
+  }
+
+  return jsonResponse(200, { scanFrom: iso }, { origin, allowlist });
+}
+
+/**
  * DELETE /calendar/api/scan/schedule - stop future scheduled scans.
  *
  * @param {object} event
@@ -1646,6 +1720,7 @@ export async function handleDeleteSchedule(event, options = {}) {
 export async function routeScanRequest(path, method, event, options = {}) {
   if (path === SCAN_PATH && method === "POST") return handleScanNow(event, options);
   if (path === SCAN_STATUS_PATH && method === "GET") return handleScanStatus(event, options);
+  if (path === SCAN_FROM_PATH && method === "PUT") return handlePutScanFrom(event, options);
   if (path === SCAN_SCHEDULE_PATH) {
     if (method === "GET") return handleGetSchedule(event, options);
     if (method === "PUT") return handlePutSchedule(event, options);

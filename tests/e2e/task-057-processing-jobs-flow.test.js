@@ -1089,7 +1089,14 @@ describe('Feature: The processing-job editor is usable on a phone', () => {
 
       for (const route of ['/calendar/settings', '/calendar/settings.js', '/calendar/styles.css', '/calendar/app.js']) {
         const body = (await served(route)).body;
-        assert.equal(/https?:\/\//.test(body), false, `${route} references a remote URL under default-src 'self'`);
+        // mail.google.com is the one deliberate exception: app.js's "Open email"
+        // link is an outbound <a href> the user clicks to leave the app, never a
+        // resource loaded under default-src 'self' - see buildGmailSearchUrl.
+        assert.equal(
+          /https?:\/\/(?!mail\.google\.com)/.test(body),
+          false,
+          `${route} references a remote URL under default-src 'self'`
+        );
         assert.deepEqual(body.match(/\.innerHTML/g) || [], [], `${route} reaches for innerHTML`);
         assert.deepEqual(body.match(/\.insertAdjacentHTML\(/g) || [], [], `${route} reaches for insertAdjacentHTML`);
         assert.deepEqual(body.match(/document\.write/g) || [], [], `${route} reaches for document.write`);

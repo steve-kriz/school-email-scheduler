@@ -72,6 +72,9 @@ export const SETTINGS_ENDPOINT = `${API_BASE}/settings`;
 /** The recurring-scan schedule endpoint (TASK-008). */
 export const SCHEDULE_ENDPOINT = `${API_BASE}/scan/schedule`;
 
+/** Sets/clears the date the next scan searches from. */
+export const SCAN_FROM_ENDPOINT = `${API_BASE}/scan/from`;
+
 /** Default hour for a first-time schedule: early enough to beat the school run. */
 export const DEFAULT_SCHEDULE_HOUR = 7;
 
@@ -1108,6 +1111,7 @@ export function createSettingsPage(options = {}) {
     renderConnectionCards(doc, byId("connection-state"), state.settings);
     renderSummary(state.settings);
     fillForm(state.settings);
+    renderScanWindow(state.settings);
     const body = byId("settings-body");
     if (body) body.hidden = false;
     return result;
@@ -1203,7 +1207,57 @@ export function createSettingsPage(options = {}) {
     }
   }
 
+  /** Show when the last scan reached and any pending "search from" date. */
+  function renderScanWindow(settings) {
+    const fmt = (iso) => {
+      const d = typeof iso === "string" ? new Date(iso) : null;
+      return d && !Number.isNaN(d.getTime()) ? d.toLocaleString() : null;
+    };
+    const last = byId("scan-last-at");
+    if (last) last.textContent = fmt(settings?.lastScanAt) || "never";
+    const current = byId("scan-from-current");
+    const pending = fmt(settings?.scanFrom);
+    if (current) {
+      current.hidden = !pending;
+      current.textContent = pending ? `The next scan will search from ${pending}.` : "";
+    }
+    const input = byId("scan-from-input");
+    if (input) input.value = typeof settings?.scanFrom === "string" ? settings.scanFrom.slice(0, 10) : "";
+  }
+
+  /** PUT the scan start date; `null` clears it. */
+  async function saveScanFrom(dateValue) {
+    const status = byId("scan-from-status");
+    const err = byId("error-scanFrom");
+    if (err) { err.hidden = true; err.textContent = ""; }
+    // A date input yields YYYY-MM-DD; read it as local midnight so "from 1 Oct"
+    // means the user's own 1 October.
+    let scanFrom = null;
+    if (dateValue) {
+      const [y, m, d] = dateValue.split("-").map(Number);
+      scanFrom = new Date(y, m - 1, d).toISOString();
+    }
+    const result = await api.put(SCAN_FROM_ENDPOINT, { scanFrom });
+    if (result.status === 400) {
+      if (err) { err.textContent = textOr(result.data?.error, "Invalid date"); err.hidden = false; }
+      return { ok: false, status: 400 };
+    }
+    if (!result.ok) {
+      if (status && result.status !== 401) status.textContent = "We could not save that just now. Please try again.";
+      return { ok: false, status: result.status };
+    }
+    state.settings = { ...state.settings, scanFrom: result.data?.scanFrom ?? null };
+    renderScanWindow(state.settings);
+    if (status) status.textContent = scanFrom ? "Saved. Run a scan to use it." : "Cleared.";
+    return { ok: true, status: result.status };
+  }
+
   function bindControls() {
+    const scanSave = byId("scan-from-save");
+    if (scanSave) scanSave.addEventListener("click", () => saveScanFrom(byId("scan-from-input")?.value || ""));
+    const scanClear = byId("scan-from-clear");
+    if (scanClear) scanClear.addEventListener("click", () => saveScanFrom(null));
+
     // Bound ONCE, at start, because this button is static markup that no
     // re-render replaces. Binding it inside the render would stack a handler per
     // render and one tap would then add ten rows. The per-row controls get the
@@ -1241,6 +1295,8 @@ export function createSettingsPage(options = {}) {
     readForm,
     fillForm,
     renderSummary,
+    renderScanWindow,
+    saveScanFrom,
     showFieldError,
     clearErrors,
     setStatus,

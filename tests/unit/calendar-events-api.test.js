@@ -343,14 +343,14 @@ describe('TASK-009 unit: the response projection is an allow-list', () => {
     updatedAt: '2026-08-20T00:00:00.000Z',
   };
 
-  it('copies exactly the sixteen published fields and nothing else', () => {
+  it('copies exactly the seventeen published fields and nothing else', () => {
     const json = toEventJson(raw);
     assert.deepEqual(Object.keys(json).sort(), [...PUBLIC_EVENT_FIELDS].sort());
-    assert.equal(PUBLIC_EVENT_FIELDS.includes('sourceMessageId'), false);
-    for (const banned of ['sourceMessageId', 'attentionKey', 'ttl', 'refreshTokenEnc', 'userId', 'createdAt', 'updatedAt']) {
+    assert.equal(PUBLIC_EVENT_FIELDS.includes('sourceMessageId'), true, 'shown in the event detail panel');
+    for (const banned of ['attentionKey', 'ttl', 'refreshTokenEnc', 'userId', 'createdAt', 'updatedAt']) {
       assert.equal(banned in json, false, `${banned} must not be published`);
     }
-    assert.ok(!JSON.stringify(json).includes('gmail-handle-abc'));
+    assert.equal(json.sourceMessageId, 'gmail-handle-abc');
     assert.equal(json.sourceSubject, 'Photo day', 'provenance the UI is allowed to show');
     assert.equal(json.sourceFrom, 'office@school.edu');
   });

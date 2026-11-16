@@ -67,8 +67,10 @@ export const DEFAULT_MAX_MESSAGES = 200;
 /** Default cap on characters kept per body. */
 export const DEFAULT_MAX_BODY_CHARS = 20000;
 
-/** Default lookback when the caller has no watermark yet. */
-export const DEFAULT_SINCE_DAYS = 90;
+/** Default lookback when there is no watermark yet, and the hard ceiling on how
+ * far back a scan will ever look regardless of how stale `lastScanAt` is (see
+ * `computeSince` in scan.mjs) - a sync only ever fetches new mail, not a backlog. */
+export const DEFAULT_SINCE_DAYS = 5;
 
 /** Ids requested per `messages.list` page (Gmail allows up to 500). */
 export const DEFAULT_PAGE_SIZE = 100;

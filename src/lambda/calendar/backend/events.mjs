@@ -48,16 +48,26 @@
  * late-scanned email legitimately describes last term, and its `ttl` will retire
  * it on its own.
  *
- * WHY eventId IS DERIVED FROM CONTENT.
- *   eventId = sha256(sourceMessageId + "|" + title.trim().toLowerCase() + "|" + startsAt)
- * The key is a function of the source message, the normalised title and the
- * NORMALISED start instant, so re-scanning the same email produces the same key
- * and the write is an overwrite instead of a duplicate. Normalising the title and
- * the instant before hashing is what makes that hold in practice: the model may
- * emit "2026-03-14" one run and "2026-03-14T00:00:00Z" the next, and an un-
- * normalised hash would treat them as two events. The three parts are joined with
- * "|" rather than concatenated so a title ending in a digit cannot collide with a
- * different title/date split.
+ * WHY eventId IS DERIVED FROM CONTENT, NOT THE SOURCE MESSAGE.
+ *   eventId = sha256(title.trim().toLowerCase() + "|" + startsAt)
+ * The key is a function of the normalised title and the NORMALISED start
+ * instant only - deliberately NOT `sourceMessageId` - so two DIFFERENT emails
+ * describing the same event (a reminder that repeats the newsletter's own
+ * wording, a forward of the original, two processing jobs' searches turning up
+ * two separate messages about one excursion) collapse onto the same row instead
+ * of storing the same event twice. Re-scanning the same email still produces the
+ * same key for the same reason, so the write is an overwrite instead of a
+ * duplicate there too. Normalising the title and the instant before hashing is
+ * what makes both hold in practice: the model may emit "2026-03-14" one run and
+ * "2026-03-14T00:00:00Z" the next, and an un-normalised hash would treat them as
+ * two events. The two parts are joined with "|" rather than concatenated so a
+ * title ending in a digit cannot collide with a different title/date split.
+ *
+ * The cost, stated plainly: a school and its P&C genuinely holding two distinct
+ * events with the same title at the exact same instant would also collapse to
+ * one row. That is accepted as the same trade-off TASK-056 already made for
+ * `processingJobId` below - the alternative (keying on the source message)
+ * is exactly the duplication this hash exists to prevent.
  *
  * A RE-SCAN NO LONGER OVERWRITES `status` (TASK-009). BatchWriteItem still cannot
  * express a condition, so a bare re-extraction of an already-acknowledged event
@@ -338,21 +348,21 @@ export function normaliseInstant(value) {
  * The content-derived range key. See the module docblock for why it is derived
  * rather than generated, and why the parts are normalised before hashing.
  *
- * THE INPUTS ARE FIXED: sourceMessageId, title and startsAt, and nothing else.
- * `processingJobId` is deliberately NOT hashed in (TASK-056) - two processing
- * jobs that both match one email must derive the SAME id so the row collapses to
- * one, and every extra input to this hash is another way for the same event to
- * be stored twice, which is exactly the live bug the derived key was introduced
- * to fix.
+ * THE INPUTS ARE FIXED: title and startsAt, and nothing else. Neither
+ * `sourceMessageId` nor `processingJobId` is hashed in: two different emails
+ * (or two processing jobs' searches) that both describe one event must derive
+ * the SAME id so the row collapses to one, and every extra input to this hash
+ * is another way for the same event to be stored twice, which is exactly the
+ * duplication the derived key exists to prevent. A caller may still pass a
+ * `sourceMessageId` key in the args object; it is simply ignored.
  *
  * @param {object} args
- * @param {string} args.sourceMessageId
  * @param {string} args.title
  * @param {string} args.startsAt Canonical ISO from `normaliseInstant`.
  * @returns {string} sha256 hex.
  */
-export function deriveEventId({ sourceMessageId, title, startsAt } = {}) {
-  const parts = [String(sourceMessageId ?? ""), String(title ?? "").trim().toLowerCase(), String(startsAt ?? "")];
+export function deriveEventId({ title, startsAt } = {}) {
+  const parts = [String(title ?? "").trim().toLowerCase(), String(startsAt ?? "")];
   return createHash("sha256").update(parts.join("|"), "utf8").digest("hex");
 }
 
@@ -449,7 +459,7 @@ export function buildEventItem(
   const status = EVENT_STATUS.PENDING;
   const needsAttention = event.needsAttention === true;
   const attentionKey = attentionKeyFor(userId, { needsAttention, status });
-  const eventId = deriveEventId({ sourceMessageId: message.id, title, startsAt: start.iso });
+  const eventId = deriveEventId({ title, startsAt: start.iso });
 
   const item = {
     userId,
@@ -839,8 +849,7 @@ export async function storeEvents(
  * someone else's event exists, which is exactly the fact being protected.
  *
  * THE RESPONSE PROJECTION IS AN ALLOW-LIST. `toEventJson` names the seventeen
- * fields the UI renders and copies nothing else, so `sourceMessageId` (a Gmail
- * handle with no purpose in a browser), `attentionKey`, `ttl` and anything a
+ * fields the UI renders and copies nothing else, so `attentionKey`, `ttl` and anything a
  * later ticket adds to the row are absent BY CONSTRUCTION rather than by
  * remembering to delete them. Route handlers never see a raw item.
  *
@@ -943,9 +952,9 @@ export const LIFECYCLE_ATTRIBUTES = Object.freeze([
 ]);
 
 /**
- * The exact fields a response may carry. `sourceMessageId` is absent on purpose -
- * the UI shows provenance with the subject and sender, and the Gmail handle would
- * be a live API identifier sitting in a browser.
+ * The exact fields a response may carry. `sourceMessageId` IS public: the detail
+ * panel shows it so a user can find the source email. It is only usable with the
+ * owner's own Gmail token, and events are only ever returned to their owner.
  *
  * `processingJobId` IS public (TASK-056): the calendar and attention views filter
  * by processing job, and the id is an opaque handle to a job the same user
@@ -968,6 +977,7 @@ export const PUBLIC_EVENT_FIELDS = Object.freeze([
   "confidence",
   "sourceSubject",
   "sourceFrom",
+  "sourceMessageId",
   "sourceReceivedAt",
   "processingJobId",
 ]);
@@ -1229,6 +1239,7 @@ export function toEventJson(item) {
     confidence: clampConfidence(item.confidence),
     sourceSubject: item.sourceSubject ?? null,
     sourceFrom: item.sourceFrom ?? null,
+    sourceMessageId: item.sourceMessageId ?? null,
     sourceReceivedAt: item.sourceReceivedAt ?? null,
     // Which processing job's search found this email (TASK-056). Null for a row
     // stored before jobs existed, and it can name a job the user has since

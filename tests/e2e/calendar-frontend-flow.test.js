@@ -517,7 +517,14 @@ describe('Feature: The browser app is served from the Lambda', () => {
 
     it('And none of them loads anything from another origin', () => {
       for (const { route, body } of servedBodies) {
-        assert.equal(/https?:\/\/(?!www\.w3\.org)/.test(body), false, `${route} references an external URL`);
+        // mail.google.com is the one deliberate exception: app.js's "Open email"
+        // link is an outbound <a href> the user clicks to leave the app, never a
+        // resource this page loads - see buildGmailSearchUrl.
+        assert.equal(
+          /https?:\/\/(?!www\.w3\.org|mail\.google\.com)/.test(body),
+          false,
+          `${route} references an external URL`
+        );
       }
     });
   });
@@ -857,6 +864,31 @@ describe('Feature: The event detail panel', () => {
       assert.equal(doc.getElementById('event-detail').hidden, true);
       assert.equal(doc.getElementById('event-detail').childNodes.length, 0);
     });
+
+    it('And it offers an "Open email" link to a Gmail search for that message', () => {
+      const link = doc.getElementById('detail-open-email');
+      assert.notEqual(link, null, 'no open-email link was rendered');
+      assert.equal(link.tagName.toLowerCase(), 'a');
+      assert.equal(textOf(link), 'Open email');
+      assert.equal(link.getAttribute('target'), '_blank');
+      assert.match(link.getAttribute('rel') || '', /noopener/);
+      assert.equal(
+        link.getAttribute('href'),
+        app.buildGmailSearchUrl({ subject: EVENT.sourceSubject, from: EVENT.sourceFrom, email: 'parent@example.test' }),
+        'href should search Gmail for this event\'s own subject/sender, in the signed-in account'
+      );
+    });
+  });
+
+  describe('Scenario: An event with no recorded subject offers no email link', () => {
+    it('Given an event with no sourceSubject, When it is opened, Then there is no "Open email" link', async () => {
+      const world = makeWorld({ events: [{ eventId: 'bare', startsAt: '2026-09-04', allDay: true, title: 'Mufti day' }] });
+      const { doc, controller } = openCalendar(world);
+      await controller.start();
+      await chipsIn(cellFor(doc, '2026-09-04'))[0].dispatch('click');
+
+      assert.equal(doc.getElementById('detail-open-email'), null);
+    });
   });
 
   describe('Scenario: An event needing attention offers working actions', () => {
@@ -958,6 +990,19 @@ describe('Feature: The event detail panel', () => {
       const scripts = findElements(doc, 'script');
       assert.equal(scripts.length, 1);
       assert.equal(scripts[0].getAttribute('src'), '/calendar/app.js');
+    });
+
+    it('And the "Open email" link is a plain, fully-encoded Gmail search URL, never the raw payload', async () => {
+      const world = makeWorld({ events: [HOSTILE_EVENT] });
+      const { doc, controller } = openCalendar(world);
+      await controller.start();
+      await chipsIn(cellFor(doc, '2026-09-04'))[0].dispatch('click');
+
+      const href = doc.getElementById('detail-open-email').getAttribute('href');
+      assert.match(href, /^https:\/\/mail\.google\.com\/mail\//, 'the origin must never come from event data');
+      assert.equal(href.includes('<'), false);
+      assert.equal(href.includes('>'), false);
+      assert.equal(/javascript:/i.test(href), false);
     });
   });
 });

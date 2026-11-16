@@ -111,6 +111,7 @@ export const SETTINGS_FIELDS = [
   "timezone",
   "lastScanAt",
   "lastScanStatus",
+  "scanFrom",
 ];
 
 /**

@@ -203,16 +203,15 @@ describe('DynamoDB Calendar E2E Tests', () => {
 
       it('Then the computed eventId is identical', () => {
         // Test the eventId determinism using the documented formula
-        const sourceMessageId = 'msg-12345';
         const normalisedTitle = 'Sports Carnival';
         const startsAt = '2026-09-04T09:00:00Z';
 
         // First computation
-        const input1 = `${sourceMessageId}|${normalisedTitle}|${startsAt}`;
+        const input1 = `${normalisedTitle}|${startsAt}`;
         const eventId1 = createHash('sha256').update(input1).digest('hex');
 
         // Second computation (same inputs)
-        const input2 = `${sourceMessageId}|${normalisedTitle}|${startsAt}`;
+        const input2 = `${normalisedTitle}|${startsAt}`;
         const eventId2 = createHash('sha256').update(input2).digest('hex');
 
         assert.equal(eventId1, eventId2,
@@ -226,28 +225,26 @@ describe('DynamoDB Calendar E2E Tests', () => {
           'eventId should be the range key to ensure uniqueness per userId');
       });
 
-      it('Edge case: Changing any input component produces a different eventId', () => {
-        const sourceMessageId = 'msg-12345';
+      it('Edge case: changing title or startsAt produces a different eventId, but sourceMessageId does not', () => {
         const normalisedTitle = 'Sports Carnival';
         const startsAt = '2026-09-04T09:00:00Z';
 
-        const baseInput = `${sourceMessageId}|${normalisedTitle}|${startsAt}`;
+        const baseInput = `${normalisedTitle}|${startsAt}`;
         const baseEventId = createHash('sha256').update(baseInput).digest('hex');
 
-        // Change sourceMessageId
-        const differentSourceInput = `msg-54321|${normalisedTitle}|${startsAt}`;
-        const differentSourceEventId = createHash('sha256').update(differentSourceInput).digest('hex');
-        assert.notEqual(baseEventId, differentSourceEventId,
-          'eventId should change when sourceMessageId changes');
+        // sourceMessageId is deliberately NOT part of the key (see
+        // dynamodb_calendar_events.tf): two different emails describing the
+        // same event at the same instant must collapse to one row, so the
+        // formula has no sourceMessageId input to vary in the first place.
 
         // Change title
-        const differentTitleInput = `${sourceMessageId}|Different Title|${startsAt}`;
+        const differentTitleInput = `Different Title|${startsAt}`;
         const differentTitleEventId = createHash('sha256').update(differentTitleInput).digest('hex');
         assert.notEqual(baseEventId, differentTitleEventId,
           'eventId should change when title changes');
 
         // Change time
-        const differentTimeInput = `${sourceMessageId}|${normalisedTitle}|2026-09-05T09:00:00Z`;
+        const differentTimeInput = `${normalisedTitle}|2026-09-05T09:00:00Z`;
         const differentTimeEventId = createHash('sha256').update(differentTimeInput).digest('hex');
         assert.notEqual(baseEventId, differentTimeEventId,
           'eventId should change when startsAt changes');

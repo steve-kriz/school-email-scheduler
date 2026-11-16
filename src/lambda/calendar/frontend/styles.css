@@ -168,6 +168,10 @@ body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  /* .btn is also used on <a> elements (e.g. the event detail panel's "Open
+     email" link) styled as a button - an anchor's default underline must not
+     survive that reuse. */
+  text-decoration: none;
 }
 
 .btn:hover {

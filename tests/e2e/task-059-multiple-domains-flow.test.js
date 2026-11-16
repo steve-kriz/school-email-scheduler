@@ -538,7 +538,7 @@ describe("Scenario: Every one of a job's domains reaches the extraction context"
   it("And the scan's Gmail query ORs both domains", async () => {
     const { gmail } = await scan(storedRow, { mailbox });
     assert.deepEqual(gmail.state.queries, [
-      '(from:@stmarys.edu.au OR from:@pandc.org.au OR "St Mary\'s Primary") after:2026/03/04',
+      '(from:@stmarys.edu.au OR from:@pandc.org.au OR "St Mary\'s Primary") after:2026/05/28',
     ]);
   });
 });
@@ -570,8 +570,8 @@ describe('Scenario: A row with no processingJobs still scans via the legacy one-
   it("And each job's Gmail query filters on its own single domain", async () => {
     const { gmail } = await scan(legacyRow);
     assert.deepEqual(gmail.state.queries, [
-      '(from:@stmarys.edu.au OR "St Mary\'s Primary") after:2026/03/04',
-      '(from:@holycross.edu.au OR "Holy Cross") after:2026/03/04',
+      '(from:@stmarys.edu.au OR "St Mary\'s Primary") after:2026/05/28',
+      '(from:@holycross.edu.au OR "Holy Cross") after:2026/05/28',
     ]);
   });
 });

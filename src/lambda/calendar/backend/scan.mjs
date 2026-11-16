@@ -6,8 +6,9 @@
  * Sequence, per the ticket:
  *   1. Load the connection and resolve its PROCESSING JOBS. No job with a usable
  *      search field -> `not_configured`, no lock and no Gmail call.
- *   2. Compute `since` (lastScanAt minus a 2-day overlap, or the 90-day default)
- *      and the invocation deadline - ONCE each, for the whole run.
+ *   2. Compute `since` (lastScanAt minus a 2-day overlap, capped at the 5-day
+ *      default lookback either way, so a sync only ever fetches new mail) and
+ *      the invocation deadline - ONCE each, for the whole run.
  *   3. For EACH job, in settings order: fetch its own candidate messages,
  *      extract each one with that job's school context, persist what survives
  *      tagged with that job's id.
@@ -153,6 +154,7 @@ import {
   updateConnection,
   acquireScanLock,
   releaseScanLock,
+  REMOVE_ATTRIBUTE,
 } from "./connections.mjs";
 import {
   fetchCandidateMessages,
@@ -275,23 +277,40 @@ function shortError(err) {
 /**
  * The floor a scan's Gmail query uses: `lastScanAt` minus the overlap window,
  * or the configured default lookback when there is no watermark yet (a first
- * scan).
+ * scan) - whichever is MORE RECENT, so a sync only ever fetches new mail. A
+ * connection whose `lastScanAt` has gone stale (the schedule was paused, a
+ * scan kept failing) does not fall back to re-fetching its whole backlog: the
+ * floor is capped at `sinceDays` back from now either way.
  *
  * Exported and pure so a test can assert the exact date with no clock at all.
  *
  * @param {object} args
  * @param {unknown} [args.lastScanAt] Stored ISO-8601 string, or absent.
- * @param {number} [args.sinceDays] Default lookback (see gmail.mjs's config).
+ * @param {number} [args.sinceDays] Default lookback AND ceiling (see
+ *   gmail.mjs's config).
  * @param {() => number} [args.now] Epoch-ms clock.
  * @returns {Date}
  */
-export function computeSince({ lastScanAt = null, sinceDays = DEFAULT_SINCE_DAYS, now = () => Date.now() } = {}) {
+export function computeSince({
+  lastScanAt = null,
+  sinceDays = DEFAULT_SINCE_DAYS,
+  now = () => Date.now(),
+  scanFrom = null,
+} = {}) {
+  // A floor the user set in the UI wins outright: no overlap, and not capped at
+  // `sinceDays` - the whole point is to reach mail older than that. It is cleared
+  // after the first run that completes cleanly (see the watermark patch below).
+  const scanFromMs = typeof scanFrom === "string" && scanFrom ? Date.parse(scanFrom) : NaN;
+  if (Number.isFinite(scanFromMs) && scanFromMs <= now()) return new Date(scanFromMs);
+
+  const days = Number.isFinite(sinceDays) && sinceDays > 0 ? sinceDays : DEFAULT_SINCE_DAYS;
+  const ceilingMs = now() - days * DAY_MS;
+
   const lastScanMs = typeof lastScanAt === "string" && lastScanAt ? Date.parse(lastScanAt) : NaN;
   if (Number.isFinite(lastScanMs)) {
-    return new Date(lastScanMs - WATERMARK_OVERLAP_DAYS * DAY_MS);
+    return new Date(Math.max(lastScanMs - WATERMARK_OVERLAP_DAYS * DAY_MS, ceilingMs));
   }
-  const days = Number.isFinite(sinceDays) && sinceDays > 0 ? sinceDays : DEFAULT_SINCE_DAYS;
-  return new Date(now() - days * DAY_MS);
+  return new Date(ceilingMs);
 }
 
 /**
@@ -590,7 +609,12 @@ export async function runScan({ userId, mode = "manual", maxMessages = null } = 
     // against a different window from its siblings and so a job that starts late
     // inherits the runway the earlier ones left, rather than being granted a
     // fresh budget the invocation does not have.
-    const sinceDate = computeSince({ lastScanAt: connection?.lastScanAt, sinceDays: gmailConfig.sinceDays, now });
+    const sinceDate = computeSince({
+      lastScanAt: connection?.lastScanAt,
+      scanFrom: connection?.scanFrom,
+      sinceDays: gmailConfig.sinceDays,
+      now,
+    });
     const sinceIso = sinceDate.toISOString();
     const nowIso = new Date(now()).toISOString();
     const deadline = computeDeadline({ now, getRemainingTimeInMillis });
@@ -786,8 +810,8 @@ export async function runScan({ userId, mode = "manual", maxMessages = null } = 
     // before every message every job saw, dropped, or never reached, so anything
     // that left work behind ANYWHERE in the loop pins `lastScanAt` there. Only a
     // run in which every usable job completed untruncated advances forward. ---
-    const newLastScanAt =
-      truncated || anyJobUnattempted || anyJobFailed ? sinceIso : newestReceivedAt || nowIso;
+    const pinned = truncated || anyJobUnattempted || anyJobFailed;
+    const newLastScanAt = pinned ? sinceIso : newestReceivedAt || nowIso;
 
     // ONE patch for the whole run, after the loop: a per-job patch would write
     // the connection N times per scan and leave `lastScanAt` briefly advanced
@@ -797,6 +821,9 @@ export async function runScan({ userId, mode = "manual", maxMessages = null } = 
       userId,
       {
         lastScanAt: newLastScanAt,
+        // A user-set floor stays until a run completes cleanly, so a truncated
+        // run resumes from it rather than falling back to the capped window.
+        ...(pinned ? {} : { scanFrom: REMOVE_ATTRIBUTE }),
         lastScanStatus: status,
         lastScanError: errors.length > 0 ? capText(errors[0].error) : "",
         lastScanMessagesScanned: messagesScanned,

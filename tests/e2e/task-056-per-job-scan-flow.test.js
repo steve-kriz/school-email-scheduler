@@ -306,7 +306,9 @@ describe('Feature: Per-job Gmail search and per-job event attribution (TASK-056 
           makeJob('job-b', { name: 'Riverside High', schoolName: 'Riverside High', domains: ['riverside.edu.au'] }),
         ],
         mailbox,
-        lastScanAt: '2026-05-21T00:00:00.000Z',
+        // 3 days before "now" (2026-06-02), well inside the 5-day sinceDays
+        // ceiling, so the floor below is lastScanAt - 2 days, not the ceiling.
+        lastScanAt: '2026-05-30T00:00:00.000Z',
       });
 
       // Then two Gmail searches are performed, one per job, in settings order
@@ -314,7 +316,7 @@ describe('Feature: Per-job Gmail search and per-job event attribution (TASK-056 
       assert.match(gmail.state.queries[0], /^\(from:@stmarys\.edu\.au OR "St Mary's Primary"\)/);
       assert.match(gmail.state.queries[1], /^\(from:@riverside\.edu\.au OR "Riverside High"\)/);
       // And each search uses the same after: floor
-      assert.ok(gmail.state.queries.every((q) => q.endsWith(' after:2026/05/19')));
+      assert.ok(gmail.state.queries.every((q) => q.endsWith(' after:2026/05/28')));
 
       // And the stored event from each message carries its own job's id
       const byTitle = Object.fromEntries(store.all().map((row) => [row.title, row]));
@@ -535,8 +537,9 @@ describe('Feature: Per-job Gmail search and per-job event attribution (TASK-056 
           makeJob('job-c', { name: 'C', schoolName: 'C School', domains: ['c.edu.au'] }),
         ],
         mailbox,
-        // And the stored lastScanAt is "2026-05-21" so the query floor is 2026-05-19
-        lastScanAt: '2026-05-21T00:00:00.000Z',
+        // And the stored lastScanAt is "2026-05-30" (3 days before "now", well
+        // inside the 5-day sinceDays ceiling) so the query floor is 2026-05-28
+        lastScanAt: '2026-05-30T00:00:00.000Z',
         now: () => clock,
         // 60s of runway minus the 30s safety margin: a 30s budget.
         getRemainingTimeInMillis: () => 60_000,
@@ -574,7 +577,7 @@ describe('Feature: Per-job Gmail search and per-job event attribution (TASK-056 
       assert.equal(result.status, SCAN_STATUS.PARTIAL);
       // And lastScanAt is written as the query floor, not as any newestReceivedAt
       assert.equal(patches.length, 1);
-      assert.equal(patches[0].lastScanAt, '2026-05-19T00:00:00.000Z');
+      assert.equal(patches[0].lastScanAt, '2026-05-28T00:00:00.000Z');
       // And the scan lock is released
       assert.equal(locks.acquired, 1);
       assert.equal(locks.released, 1);
@@ -598,13 +601,14 @@ describe('Feature: Per-job Gmail search and per-job event attribution (TASK-056 
         ],
         mailbox,
         maxMessages: 2,
-        lastScanAt: '2026-05-21T00:00:00.000Z',
+        // 3 days before the default "now" (2026-06-02), inside the 5-day ceiling.
+        lastScanAt: '2026-05-30T00:00:00.000Z',
       });
 
       assert.equal(result.jobs[0].truncated, true, "job-a's fetch reports truncated true");
       assert.equal(result.jobs[1].truncated, false, 'job-b completes cleanly');
       // Then lastScanAt is written as this run's own query floor
-      assert.equal(patches[0].lastScanAt, '2026-05-19T00:00:00.000Z');
+      assert.equal(patches[0].lastScanAt, '2026-05-28T00:00:00.000Z');
       // And the result reports truncated true and status "partial"
       assert.equal(result.truncated, true);
       assert.equal(result.status, SCAN_STATUS.PARTIAL);
@@ -691,7 +695,8 @@ describe('Feature: Per-job Gmail search and per-job event attribution (TASK-056 
           makeJob('job-c', { name: 'C', schoolName: 'C School', domains: ['c.edu.au'] }),
         ],
         mailbox,
-        lastScanAt: '2026-05-21T00:00:00.000Z',
+        // 3 days before the default "now" (2026-06-02), inside the 5-day ceiling.
+        lastScanAt: '2026-05-30T00:00:00.000Z',
         // And job-b's Gmail fetch throws a GmailApiError (a persistent 500).
         failWhenQueryHas: 'b.edu.au',
       });
@@ -711,7 +716,7 @@ describe('Feature: Per-job Gmail search and per-job event attribution (TASK-056 
       // And the result status is "partial"
       assert.equal(result.status, SCAN_STATUS.PARTIAL);
       // And lastScanAt is written as this run's own query floor
-      assert.equal(patches[0].lastScanAt, '2026-05-19T00:00:00.000Z');
+      assert.equal(patches[0].lastScanAt, '2026-05-28T00:00:00.000Z');
     });
   });
 
@@ -800,18 +805,25 @@ describe('Feature: Per-job Gmail search and per-job event attribution (TASK-056 
     });
   });
 
-  describe('Scenario: eventId derivation is unchanged by this ticket', () => {
-    it('Given a message id, a title and a start instant, When the eventId is derived, Then it is the pinned sha256 and is unaffected by attribution', () => {
+  describe('Scenario: eventId derivation is unaffected by attribution or source message', () => {
+    it('Given a title and a start instant, When the eventId is derived, Then it is the pinned sha256 and is unaffected by attribution or sourceMessageId', () => {
       const id = deriveEventId({ sourceMessageId: 'm1', title: 'Year 4 Excursion', startsAt: '2026-06-10T00:00:00.000Z' });
 
-      // Then it equals the sha256 of "m1|year 4 excursion|2026-06-10T00:00:00.000Z"
-      assert.equal(id, 'c28189d0f74204244d1cf91d4a425d5b2d03895fb506d05f8e47e048ec5522c0');
+      // Then it equals the sha256 of "year 4 excursion|2026-06-10T00:00:00.000Z"
+      assert.equal(id, '4fd041da6c5911fcb6eede2ec1bbbad0fd35702d533baf41e39ff53694a195c6');
       // And it is identical whether or not a processingJobId was supplied
       assert.equal(deriveEventId({ sourceMessageId: 'm1', title: 'YEAR 4 EXCURSION ', startsAt: '2026-06-10T00:00:00.000Z' }), id);
       assert.equal(
         deriveEventId({ sourceMessageId: 'm1', title: 'Year 4 Excursion', startsAt: '2026-06-10T00:00:00.000Z', processingJobId: 'job-b' }),
         id,
         'the hash takes no new input: a processingJobId in the args object changes nothing'
+      );
+      // And it is identical for a DIFFERENT source message: two different emails
+      // describing the same event at the same instant must collapse to one row.
+      assert.equal(
+        deriveEventId({ sourceMessageId: 'm2-a-completely-different-email', title: 'Year 4 Excursion', startsAt: '2026-06-10T00:00:00.000Z' }),
+        id,
+        'sourceMessageId is deliberately not part of the hash - see events.mjs'
       );
     });
   });

@@ -63,6 +63,8 @@ export const PUBLIC_ATTRIBUTES = [
   // Scan watermark the settings page reports back to the user.
   "lastScanAt",
   "lastScanStatus",
+  // User-set "search mail from here" floor; see scan.mjs `computeSince`.
+  "scanFrom",
 ];
 
 /**
@@ -655,6 +657,10 @@ export async function putConnection(
     const { ciphertext, keyId } = await encrypt(refreshToken, { env });
     item.refreshTokenEnc = ciphertext;
     item.refreshTokenKeyId = keyId;
+    // A fresh grant supersedes a revoked one. Without this the row keeps the
+    // stale "reauth_required" status spread in from `existing`, so the UI keeps
+    // asking to reconnect until the next scheduled scan overwrites it.
+    if (item.lastScanStatus === "reauth_required") delete item.lastScanStatus;
   }
 
   // Belt and braces: no attribute named after the plaintext, ever.

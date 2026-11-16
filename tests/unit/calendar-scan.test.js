@@ -22,6 +22,10 @@ const {
   DEFAULT_MAX_SCAN_DURATION_MS,
 } = await import(scanUrl);
 
+const gmailModulePath = path.join(PROJECT_ROOT, 'src', 'lambda', 'calendar', 'backend', 'gmail.mjs');
+const gmailUrl = new URL(`file:///${gmailModulePath.replace(/\\/g, '/')}`).href;
+const { DEFAULT_SINCE_DAYS } = await import(gmailUrl);
+
 const scheduleModulePath = path.join(PROJECT_ROOT, 'src', 'lambda', 'calendar', 'backend', 'scan-schedule.mjs');
 const scheduleUrl = new URL(`file:///${scheduleModulePath.replace(/\\/g, '/')}`).href;
 const {
@@ -48,7 +52,7 @@ describe('Calendar Scan Unit Tests', () => {
       assert.ok(diff < 1000, 'Should be within 1 second of expected');
     });
 
-    it('should use 90-day default when no lastScanAt', () => {
+    it('should use the given sinceDays default when no lastScanAt', () => {
       const now = () => new Date('2026-08-18T09:00:00Z').getTime();
       const sinceDays = 90;
 
@@ -68,8 +72,48 @@ describe('Calendar Scan Unit Tests', () => {
         now: () => new Date('2026-08-18T09:00:00Z').getTime(),
       });
 
-      // Should fall back to 90-day default
+      // Should fall back to the sinceDays default
       assert.ok(result instanceof Date, 'Should return a Date');
+    });
+
+    it('should default sinceDays to 5 when omitted, so a first scan only fetches recent mail', () => {
+      const now = () => new Date('2026-08-18T09:00:00Z').getTime();
+
+      assert.equal(DEFAULT_SINCE_DAYS, 5, 'gmail.mjs default lookback must be 5 days');
+
+      const result = computeSince({ lastScanAt: null, now });
+      const expected = new Date(now() - 5 * 24 * 60 * 60 * 1000);
+
+      assert.ok(Math.abs(result.getTime() - expected.getTime()) < 1000, 'Should be ~5 days back by default');
+    });
+
+    it('should cap a stale lastScanAt at sinceDays back, never re-fetching further than the ceiling', () => {
+      const now = () => new Date('2026-08-18T09:00:00Z').getTime();
+      // A watermark from months ago - the connection's schedule was paused, say.
+      const lastScanAt = '2026-01-01T00:00:00Z';
+      const sinceDays = 5;
+
+      const result = computeSince({ lastScanAt, sinceDays, now });
+      const expectedCeiling = new Date(now() - sinceDays * 24 * 60 * 60 * 1000);
+
+      assert.ok(
+        Math.abs(result.getTime() - expectedCeiling.getTime()) < 1000,
+        'a stale watermark must not push the floor back past the sinceDays ceiling'
+      );
+    });
+
+    it('should still use lastScanAt (minus overlap) when it is more recent than the sinceDays ceiling', () => {
+      const now = () => new Date('2026-08-18T09:00:00Z').getTime();
+      const lastScanAt = '2026-08-17T09:00:00Z'; // yesterday - well inside the 5-day ceiling
+      const sinceDays = 5;
+
+      const result = computeSince({ lastScanAt, sinceDays, now });
+      const expected = new Date(Date.parse(lastScanAt) - WATERMARK_OVERLAP_DAYS * 24 * 60 * 60 * 1000);
+
+      assert.ok(
+        Math.abs(result.getTime() - expected.getTime()) < 1000,
+        'a recent watermark should still be used as-is (with its overlap), not overridden by the ceiling'
+      );
     });
   });
 
@@ -592,6 +636,10 @@ describe('Calendar Scan Unit Tests', () => {
           { userId: 'google#123' },
           {
             env: process.env,
+            // Fixed and close to lastScanAt/newestReceivedAt above, so the
+            // computeSince ceiling (now - sinceDays) never overrides the
+            // lastScanAt-derived floor this test means to exercise.
+            now: () => new Date('2026-08-18T12:00:00Z').getTime(),
             getConnection: async () => ({
               searchDomains: new Set(['school.edu']),
               lastScanAt,

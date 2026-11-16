@@ -623,17 +623,19 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
   describe('AC 11: computeSince runs once and the same floor is every job\'s after: value', () => {
     it('Given three jobs, When a scan runs, Then every fetch gets the identical since instance', async () => {
       const now = () => Date.parse('2026-06-02T00:00:00.000Z');
+      // 3 days before "now", well inside the 5-day sinceDays ceiling.
+      const lastScanAt = '2026-05-30T00:00:00.000Z';
       const { calls } = await runScanWith({
         jobs: [makeJob('job-a'), makeJob('job-b'), makeJob('job-c')],
-        lastScanAt: '2026-05-21T00:00:00.000Z',
+        lastScanAt,
         now,
       });
 
       assert.equal(calls.fetches.length, 3);
       const first = calls.fetches[0].since;
       for (const call of calls.fetches) assert.equal(call.since, first, 'one shared floor object, not one per job');
-      assert.equal(first.toISOString(), computeSince({ lastScanAt: '2026-05-21T00:00:00.000Z', now }).toISOString());
-      assert.equal(first.toISOString(), '2026-05-19T00:00:00.000Z');
+      assert.equal(first.toISOString(), computeSince({ lastScanAt, now }).toISOString());
+      assert.equal(first.toISOString(), '2026-05-28T00:00:00.000Z');
     });
   });
 
@@ -883,7 +885,8 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
     it('AC 18: Given ANY job\'s fetch was truncated, When the scan finishes, Then lastScanAt is pinned to the query floor', async () => {
       const { result, calls } = await runScanWith({
         jobs: [makeJob('job-a'), makeJob('job-b')],
-        lastScanAt: '2026-05-21T00:00:00.000Z',
+        // 3 days before the default "now" (2026-06-02), inside the 5-day ceiling.
+        lastScanAt: '2026-05-30T00:00:00.000Z',
         onFetch: async ({ job }) =>
           emptyFetch({
             messages: [makeMessage(`m-${job.id}`)],
@@ -896,7 +899,7 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
 
       assert.equal(result.truncated, true);
       assert.equal(result.status, SCAN_STATUS.PARTIAL);
-      assert.equal(calls.patches[0].lastScanAt, '2026-05-19T00:00:00.000Z');
+      assert.equal(calls.patches[0].lastScanAt, '2026-05-28T00:00:00.000Z');
       assert.equal(result.jobs[0].truncated, true);
       assert.equal(result.jobs[1].truncated, false);
     });
@@ -904,7 +907,8 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
     it('AC 18: Given one job\'s fetch failed, When the scan finishes, Then lastScanAt is pinned to the query floor', async () => {
       const { calls } = await runScanWith({
         jobs: [makeJob('job-a'), makeJob('job-b')],
-        lastScanAt: '2026-05-21T00:00:00.000Z',
+        // 3 days before the default "now" (2026-06-02), inside the 5-day ceiling.
+        lastScanAt: '2026-05-30T00:00:00.000Z',
         onFetch: async ({ job }) => {
           if (job.id === 'job-a') throw new Error('Gmail 500');
           return emptyFetch({ messages: [makeMessage('m1')], newestReceivedAt: '2026-06-01T00:00:00.000Z' });
@@ -913,7 +917,7 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
         onStore: async () => ({ written: 1, skipped: [] }),
       });
 
-      assert.equal(calls.patches[0].lastScanAt, '2026-05-19T00:00:00.000Z');
+      assert.equal(calls.patches[0].lastScanAt, '2026-05-28T00:00:00.000Z');
     });
   });
 
@@ -926,7 +930,8 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
 
       const { result, calls } = await runScanWith({
         jobs: [makeJob('job-a'), makeJob('job-b'), makeJob('job-c')],
-        lastScanAt: '2026-05-21T00:00:00.000Z',
+        // 3 days before START (2026-06-02), inside the 5-day sinceDays ceiling.
+        lastScanAt: '2026-05-30T00:00:00.000Z',
         now,
         // 60s of runway - 30s safety margin = a 30s budget.
         getRemainingTimeInMillis: () => 60_000,
@@ -953,7 +958,7 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
       );
       assert.equal(result.truncated, true);
       assert.equal(result.status, SCAN_STATUS.PARTIAL);
-      assert.equal(calls.patches[0].lastScanAt, '2026-05-19T00:00:00.000Z', 'pinned, not advanced');
+      assert.equal(calls.patches[0].lastScanAt, '2026-05-28T00:00:00.000Z', 'pinned, not advanced');
       assert.equal(calls.stores.length, 2, 'job-b\'s already-extracted events are still persisted');
       assert.equal(calls.unlocks, 1);
     });
@@ -971,6 +976,7 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
       assert.equal(calls.patches.length, 1, 'one patch per RUN, not per job');
       assert.deepEqual(calls.patches[0], {
         lastScanAt: '2026-06-01T00:00:00.000Z',
+        scanFrom: Symbol.for('calendar.connections.REMOVE_ATTRIBUTE'),
         lastScanStatus: SCAN_STATUS.OK,
         lastScanError: '',
         lastScanMessagesScanned: 4,
@@ -1155,12 +1161,14 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
     });
   });
 
-  describe('AC 27 / AC 37 / AC 44: deriveEventId is unchanged by this ticket', () => {
+  describe('AC 27 / AC 37 / AC 44: deriveEventId is unaffected by attribution or source message', () => {
     it('Given fixed inputs, When the id is derived, Then it is the pinned sha256 digest', () => {
       const id = deriveEventId({ sourceMessageId: 'm1', title: 'Year 4 Excursion', startsAt: '2026-06-10T00:00:00.000Z' });
 
-      assert.equal(id, 'c28189d0f74204244d1cf91d4a425d5b2d03895fb506d05f8e47e048ec5522c0');
-      assert.equal(id, createHash('sha256').update('m1|year 4 excursion|2026-06-10T00:00:00.000Z', 'utf8').digest('hex'));
+      assert.equal(id, '4fd041da6c5911fcb6eede2ec1bbbad0fd35702d533baf41e39ff53694a195c6');
+      assert.equal(id, createHash('sha256').update('year 4 excursion|2026-06-10T00:00:00.000Z', 'utf8').digest('hex'));
+      // sourceMessageId is deliberately not hashed in - see events.mjs.
+      assert.equal(id, deriveEventId({ sourceMessageId: 'a-completely-different-message', title: 'Year 4 Excursion', startsAt: '2026-06-10T00:00:00.000Z' }));
     });
 
     it('Given a processingJobId is supplied or not, When items are built, Then the eventId is identical', () => {
@@ -1170,7 +1178,7 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
 
       assert.equal(a.eventId, b.eventId, 'two jobs extracting the same event derive the SAME eventId');
       assert.equal(a.eventId, none.eventId);
-      assert.equal(a.eventId, 'c28189d0f74204244d1cf91d4a425d5b2d03895fb506d05f8e47e048ec5522c0');
+      assert.equal(a.eventId, '4fd041da6c5911fcb6eede2ec1bbbad0fd35702d533baf41e39ff53694a195c6');
     });
 
     it('Given the same job is renamed, When the item is rebuilt, Then attribution is by the stable id, not the name', () => {
@@ -1308,9 +1316,9 @@ describe('TASK-056 unit: per-job Gmail search and event attribution', () => {
   });
 
   describe('AC 31: processingJobId reaches the browser on the public projection', () => {
-    it('Given PUBLIC_EVENT_FIELDS, When it is inspected, Then processingJobId is allowed and Gmail handles still are not', () => {
+    it('Given PUBLIC_EVENT_FIELDS, When it is inspected, Then processingJobId is allowed and internal fields still are not', () => {
       assert.ok(PUBLIC_EVENT_FIELDS.includes('processingJobId'));
-      for (const banned of ['sourceMessageId', 'attentionKey', 'ttl', 'userId']) {
+      for (const banned of ['attentionKey', 'ttl', 'userId']) {
         assert.ok(!PUBLIC_EVENT_FIELDS.includes(banned), `${banned} must stay off the public projection`);
       }
     });

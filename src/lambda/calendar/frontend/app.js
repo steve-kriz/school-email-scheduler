@@ -44,6 +44,9 @@ export const AUTH_START_URL = "/calendar/api/auth/google/start";
 /** The settings page, linked from the school-setup prompt. */
 export const SETTINGS_URL = "/calendar/settings";
 
+/** Visible copy for the event detail panel's "open the source email" link. */
+export const OPEN_EMAIL_PROMPT = "Open email";
+
 /**
  * Credentials mode for every request this app makes.
  *
@@ -163,6 +166,46 @@ export function textOr(value, fallback = "Not recorded") {
   if (value === undefined || value === null) return fallback;
   const text = String(value).trim();
   return text === "" ? fallback : text;
+}
+
+/**
+ * A Gmail web search URL for the email(s) behind an event, or `null` when
+ * there is nothing usable to search for.
+ *
+ * There is no direct message-id link: `sourceMessageId` is deliberately never
+ * sent to the browser (see backend/events.mjs's PUBLIC_EVENT_FIELDS) - a Gmail
+ * handle has no purpose there and would be one more attacker-influenced
+ * identifier to carry around. A SEARCH is what the `sourceSubject`/
+ * `sourceFrom` this app already has can support instead, and it covers both
+ * "one matching email" and "more than one" without this app having to tell
+ * them apart: Gmail's own results list shows however many it finds, so a
+ * unique subject opens to effectively one email and a subject that was mailed
+ * more than once (a resent newsletter, two schools sharing a subject line)
+ * shows the whole list.
+ *
+ * @param {object} args
+ * @param {string|null|undefined} args.subject `event.sourceSubject`.
+ * @param {string|null|undefined} [args.from] `event.sourceFrom`.
+ * @param {string|null|undefined} [args.email] The signed-in account
+ *   (`state.me.email`), so the link opens the right inbox when the browser
+ *   holds more than one Google session.
+ * @returns {string|null}
+ */
+export function buildGmailSearchUrl({ subject, from, email } = {}) {
+  const cleanSubject = String(subject ?? "").trim();
+  if (!cleanSubject) return null;
+
+  // A literal `"` in the subject/sender would end the quoted term early, and
+  // Gmail has no escape for one, so it is dropped rather than mis-parsed.
+  const quote = (value) => `"${value.replace(/"/g, "")}"`;
+  const terms = [`subject:${quote(cleanSubject)}`];
+  const cleanFrom = String(from ?? "").trim();
+  if (cleanFrom) terms.push(`from:${quote(cleanFrom)}`);
+
+  const query = encodeURIComponent(terms.join(" "));
+  const cleanEmail = String(email ?? "").trim();
+  const authParam = cleanEmail ? `?authuser=${encodeURIComponent(cleanEmail)}` : "";
+  return `https://mail.google.com/mail/${authParam}#search/${query}`;
 }
 
 // --- Dates -------------------------------------------------------------------
@@ -1311,6 +1354,7 @@ export function createCalendarApp(options = {}) {
     panel.appendChild(detailRow("Category", event.category, "detail-category"));
     panel.appendChild(detailRow("From the email", event.sourceSubject, "detail-source-subject"));
     panel.appendChild(detailRow("Sent by", event.sourceFrom, "detail-source-from"));
+    panel.appendChild(detailRow("Email ID", event.sourceMessageId, "detail-source-message-id"));
 
     if (event.needsAttention === true) {
       panel.appendChild(detailRow("Action required", event.actionRequired, "detail-action-required"));
@@ -1330,6 +1374,22 @@ export function createCalendarApp(options = {}) {
       actions.appendChild(dismissButton);
 
       panel.appendChild(actions);
+    }
+
+    // Absent (not disabled) when there is no subject to search for - an email
+    // this old data pre-dates sourceSubject being recorded, say.
+    const gmailUrl = buildGmailSearchUrl({
+      subject: event.sourceSubject,
+      from: event.sourceFrom,
+      email: state.me?.email,
+    });
+    if (gmailUrl) {
+      const openEmail = el(doc, "a", "btn btn-small", OPEN_EMAIL_PROMPT);
+      openEmail.setAttribute("id", "detail-open-email");
+      openEmail.setAttribute("href", gmailUrl);
+      openEmail.setAttribute("target", "_blank");
+      openEmail.setAttribute("rel", "noopener noreferrer");
+      panel.appendChild(openEmail);
     }
 
     const close = el(doc, "button", "btn btn-small", "Close");

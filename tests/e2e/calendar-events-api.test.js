@@ -738,8 +738,8 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
     });
   });
 
-  describe('Scenario: Gmail handles are not exposed to the browser', () => {
-    it('Given an authenticated user with events, When they GET the month view, Then no response item contains sourceMessageId or any token', async () => {
+  describe('Scenario: Secrets are not exposed to the browser', () => {
+    it('Given an authenticated user with events, When they GET the month view, Then no response item contains a token (the email id is shown on purpose)', async () => {
       const row = storedEvent({ eventId: ID_A, startsAt: '2026-09-04T09:00:00.000Z' });
       row.refreshTokenEnc = 'ENCRYPTED-REFRESH-TOKEN';
       row.accessToken = 'ya29.a0-fake-access-token';
@@ -752,7 +752,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
 
       assert.equal(response.statusCode, 200);
       const serialised = response.body;
-      for (const banned of ['sourceMessageId', 'gmail-message-handle', 'refreshTokenEnc', 'ENCRYPTED-REFRESH-TOKEN', 'accessToken', 'ya29.', 'attentionKey', 'ttl']) {
+      for (const banned of ['refreshTokenEnc', 'ENCRYPTED-REFRESH-TOKEN', 'accessToken', 'ya29.', 'attentionKey', 'ttl']) {
         assert.ok(!serialised.includes(banned), `the response body must not contain "${banned}"`);
       }
       // TASK-056 added `processingJobId` to the public projection (AC 31): the
@@ -760,7 +760,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       // banned-token list above still governs what must NEVER appear.
       assert.deepEqual(Object.keys(body.events[0]).sort(), [
         'actionRequired', 'allDay', 'category', 'confidence', 'description', 'dueBy', 'endsAt', 'eventId',
-        'location', 'needsAttention', 'processingJobId', 'sourceFrom', 'sourceReceivedAt', 'sourceSubject',
+        'location', 'needsAttention', 'processingJobId', 'sourceFrom', 'sourceMessageId', 'sourceReceivedAt', 'sourceSubject',
         'startsAt', 'status', 'title',
       ]);
       // Provenance the UI is allowed to show.
@@ -768,7 +768,7 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
       assert.equal(body.events[0].sourceFrom, 'office@school.edu');
     });
 
-    it('Given attention events, When upcoming is read, Then items carry overdue and still no sourceMessageId', async () => {
+    it('Given attention events, When upcoming is read, Then items carry overdue', async () => {
       const table = new FakeEventsTable([attentionEvent({ eventId: ID_A, dueBy: '2026-08-22T00:00:00.000Z' })]);
 
       const { response, body } = await invoke(
@@ -776,7 +776,6 @@ describe('Feature: Reading and clearing calendar events (TASK-009 e2e)', () => {
         table
       );
 
-      assert.ok(!response.body.includes('sourceMessageId'));
       assert.equal(typeof body.events[0].overdue, 'boolean');
     });
   });

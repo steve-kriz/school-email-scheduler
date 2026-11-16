@@ -485,7 +485,15 @@ describe('TASK-010 unit: what the browser is actually sent', () => {
 
   it('depends on no external origin - no CDN script, no remote stylesheet, no web font', () => {
     for (const { name, source } of served) {
-      assert.equal(/https?:\/\/(?!www\.w3\.org)/.test(source), false, `${name} references an absolute external URL`);
+      // mail.google.com is the one deliberate exception: app.js's "Open email"
+      // link is an outbound <a href> the user clicks to leave the app, never a
+      // resource this page loads (script/stylesheet/font) - the risk this guard
+      // exists for. See buildGmailSearchUrl.
+      assert.equal(
+        /https?:\/\/(?!www\.w3\.org|mail\.google\.com)/.test(source),
+        false,
+        `${name} references an absolute external URL`
+      );
       assert.equal(/\/\/cdn\./.test(source), false, `${name} references a CDN`);
     }
     const css = served.find((file) => file.name === 'styles.css').source;
@@ -999,6 +1007,49 @@ describe('TASK-010 unit: DOM helpers escape by construction', () => {
     assert.equal(app.textOr('', 'nothing here'), 'nothing here');
     assert.equal(app.textOr(' Term 3 Newsletter '), 'Term 3 Newsletter');
     assert.equal(app.textOr(0), '0');
+  });
+});
+
+describe('buildGmailSearchUrl: the event detail panel\'s "Open email" link', () => {
+  it('builds a subject-only search when there is no sender', () => {
+    const url = app.buildGmailSearchUrl({ subject: 'Term 3 Newsletter' });
+    assert.equal(url, 'https://mail.google.com/mail/#search/subject%3A%22Term%203%20Newsletter%22');
+  });
+
+  it('ORs in the sender when one is given', () => {
+    const url = app.buildGmailSearchUrl({ subject: 'Term 3 Newsletter', from: 'office@school.edu.au' });
+    assert.equal(
+      url,
+      'https://mail.google.com/mail/#search/subject%3A%22Term%203%20Newsletter%22%20from%3A%22office%40school.edu.au%22'
+    );
+  });
+
+  it('scopes the link to the signed-in account with authuser', () => {
+    const url = app.buildGmailSearchUrl({ subject: 'Term 3 Newsletter', email: 'parent@example.test' });
+    assert.match(url, /^https:\/\/mail\.google\.com\/mail\/\?authuser=parent%40example\.test#search\//);
+  });
+
+  it('returns null when there is no subject to search for', () => {
+    assert.equal(app.buildGmailSearchUrl({}), null);
+    assert.equal(app.buildGmailSearchUrl({ subject: '' }), null);
+    assert.equal(app.buildGmailSearchUrl({ subject: '   ' }), null);
+    assert.equal(app.buildGmailSearchUrl(), null);
+  });
+
+  it('drops a literal quote instead of letting it end the quoted term early', () => {
+    const url = app.buildGmailSearchUrl({ subject: 'Say "hi"' });
+    assert.match(url, /subject%3A%22Say%20hi%22/);
+  });
+
+  it('never lets subject/sender content change the URL\'s origin or scheme', () => {
+    const url = app.buildGmailSearchUrl({
+      subject: '<iframe src=javascript:alert(1)>',
+      from: '"><img src=x onerror=alert(2)>',
+    });
+    assert.match(url, /^https:\/\/mail\.google\.com\/mail\//);
+    assert.equal(url.includes('<'), false);
+    assert.equal(url.includes('>'), false);
+    assert.equal(/javascript:/i.test(url), false);
   });
 });
 
